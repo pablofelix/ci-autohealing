@@ -1,0 +1,1129 @@
+#!/bin/bash
+
+# IC (Infrastructure/CI) Command Line Tool
+# kubectl-style interface for CI Auto-Healing system
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load configuration
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
+NAMESPACE="${NAMESPACE:-NAMESPACE_PLACEHOLDER}"
+APPLICATION_NAME="${APPLICATION_NAME:-acme-v2-0}"
+export PGPASSWORD="admin"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Helper functions
+sql() {
+    docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -tAc "$1" 2>/dev/null
+}
+
+sql_table() {
+    docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -c "$1" 2>/dev/null | grep -v "Emulate Docker"
+}
+
+# Show usage
+usage() {
+    cat << EOF
+${BOLD}IC - Infrastructure/CI Build Monitoring Tool${NC}
+${CYAN}kubectl-style interface for Konflux CI/CD monitoring${NC}
+
+${BOLD}USAGE:${NC}
+    ic get <resource> [name] [options]
+    ic describe <resource> <name>
+    ic <number>                              Shortcut: describe Nth component
+
+${BOLD}RESOURCES:${NC}
+
+  ${CYAN}components${NC}           Components with build failures
+  ${CYAN}pipelineruns, pr${NC}     PipelineRun failures
+  ${CYAN}failures${NC}             Build failures (alias for pipelineruns)
+  ${CYAN}apps${NC}                 Available applications (versions)
+
+${BOLD}COMMANDS:${NC}
+
+  ${CYAN}get <resource>${NC}
+    ic get components                        List all failing components
+    ic get component <name>                  Get component summary
+    ic get pipelineruns [--limit N]          List all PipelineRun failures
+    ic get pipelinerun <name>                Get PipelineRun details
+    ic get pr <name>                         Alias for pipelinerun
+    ic get apps                              List available RHOAI applications
+    ic get failures [--limit N]              List recent failures
+
+  ${CYAN}describe <resource> <name>${NC}
+    ic describe component <name>             Full component details + logs
+    ic describe pipelinerun <name>           Full PipelineRun details + logs
+    ic describe pr <name>                    Alias for pipelinerun
+
+  ${CYAN}Quick shortcuts:${NC}
+    ic <1-N>                                 Describe Nth failing component
+                                             (e.g., "ic 1" for component #1)
+
+  ${CYAN}Configuration:${NC}
+    ic config                                Show current configuration
+    ic config set-app <app-name>             Set application version
+    ic apps                                  Alias for 'ic get apps'
+    ic versions                              Alias for 'ic get apps'
+
+  ${CYAN}Statistics:${NC}
+    ic stats                                 Overall statistics
+    ic stats daily                           Failures by day
+    ic stats resolved                        Resolved failures statistics
+    ic stats components                      Failures by component
+
+  ${CYAN}Triage & Analysis:${NC}
+    ic triage                                Currently failing components (last build = failed)
+    ic why <component>                       Why is this component failing?
+    ic analyze <component>                   Deep failure analysis
+    ic errors <component>                    Extract error messages
+
+  ${CYAN}Component Status:${NC}
+    ic working                               Components currently working (last build = success)
+    ic resolved                              Components that were resolved
+    ic history <component>                   Full build history (successes + failures)
+
+  ${CYAN}Database:${NC}
+    ic db status                             Check database connection
+    ic db query "<sql>"                      Execute custom SQL query
+
+${BOLD}EXAMPLES:${NC}
+
+  ${CYAN}Basic workflow:${NC}
+    ic get components                        # List all failing components
+    ic 1                                     # Describe component #1
+    ic describe component odh-spark-v3-4     # Full details for specific component
+
+  ${CYAN}PipelineRun investigation:${NC}
+    ic get pipelineruns --limit 10           # List 10 recent failures
+    ic get pr odh-feature-server-v3-4-abc123 # Get PR summary
+    ic describe pr odh-feature-server-v3-4-abc123  # Full details + logs
+
+  ${CYAN}Version management:${NC}
+    ic get apps                              # List RHOAI versions
+    ic config set-app rhoai-v3-3             # Switch to v3.3
+    ic get components                        # Now shows v3.3 data
+
+  ${CYAN}Statistics:${NC}
+    ic stats                                 # Overall stats
+    ic stats daily                           # Failures by day
+    ic db query "SELECT component_name, COUNT(*) FROM build_failures GROUP BY component_name"
+
+  ${CYAN}Triage workflow:${NC}
+    ic triage                                # Overview of what's ready to triage
+    ic why odh-spark-operator-v3-4           # Why is it failing?
+    ic analyze odh-spark-operator-v3-4       # Deep analysis with timeline
+    ic errors odh-spark-operator-v3-4        # Extract just the errors
+
+${BOLD}BACKWARD COMPATIBILITY:${NC}
+
+  Old commands still work:
+    ic build status      → ic get components
+    ic component list    → ic get components
+    ic component show    → ic describe component
+    ic build get         → ic get pipelinerun
+    ic build logs        → ic describe pipelinerun
+
+EOF
+    exit 0
+}
+
+# GET commands
+cmd_get_components() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Failing Components${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local total=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures;")
+    local with_logs=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures WHERE build_logs IS NOT NULL;")
+    local total_failures=$(sql "SELECT COUNT(*) FROM build_failures;")
+
+    echo -e "${BOLD}Summary:${NC}"
+    echo -e "  Components: ${total}"
+    echo -e "  Total failures: ${total_failures}"
+    echo -e "  With logs: ${with_logs} / ${total}"
+    echo ""
+
+    sql_table "
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) as \"#\",
+        component_name as \"Component\",
+        COUNT(*) as \"Failures\",
+        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"Logs\"
+    FROM build_failures
+    GROUP BY component_name
+    ORDER BY COUNT(*) DESC;
+    "
+    echo ""
+}
+
+cmd_get_component() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic get component <name>"
+        exit 1
+    fi
+
+    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
+    if [ "$total" = "0" ]; then
+        echo -e "${RED}Error: Component not found: $component${NC}"
+        exit 1
+    fi
+
+    echo -e "${BOLD}Component: ${CYAN}$component${NC}"
+    echo ""
+    echo -e "${BOLD}Summary:${NC}"
+    echo "  Total failures: $total"
+    echo "  With logs: $(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")"
+    echo "  First seen: $(sql "SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '$component';")"
+    echo "  Last seen: $(sql "SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '$component';")"
+    echo ""
+    echo -e "${CYAN}For full details with logs:${NC} ic describe component $component"
+    echo ""
+}
+
+cmd_get_pipelineruns() {
+    local limit="${1:-20}"
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Recent PipelineRun Failures${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    sql_table "
+    SELECT
+        pipelinerun_name as \"PipelineRun\",
+        component_name as \"Component\",
+        status as \"Status\",
+        CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END as \"Logs\",
+        first_detected_at as \"Detected\"
+    FROM build_failures
+    ORDER BY first_detected_at DESC
+    LIMIT $limit;
+    "
+    echo ""
+}
+
+cmd_get_pipelinerun() {
+    local pr_name="$1"
+    if [ -z "$pr_name" ]; then
+        echo -e "${RED}Error: PipelineRun name required${NC}"
+        echo "Usage: ic get pipelinerun <name>"
+        exit 1
+    fi
+
+    local data=$(sql "SELECT component_name, status, CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: PipelineRun not found: $pr_name${NC}"
+        exit 1
+    fi
+
+    IFS='|' read -r component status has_logs <<< "$data"
+
+    echo -e "${BOLD}PipelineRun: ${CYAN}$pr_name${NC}"
+    echo ""
+    echo "  Component: $component"
+    echo "  Status: $status"
+    echo "  Has logs: $has_logs"
+    echo ""
+    echo -e "${CYAN}For full details with logs:${NC} ic describe pipelinerun $pr_name"
+    echo ""
+}
+
+cmd_get_apps() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Available RHOAI Applications${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "rhoai-v" | sort -V)
+
+    if [ -z "$apps" ]; then
+        echo -e "${YELLOW}No RHOAI applications found${NC}"
+        exit 1
+    fi
+
+    local current="$APPLICATION_NAME"
+    local count=0
+
+    while IFS= read -r app; do
+        count=$((count + 1))
+        if [ "$app" = "$current" ]; then
+            echo -e "  ${GREEN}✓ ${BOLD}$app${NC} ${CYAN}(current)${NC}"
+        else
+            echo -e "    $app"
+        fi
+    done <<< "$apps"
+
+    echo ""
+    echo "Total: $count applications"
+    echo ""
+    echo -e "${CYAN}Switch:${NC} ic config set-app <app-name>"
+    echo ""
+}
+
+# DESCRIBE commands
+cmd_describe_component() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic describe component <name>"
+        exit 1
+    fi
+
+    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
+    if [ "$total" = "0" ]; then
+        echo -e "${RED}Error: Component not found: $component${NC}"
+        exit 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Component: $component${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Summary
+    local with_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")
+    local first_failure=$(sql "SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '$component';")
+    local latest_failure=$(sql "SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '$component';")
+
+    echo -e "${BOLD}Summary:${NC}"
+    echo "  Total Failures: $total"
+    echo "  Failures with Logs: $with_logs / $total"
+    echo "  First Failure: $first_failure"
+    echo "  Latest Failure: $latest_failure"
+    echo ""
+
+    # Get latest PipelineRun
+    local pr_data=$(sql "
+        SELECT pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
+               CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
+               konflux_logs_url
+        FROM build_failures
+        WHERE component_name = '$component'
+        ORDER BY first_detected_at DESC
+        LIMIT 1;
+    ")
+
+    if [ -n "$pr_data" ]; then
+        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url <<< "$pr_data"
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Latest PipelineRun${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        echo -e "${BOLD}PipelineRun:${NC} $pr_name"
+        echo -e "${BOLD}UID:${NC} $pr_uid"
+        echo -e "${BOLD}Status:${NC} $status"
+        echo -e "${BOLD}Repository:${NC} $repo_url"
+        echo -e "${BOLD}Branch:${NC} $branch"
+        echo -e "${BOLD}Has Logs:${NC} $has_logs"
+        echo ""
+        echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
+        echo ""
+
+        # Show logs if available
+        if [ "$has_logs" = "Yes" ]; then
+            local logs=$(sql "SELECT build_logs FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
+            echo -e "${BOLD}========================================${NC}"
+            echo -e "${BOLD}Build Logs${NC}"
+            echo -e "${BOLD}========================================${NC}"
+            echo ""
+            echo "$logs"
+            echo ""
+        fi
+    fi
+}
+
+cmd_describe_pipelinerun() {
+    local pr_name="$1"
+    if [ -z "$pr_name" ]; then
+        echo -e "${RED}Error: PipelineRun name required${NC}"
+        echo "Usage: ic describe pipelinerun <name>"
+        exit 1
+    fi
+
+    local data=$(sql "
+        SELECT component_name, pipelinerun_uid, status, repository_url, branch,
+               CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
+               konflux_logs_url, build_logs
+        FROM build_failures
+        WHERE pipelinerun_name = '$pr_name'
+        LIMIT 1;
+    ")
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: PipelineRun not found: $pr_name${NC}"
+        exit 1
+    fi
+
+    IFS='|' read -r component uid status repo_url branch has_logs konflux_url logs <<< "$data"
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}PipelineRun: $pr_name${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${BOLD}Component:${NC} $component"
+    echo -e "${BOLD}UID:${NC} $uid"
+    echo -e "${BOLD}Status:${NC} $status"
+    echo -e "${BOLD}Repository:${NC} $repo_url"
+    echo -e "${BOLD}Branch:${NC} $branch"
+    echo -e "${BOLD}Has Logs:${NC} $has_logs"
+    echo ""
+    echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
+    echo ""
+
+    if [ "$has_logs" = "Yes" ]; then
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Build Logs${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        echo "$logs"
+        echo ""
+    fi
+}
+
+# Number shortcut
+cmd_describe_by_number() {
+    local number="$1"
+    local total=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures;")
+
+    if [[ "$number" -gt "$total" ]]; then
+        echo -e "${RED}Error: Component #$number does not exist${NC}"
+        echo "Only $total components are failing."
+        exit 1
+    fi
+
+    local component=$(sql "
+        SELECT component_name
+        FROM build_failures
+        GROUP BY component_name
+        ORDER BY COUNT(*) DESC
+        OFFSET $((number - 1))
+        LIMIT 1;
+    ")
+
+    echo -e "${CYAN}Component #$number of $total${NC}"
+    echo ""
+    cmd_describe_component "$component"
+}
+
+# Config commands
+cmd_config_show() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Current Configuration${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${BOLD}Environment:${NC}"
+    echo "  Namespace: ${CYAN}${NAMESPACE}${NC}"
+    echo "  Application: ${CYAN}${APPLICATION_NAME}${NC}"
+    echo "  Config: $SCRIPT_DIR/.env"
+    echo ""
+    echo -e "${BOLD}Database:${NC}"
+    echo "  Failures: $(sql 'SELECT COUNT(*) FROM build_failures;')"
+    echo "  Components: $(sql 'SELECT COUNT(DISTINCT component_name) FROM build_failures;')"
+    echo ""
+    echo -e "${CYAN}Commands:${NC}"
+    echo "  ic config set-app <app>  # Change application"
+    echo "  ic get apps              # List applications"
+    echo ""
+}
+
+cmd_config_set_app() {
+    local new_app="$1"
+
+    if [ -z "$new_app" ]; then
+        echo -e "${RED}Error: Application name required${NC}"
+        echo "Usage: ic config set-app <app-name>"
+        echo ""
+        cmd_get_apps
+        exit 1
+    fi
+
+    if ! oc get application "$new_app" -n "$NAMESPACE" &>/dev/null; then
+        echo -e "${RED}Error: Application '$new_app' not found${NC}"
+        echo ""
+        cmd_get_apps
+        exit 1
+    fi
+
+    local env_file="$SCRIPT_DIR/.env"
+    if grep -q "^APPLICATION_NAME=" "$env_file" 2>/dev/null; then
+        sed -i "s/^APPLICATION_NAME=.*/APPLICATION_NAME=$new_app/" "$env_file"
+    else
+        echo "APPLICATION_NAME=$new_app" >> "$env_file"
+    fi
+
+    echo -e "${GREEN}✓ Application set to: ${CYAN}${new_app}${NC}"
+    echo ""
+    echo "Reload config with: source .env"
+    echo ""
+}
+
+# Stats commands
+cmd_stats() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Statistics${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    sql_table "
+    SELECT
+        COUNT(*) as \"Total Failures\",
+        COUNT(DISTINCT component_name) as \"Components\",
+        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"With Logs\"
+    FROM build_failures;
+    "
+    echo ""
+}
+
+cmd_stats_daily() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Failures by Day${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    sql_table "
+    SELECT
+        DATE(first_detected_at) as \"Date\",
+        COUNT(*) as \"Failures\"
+    FROM build_failures
+    GROUP BY DATE(first_detected_at)
+    ORDER BY DATE(first_detected_at) DESC
+    LIMIT 7;
+    "
+    echo ""
+}
+
+cmd_stats_resolved() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Resolved Failures Statistics${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    sql_table "
+    SELECT
+        COUNT(*) as \"Total Records\",
+        SUM(CASE WHEN is_resolved = TRUE THEN 1 ELSE 0 END) as \"Resolved\",
+        SUM(CASE WHEN is_resolved = FALSE THEN 1 ELSE 0 END) as \"Unresolved\",
+        SUM(CASE WHEN status = 'Succeeded' THEN 1 ELSE 0 END) as \"Successes\"
+    FROM build_failures
+    WHERE application = '$APPLICATION_NAME';
+    "
+    echo ""
+}
+
+# Resolved components commands
+cmd_resolved() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Resolved Components${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    sql_table "
+    SELECT DISTINCT
+        component_name as \"Component\",
+        MAX(resolved_at) as \"Resolved At\",
+        COUNT(*) as \"Failures Fixed\"
+    FROM build_failures
+    WHERE is_resolved = TRUE
+      AND application = '$APPLICATION_NAME'
+    GROUP BY component_name
+    ORDER BY MAX(resolved_at) DESC;
+    "
+    echo ""
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic history <component>' to see full history"
+    echo ""
+}
+
+# Component history command
+cmd_history() {
+    local component_name="$1"
+
+    if [ -z "$component_name" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic history <component-name>"
+        exit 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}History: $component_name${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Summary
+    sql_table "
+    SELECT
+        COUNT(*) as \"Total Builds\",
+        SUM(CASE WHEN status = 'Failed' THEN 1 ELSE 0 END) as \"Failures\",
+        SUM(CASE WHEN status = 'Succeeded' THEN 1 ELSE 0 END) as \"Successes\",
+        SUM(CASE WHEN is_resolved = TRUE THEN 1 ELSE 0 END) as \"Resolved\"
+    FROM build_failures
+    WHERE component_name = '$component_name'
+      AND application = '$APPLICATION_NAME';
+    "
+    echo ""
+
+    echo -e "${BOLD}Recent Builds (Last 20):${NC}"
+    echo ""
+
+    sql_table "
+    SELECT
+        pipelinerun_name as \"PipelineRun\",
+        status as \"Status\",
+        CASE WHEN is_resolved THEN '✓' ELSE '' END as \"Resolved\",
+        LEFT(commit_short_sha, 8) as \"Commit\",
+        first_detected_at as \"Date\"
+    FROM build_failures
+    WHERE component_name = '$component_name'
+      AND application = '$APPLICATION_NAME'
+    ORDER BY first_detected_at DESC
+    LIMIT 20;
+    "
+    echo ""
+
+    # Show current status (based on last build)
+    local last_status=$(sql "
+        SELECT status
+        FROM build_failures
+        WHERE component_name = '$component_name'
+          AND application = '$APPLICATION_NAME'
+        ORDER BY first_detected_at DESC
+        LIMIT 1;
+    ")
+
+    if [[ "$last_status" == "Failed" ]]; then
+        echo -e "${RED}✗ Currently failing${NC} (last build: Failed)"
+        echo -e "  Run: ${CYAN}ic why $component_name${NC} to investigate"
+    elif [[ "$last_status" == "Succeeded" ]]; then
+        echo -e "${GREEN}✓ Currently working${NC} (last build: Succeeded)"
+    else
+        echo -e "${YELLOW}? Status unknown${NC} (last build: $last_status)"
+    fi
+    echo ""
+}
+
+# Currently working components
+cmd_working() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Currently Working Components${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    echo -e "${BOLD}${GREEN}Components with last build = Succeeded:${NC}"
+    sql_table "
+    WITH latest_builds AS (
+        SELECT DISTINCT ON (component_name)
+            component_name,
+            pipelinerun_name,
+            status,
+            commit_short_sha,
+            commit_message,
+            commit_url,
+            konflux_url,
+            first_detected_at
+        FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+        ORDER BY component_name, first_detected_at DESC
+    )
+    SELECT
+        component_name as \"Component\",
+        LEFT(commit_short_sha, 8) as \"Commit\",
+        LEFT(commit_message, 50) as \"Message\",
+        first_detected_at::date as \"Last Build\"
+    FROM latest_builds
+    WHERE status = 'Succeeded'
+    ORDER BY first_detected_at DESC;
+    "
+    echo ""
+
+    echo -e "${CYAN}Links:${NC}"
+    echo "  Use: ${BOLD}ic history <component>${NC} to see full build history"
+    echo "  Use: ${BOLD}ic triage${NC} to see currently failing components"
+    echo ""
+}
+
+# DB commands
+cmd_db_status() {
+    echo -e "${BOLD}Database Status${NC}"
+    echo ""
+    if docker ps | grep -q ci-autohealing-db; then
+        echo -e "${GREEN}✓ PostgreSQL container running${NC}"
+        echo ""
+        sql_table "SELECT version();"
+    else
+        echo -e "${RED}✗ PostgreSQL container not running${NC}"
+        exit 1
+    fi
+}
+
+cmd_db_query() {
+    local query="$1"
+    if [ -z "$query" ]; then
+        echo -e "${RED}Error: SQL query required${NC}"
+        exit 1
+    fi
+    sql_table "$query"
+}
+
+# TRIAGE commands - focused on understanding failures
+
+cmd_triage() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Triage Dashboard${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Get current failing components (last build = failed)
+    echo -e "${BOLD}Overview:${NC}"
+
+    # Total records vs currently failing
+    local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
+    local currently_failing=$(sql "
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name,
+                status
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed';
+    ")
+    local currently_working=$(sql "
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name,
+                status
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT COUNT(*) FROM latest_builds WHERE status = 'Succeeded';
+    ")
+
+    echo "  Total build records: $total_records"
+    echo "  Currently failing: ${RED}$currently_failing${NC}"
+    echo "  Currently working: ${GREEN}$currently_working${NC}"
+    echo ""
+
+    # Show only components that are CURRENTLY failing (last build = failed)
+    echo -e "${BOLD}${RED}Currently Failing Components:${NC}"
+    sql_table "
+    WITH latest_builds AS (
+        SELECT DISTINCT ON (component_name)
+            component_name,
+            pipelinerun_name,
+            status,
+            first_detected_at,
+            build_logs IS NOT NULL as has_logs
+        FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+        ORDER BY component_name, first_detected_at DESC
+    )
+    SELECT
+        component_name as \"Component\",
+        first_detected_at::date as \"Last Failure\",
+        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as \"Has Logs\"
+    FROM latest_builds
+    WHERE status = 'Failed'
+    ORDER BY first_detected_at DESC;
+    "
+    echo ""
+
+    echo -e "${CYAN}Next Steps:${NC}"
+    echo "  1. Pick a component from above"
+    echo "  2. Run: ${BOLD}ic why <component>${NC} to see why it's failing"
+    echo "  3. Run: ${BOLD}ic analyze <component>${NC} for deep analysis"
+    echo "  4. Use: ${BOLD}ic working${NC} to see components that are currently working"
+    echo ""
+}
+
+cmd_why() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic why <component-name>"
+        echo ""
+        echo "Example:"
+        echo "  ic why odh-spark-operator-v3-4"
+        exit 1
+    fi
+
+    # Check if component exists
+    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
+    if [ "$total" = "0" ]; then
+        echo -e "${RED}Error: Component not found: $component${NC}"
+        echo ""
+        echo "Available components:"
+        sql "SELECT DISTINCT component_name FROM build_failures ORDER BY component_name;" | head -10
+        exit 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Why is $component failing?${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Get latest PipelineRun
+    local pr_data=$(sql "
+        SELECT pipelinerun_name, repository_url, branch, first_detected_at
+        FROM build_failures
+        WHERE component_name = '$component'
+        ORDER BY first_detected_at DESC
+        LIMIT 1;
+    ")
+
+    if [ -z "$pr_data" ]; then
+        echo -e "${RED}No build failures found${NC}"
+        exit 1
+    fi
+
+    IFS='|' read -r pr_name repo_url branch detected_at <<< "$pr_data"
+
+    echo -e "${BOLD}Latest Failure:${NC}"
+    echo "  PipelineRun: ${CYAN}$pr_name${NC}"
+    echo "  Repository: $repo_url"
+    echo "  Branch: $branch"
+    echo "  Detected: $detected_at"
+    echo ""
+
+    # Get comprehensive details using Python tool
+    echo -e "${BOLD}Analyzing failure details...${NC}"
+    local details=$(python3 "$SCRIPT_DIR/collectors/python/pipelinerun_details.py" "$pr_name" 2>/dev/null)
+
+    if [ -n "$details" ]; then
+        # Extract commit info
+        local commit_sha=$(echo "$details" | jq -r '.metadata.commit_sha // "N/A"')
+        local commit_url=$(echo "$details" | jq -r '.metadata.commit_url // "N/A"')
+        local log_url=$(echo "$details" | jq -r '.metadata.log_url // "N/A"')
+        local error_summary=$(echo "$details" | jq -r '.error_summary // "No error summary available"')
+        local data_source=$(echo "$details" | jq -r '.data_source // "unknown"')
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Commit Information${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        echo "  Commit SHA: ${CYAN}${commit_sha:0:8}${NC} (${commit_sha})"
+        if [ "$commit_url" != "N/A" ] && [ "$commit_url" != "" ]; then
+            echo "  Commit URL: ${CYAN}$commit_url${NC}"
+        fi
+        echo ""
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}${RED}Failure Analysis${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        echo -e "${BOLD}Error Summary:${NC} ${RED}$error_summary${NC}"
+        echo ""
+
+        # Show failed TaskRuns
+        local failed_count=$(echo "$details" | jq '.failed_taskruns | length')
+        if [ "$failed_count" != "0" ] && [ "$failed_count" != "null" ]; then
+            echo -e "${BOLD}Failed TaskRuns:${NC}"
+            echo "$details" | jq -r '.failed_taskruns[] | "  \u001b[33m✗\u001b[0m TaskRun: \(.name)\n    Failed steps: \(.failed_steps | length) / \(.total_steps)\n    Details:\n" + (.failed_steps[] | "      - \(.name): \(.reason) (exit code: \(.exit_code))\n")'
+        fi
+        echo ""
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Resources${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        if [ "$log_url" != "N/A" ] && [ "$log_url" != "" ]; then
+            echo "  ${BOLD}View complete logs in Konflux UI:${NC}"
+            echo "  ${CYAN}$log_url${NC}"
+        fi
+        echo ""
+        echo "  Data source: $data_source"
+        echo ""
+
+    else
+        echo -e "${YELLOW}⚠ Could not fetch detailed analysis${NC}"
+        echo ""
+    fi
+
+    echo -e "${CYAN}Next Steps:${NC}"
+    echo "  1. Review Konflux UI for complete logs and details"
+    echo "  2. Check commit: ${BOLD}$commit_url${NC}"
+    echo "  3. View full details: ${BOLD}ic $component${NC} or ${BOLD}ic describe pr $pr_name${NC}"
+    echo ""
+}
+
+cmd_analyze() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic analyze <component-name>"
+        exit 1
+    fi
+
+    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
+    if [ "$total" = "0" ]; then
+        echo -e "${RED}Error: Component not found: $component${NC}"
+        exit 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Deep Analysis: $component${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Failure timeline
+    echo -e "${BOLD}Failure Timeline (last 7 days):${NC}"
+    sql_table "
+    SELECT
+        DATE(first_detected_at) as \"Date\",
+        COUNT(*) as \"Failures\",
+        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"With Logs\"
+    FROM build_failures
+    WHERE component_name = '$component'
+      AND first_detected_at > NOW() - INTERVAL '7 days'
+    GROUP BY DATE(first_detected_at)
+    ORDER BY DATE(first_detected_at) DESC;
+    "
+    echo ""
+
+    # Repository info
+    local repo_info=$(sql "
+        SELECT DISTINCT repository_url, branch
+        FROM build_failures
+        WHERE component_name = '$component'
+        LIMIT 1;
+    " | head -1)
+
+    if [ -n "$repo_info" ]; then
+        IFS='|' read -r repo branch <<< "$repo_info"
+        echo -e "${BOLD}Repository:${NC}"
+        echo "  URL: $repo"
+        echo "  Branch: $branch"
+        echo ""
+    fi
+
+    # All recent failures
+    echo -e "${BOLD}All Failures (recent):${NC}"
+    sql_table "
+    SELECT
+        pipelinerun_name as \"PipelineRun\",
+        first_detected_at::timestamp(0) as \"When\",
+        CASE
+            WHEN build_logs IS NOT NULL THEN 'Yes'
+            ELSE 'No'
+        END as \"Logs\"
+    FROM build_failures
+    WHERE component_name = '$component'
+    ORDER BY first_detected_at DESC
+    LIMIT 10;
+    "
+    echo ""
+
+    # Pattern analysis
+    local with_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")
+
+    if [ "$with_logs" != "0" ]; then
+        echo -e "${BOLD}Pattern Analysis:${NC}"
+
+        # Count resource not found
+        local resource_not_found=$(sql "
+            SELECT COUNT(*)
+            FROM build_failures
+            WHERE component_name = '$component'
+              AND build_logs LIKE '%resource not found%';
+        ")
+
+        if [ "$resource_not_found" != "0" ]; then
+            echo "  - $resource_not_found failures show 'resource not found' (logs already archived)"
+        fi
+
+        # Sample error from latest
+        local latest_error=$(sql "
+            SELECT SUBSTRING(build_logs FROM 'ERROR[^\n]*')
+            FROM build_failures
+            WHERE component_name = '$component'
+              AND build_logs IS NOT NULL
+              AND build_logs LIKE '%ERROR%'
+            ORDER BY first_detected_at DESC
+            LIMIT 1;
+        " | head -1)
+
+        if [ -n "$latest_error" ] && [ "$latest_error" != "" ]; then
+            echo "  - Sample error: $latest_error"
+        fi
+        echo ""
+    fi
+
+    echo -e "${CYAN}Recommendations:${NC}"
+    if [ "$with_logs" = "0" ]; then
+        echo "  1. ${BOLD}Fetch logs${NC} to understand failure reasons"
+        echo "     python3 collectors/python/fetch_archived_logs.py"
+    else
+        echo "  1. ${BOLD}Review error patterns${NC} above"
+        echo "  2. ${BOLD}Check latest failure${NC}: ic describe pr <pipelinerun>"
+        echo "  3. ${BOLD}Compare with Konflux UI${NC} for full pipeline view"
+    fi
+    echo ""
+}
+
+cmd_errors() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic errors <component-name>"
+        exit 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Error Extraction: $component${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Get all logs for this component
+    local logs=$(sql "
+        SELECT build_logs
+        FROM build_failures
+        WHERE component_name = '$component'
+          AND build_logs IS NOT NULL
+        ORDER BY first_detected_at DESC;
+    ")
+
+    if [ -z "$logs" ]; then
+        echo -e "${YELLOW}No logs available for this component${NC}"
+        exit 0
+    fi
+
+    # Extract unique error patterns
+    echo -e "${BOLD}Error Patterns:${NC}"
+    echo "$logs" | grep -iE "error|fail|exception" | sort | uniq -c | sort -rn | head -10
+    echo ""
+
+    echo -e "${BOLD}Exit Codes:${NC}"
+    echo "$logs" | grep -iE "exit code|exitcode" | head -5
+    echo ""
+}
+
+# Main command router
+case "${1:-}" in
+    get)
+        case "${2:-}" in
+            components|component)
+                if [ -n "$3" ]; then
+                    cmd_get_component "$3"
+                else
+                    cmd_get_components
+                fi
+                ;;
+            pipelineruns|pipelinerun|pr|failures)
+                if [ -n "$3" ]; then
+                    cmd_get_pipelinerun "$3"
+                else
+                    shift 2
+                    cmd_get_pipelineruns "$@"
+                fi
+                ;;
+            apps|applications|versions)
+                cmd_get_apps
+                ;;
+            *) usage ;;
+        esac
+        ;;
+    describe)
+        case "${2:-}" in
+            component) cmd_describe_component "$3" ;;
+            pipelinerun|pr) cmd_describe_pipelinerun "$3" ;;
+            *) usage ;;
+        esac
+        ;;
+    config)
+        case "${2:-}" in
+            set-app) cmd_config_set_app "$3" ;;
+            "") cmd_config_show ;;
+            *) usage ;;
+        esac
+        ;;
+    apps|versions)
+        cmd_get_apps
+        ;;
+    stats)
+        case "${2:-}" in
+            daily) cmd_stats_daily ;;
+            resolved) cmd_stats_resolved ;;
+            components) cmd_get_components ;;
+            "") cmd_stats ;;
+            *) usage ;;
+        esac
+        ;;
+    triage)
+        cmd_triage
+        ;;
+    why)
+        cmd_why "$2"
+        ;;
+    analyze)
+        cmd_analyze "$2"
+        ;;
+    errors)
+        cmd_errors "$2"
+        ;;
+    resolved)
+        cmd_resolved
+        ;;
+    working)
+        cmd_working
+        ;;
+    history)
+        cmd_history "$2"
+        ;;
+    db)
+        case "${2:-}" in
+            status) cmd_db_status ;;
+            query) cmd_db_query "${@:3}" ;;
+            *) usage ;;
+        esac
+        ;;
+    # Backward compatibility
+    build)
+        case "${2:-}" in
+            status) cmd_get_components ;;
+            failures) shift 2; cmd_get_pipelineruns "$@" ;;
+            get) cmd_get_pipelinerun "$3" ;;
+            logs) cmd_describe_pipelinerun "$3" ;;
+            *) usage ;;
+        esac
+        ;;
+    component)
+        case "${2:-}" in
+            list) cmd_get_components ;;
+            get) cmd_get_component "$3" ;;
+            show) cmd_describe_component "$3" ;;
+            *) usage ;;
+        esac
+        ;;
+    help|--help|-h|"") usage ;;
+    *)
+        # Number shortcut
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            cmd_describe_by_number "$1"
+        else
+            echo -e "${RED}Error: Unknown command: $1${NC}"
+            echo ""
+            usage
+        fi
+        ;;
+esac

@@ -1,0 +1,24 @@
+# CI Auto-Healing System Dependencies
+# Minimal set compatible with Python 3.6
+
+# Database (ESSENTIAL)
+psycopg2-binary>=2.9.0,<2.10.0
+sqlalchemy>=1.4.0,<2.0.0
+
+# CLI / Parsing (ESSENTIAL)
+click>=7.0,<9.0
+pyyaml>=5.4,<7.0
+python-dotenv>=0.19,<1.0
+
+# Utilities (ESSENTIAL)
+python-dateutil>=2.8,<3.0
+colorama>=0.4,<1.0
+rich>=10.0,<13.0
+tabulate>=0.8,<1.0
+
+# HTTP (BASIC - for OpenShift API if needed)
+requests>=2.25,<3.0
+
+# Optional: Install these manually if needed
+# fastapi, uvicorn, httpx, langfuse, anthropic
+# (require Python 3.7+)

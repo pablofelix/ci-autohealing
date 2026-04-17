@@ -1,0 +1,8 @@
+odh-dashboard-v3-4
+odh-mod-arch-mlflow-v3-4
+acme-api-registry-sync-v3-4
+odh-spark-operator-v3-4
+odh-ta-lmes-job-v3-4
+odh-trustyai-nemo-guardrails-server-v3-4
+odh-vllm-cpu-v3-4
+odh-workbench-jupyter-pytorch-llmcompressor-cuda-py312-v3-4
