@@ -466,30 +466,6 @@ cmd_describe_component() {
         echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
         echo ""
 
-        # Get comprehensive failure details using Python tool
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Failure Analysis${NC}"
-        echo -e "${BOLD}========================================${NC}"
-        echo ""
-
-        # Use pipelinerun_details.py to get structured failure info
-        local details=$(python3 "$SCRIPT_DIR/collectors/python/pipelinerun_details.py" "$pr_name" 2>/dev/null)
-
-        if [ -n "$details" ]; then
-            # Extract error summary
-            local error_summary=$(echo "$details" | jq -r '.error_summary // "No error summary available"')
-            echo -e "${BOLD}Error Summary:${NC} ${RED}$error_summary${NC}"
-            echo ""
-
-            # Show failed TaskRuns
-            local failed_count=$(echo "$details" | jq '.failed_taskruns | length' 2>/dev/null || echo "0")
-            if [ "$failed_count" != "0" ] && [ "$failed_count" != "null" ]; then
-                echo -e "${BOLD}Failed TaskRuns:${NC}"
-                echo "$details" | jq -r '.failed_taskruns[] | "  \u001b[33m✗\u001b[0m TaskRun: \(.name)\n    Failed steps: \(.failed_steps | length) / \(.total_steps)\n" + (.failed_steps[] | "      - \(.name): \(.reason) (exit code: \(.exit_code))\n")' 2>/dev/null
-                echo ""
-            fi
-        fi
-
         # Show logs if available and substantial
         if [ "$has_logs" = "Yes" ]; then
             local logs=$(sql "SELECT build_logs FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
@@ -982,64 +958,50 @@ cmd_why() {
     echo "  Detected: $detected_at"
     echo ""
 
-    # Get comprehensive details using Python tool
-    echo -e "${BOLD}Analyzing failure details...${NC}"
-    local details=$(python3 "$SCRIPT_DIR/collectors/python/pipelinerun_details.py" "$pr_name" 2>/dev/null)
+    # Get commit info and logs from DB
+    local commit_data=$(sql "
+        SELECT commit_sha, commit_url, konflux_logs_url, build_logs
+        FROM build_failures
+        WHERE pipelinerun_name = '$pr_name'
+        LIMIT 1;
+    ")
 
-    if [ -n "$details" ]; then
-        # Extract commit info
-        local commit_sha=$(echo "$details" | jq -r '.metadata.commit_sha // "N/A"')
-        local commit_url=$(echo "$details" | jq -r '.metadata.commit_url // "N/A"')
-        local log_url=$(echo "$details" | jq -r '.metadata.log_url // "N/A"')
-        local error_summary=$(echo "$details" | jq -r '.error_summary // "No error summary available"')
-        local data_source=$(echo "$details" | jq -r '.data_source // "unknown"')
+    if [ -n "$commit_data" ]; then
+        IFS='|' read -r commit_sha commit_url log_url build_logs <<< "$commit_data"
 
         echo -e "${BOLD}========================================${NC}"
         echo -e "${BOLD}Commit Information${NC}"
         echo -e "${BOLD}========================================${NC}"
         echo ""
-        echo "  Commit SHA: ${CYAN}${commit_sha:0:8}${NC} (${commit_sha})"
-        if [ "$commit_url" != "N/A" ] && [ "$commit_url" != "" ]; then
+        if [ -n "$commit_sha" ] && [ "$commit_sha" != "" ]; then
+            echo "  Commit SHA: ${CYAN}${commit_sha:0:8}${NC}"
+        fi
+        if [ -n "$commit_url" ] && [ "$commit_url" != "" ]; then
             echo "  Commit URL: ${CYAN}$commit_url${NC}"
         fi
-        echo ""
-
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}${RED}Failure Analysis${NC}"
-        echo -e "${BOLD}========================================${NC}"
-        echo ""
-        echo -e "${BOLD}Error Summary:${NC} ${RED}$error_summary${NC}"
-        echo ""
-
-        # Show failed TaskRuns
-        local failed_count=$(echo "$details" | jq '.failed_taskruns | length')
-        if [ "$failed_count" != "0" ] && [ "$failed_count" != "null" ]; then
-            echo -e "${BOLD}Failed TaskRuns:${NC}"
-            echo "$details" | jq -r '.failed_taskruns[] | "  \u001b[33m✗\u001b[0m TaskRun: \(.name)\n    Failed steps: \(.failed_steps | length) / \(.total_steps)\n    Details:\n" + (.failed_steps[] | "      - \(.name): \(.reason) (exit code: \(.exit_code))\n")'
+        if [ -n "$log_url" ] && [ "$log_url" != "" ]; then
+            echo "  Konflux UI: ${CYAN}$log_url${NC}"
         fi
         echo ""
 
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Resources${NC}"
-        echo -e "${BOLD}========================================${NC}"
-        echo ""
-        if [ "$log_url" != "N/A" ] && [ "$log_url" != "" ]; then
-            echo "  ${BOLD}View complete logs in Konflux UI:${NC}"
-            echo "  ${CYAN}$log_url${NC}"
+        # Show log excerpt if available
+        if [ -n "$build_logs" ] && [ ${#build_logs} -gt 500 ]; then
+            echo -e "${BOLD}========================================${NC}"
+            echo -e "${BOLD}Log Excerpt${NC}"
+            echo -e "${BOLD}========================================${NC}"
+            echo ""
+            extract_error_context "$build_logs"
+            echo ""
+        else
+            echo -e "${YELLOW}⚠ No logs available in database${NC}"
+            echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
+            echo ""
         fi
-        echo ""
-        echo "  Data source: $data_source"
-        echo ""
-
-    else
-        echo -e "${YELLOW}⚠ Could not fetch detailed analysis${NC}"
-        echo ""
     fi
 
     echo -e "${CYAN}Next Steps:${NC}"
-    echo "  1. Review Konflux UI for complete logs and details"
-    echo "  2. Check commit: ${BOLD}$commit_url${NC}"
-    echo "  3. View full details: ${BOLD}ic $component${NC} or ${BOLD}ic describe pr $pr_name${NC}"
+    echo "  • Use ${BOLD}ic describe component $component${NC} for full details"
+    echo "  • Use ${BOLD}ic describe component $component --log${NC} for complete logs"
     echo ""
 }
 
