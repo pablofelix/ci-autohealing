@@ -284,7 +284,9 @@ class KubeArchiveClient:
 
             # Fetch logs for each step
             for step in steps_to_fetch[:3]:  # Limit to first 3 steps per TaskRun
-                logs = self.get_pod_logs(pod_name, container=step, namespace=ns)
+                # Tekton prefixes step names with "step-" when creating containers
+                container_name = f"step-{step}"
+                logs = self.get_pod_logs(pod_name, container=container_name, namespace=ns)
                 if logs:
                     all_logs.append(f"===== TaskRun: {tr_name} / Step: {step} =====\n{logs}")
 

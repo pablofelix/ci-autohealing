@@ -36,6 +36,91 @@ sql_table() {
     docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -c "$1" 2>/dev/null | grep -v "Emulate Docker"
 }
 
+# Extract error context from logs
+extract_error_context() {
+    local logs="$1"
+    local max_sections=3
+    local lines_per_section=40
+
+    # Save logs to temp file for processing
+    local tmp_file=$(mktemp)
+    echo "$logs" > "$tmp_file"
+
+    # Find TaskRun sections - these are the structure of our logs
+    local taskrun_starts=$(grep -n "^===== TaskRun:" "$tmp_file" | cut -d: -f1)
+
+    if [ -z "$taskrun_starts" ]; then
+        # No TaskRun structure - show beginning and end
+        echo -e "${YELLOW}━━━ Log excerpt (first and last sections) ━━━${NC}"
+        echo ""
+        echo -e "${CYAN}[Beginning]${NC}"
+        head -n 40 "$tmp_file"
+        echo ""
+        echo -e "${YELLOW}... (middle section omitted) ...${NC}"
+        echo ""
+        echo -e "${CYAN}[End]${NC}"
+        tail -n 40 "$tmp_file"
+        rm -f "$tmp_file"
+        return
+    fi
+
+    # Get last N TaskRun sections (most likely to contain errors)
+    local taskrun_array=($taskrun_starts)
+    local total_taskruns=${#taskrun_array[@]}
+    local start_idx=$((total_taskruns > max_sections ? total_taskruns - max_sections : 0))
+
+    echo -e "${YELLOW}━━━ Showing last ${max_sections} of ${total_taskruns} TaskRun section(s) ━━━${NC}"
+    echo ""
+
+    local shown=0
+    for ((i=start_idx; i<total_taskruns && shown<max_sections; i++)); do
+        shown=$((shown + 1))
+        local start_line=${taskrun_array[$i]}
+        local end_line
+
+        # Calculate end: next TaskRun or end of file
+        if [ $((i + 1)) -lt $total_taskruns ]; then
+            end_line=$((${taskrun_array[$((i + 1))]} - 1))
+        else
+            end_line=$(wc -l < "$tmp_file")
+        fi
+
+        # Get TaskRun header
+        local header=$(sed -n "${start_line}p" "$tmp_file")
+
+        # Get section size
+        local section_lines=$((end_line - start_line + 1))
+
+        echo -e "${CYAN}━━━ Section #$shown: $(echo "$header" | sed 's/^===== //' | sed 's/ =====$//')${NC}"
+        echo -e "${CYAN}━━━ Lines: $section_lines${NC}"
+        echo ""
+
+        if [ $section_lines -le $lines_per_section ]; then
+            # Show entire section if small enough
+            sed -n "${start_line},${end_line}p" "$tmp_file" | sed 's/^/  /'
+        else
+            # For large sections, show mostly the end (where errors usually are)
+            local head_lines=5
+            local tail_lines=$((lines_per_section - head_lines - 2))
+
+            echo -e "${YELLOW}  [First $head_lines lines]${NC}"
+            sed -n "${start_line},$((start_line + head_lines - 1))p" "$tmp_file" | sed 's/^/  /'
+            echo ""
+            echo -e "${YELLOW}  ... ($((section_lines - head_lines - tail_lines)) lines omitted) ...${NC}"
+            echo ""
+            echo -e "${YELLOW}  [Last $tail_lines lines - most likely error location]${NC}"
+            sed -n "$((end_line - tail_lines + 1)),${end_line}p" "$tmp_file" | sed 's/^/  /'
+        fi
+        echo ""
+
+    done
+
+    echo -e "${CYAN}💡 Tip: Use 'ic 1 --log' to see the complete build log (all TaskRuns)${NC}"
+    echo ""
+
+    rm -f "$tmp_file"
+}
+
 # Show usage
 usage() {
     cat << EOF
@@ -65,14 +150,16 @@ ${BOLD}COMMANDS:${NC}
     ic get apps                              List available RHOAI applications
     ic get failures [--limit N]              List recent failures
 
-  ${CYAN}describe <resource> <name>${NC}
-    ic describe component <name>             Full component details + logs
+  ${CYAN}describe <resource> <name> [options]${NC}
+    ic describe component <name> [--log]     Full component details + logs
+                                             --log: Show complete logs (default: error context)
     ic describe pipelinerun <name>           Full PipelineRun details + logs
     ic describe pr <name>                    Alias for pipelinerun
 
   ${CYAN}Quick shortcuts:${NC}
-    ic <1-N>                                 Describe Nth failing component
+    ic <1-N> [--log]                         Describe Nth failing component
                                              (e.g., "ic 1" for component #1)
+                                             --log: Show complete logs
 
   ${CYAN}Configuration:${NC}
     ic config                                Show current configuration
@@ -309,9 +396,22 @@ cmd_get_apps() {
 # DESCRIBE commands
 cmd_describe_component() {
     local component="$1"
+    local show_full_log=false
+
+    # Parse options
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --log)
+                show_full_log=true
+                ;;
+        esac
+        shift
+    done
+
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
-        echo "Usage: ic describe component <name>"
+        echo "Usage: ic describe component <name> [--log]"
         exit 1
     fi
 
@@ -366,14 +466,60 @@ cmd_describe_component() {
         echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
         echo ""
 
-        # Show logs if available
+        # Get comprehensive failure details using Python tool
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Failure Analysis${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+
+        # Use pipelinerun_details.py to get structured failure info
+        local details=$(python3 "$SCRIPT_DIR/collectors/python/pipelinerun_details.py" "$pr_name" 2>/dev/null)
+
+        if [ -n "$details" ]; then
+            # Extract error summary
+            local error_summary=$(echo "$details" | jq -r '.error_summary // "No error summary available"')
+            echo -e "${BOLD}Error Summary:${NC} ${RED}$error_summary${NC}"
+            echo ""
+
+            # Show failed TaskRuns
+            local failed_count=$(echo "$details" | jq '.failed_taskruns | length' 2>/dev/null || echo "0")
+            if [ "$failed_count" != "0" ] && [ "$failed_count" != "null" ]; then
+                echo -e "${BOLD}Failed TaskRuns:${NC}"
+                echo "$details" | jq -r '.failed_taskruns[] | "  \u001b[33m✗\u001b[0m TaskRun: \(.name)\n    Failed steps: \(.failed_steps | length) / \(.total_steps)\n" + (.failed_steps[] | "      - \(.name): \(.reason) (exit code: \(.exit_code))\n")' 2>/dev/null
+                echo ""
+            fi
+        fi
+
+        # Show logs if available and substantial
         if [ "$has_logs" = "Yes" ]; then
             local logs=$(sql "SELECT build_logs FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
-            echo -e "${BOLD}========================================${NC}"
-            echo -e "${BOLD}Build Logs${NC}"
-            echo -e "${BOLD}========================================${NC}"
-            echo ""
-            echo "$logs"
+            local log_size=$(echo "$logs" | wc -c)
+
+            if [ "$log_size" -gt 500 ]; then
+                echo -e "${BOLD}========================================${NC}"
+                if [ "$show_full_log" = true ]; then
+                    echo -e "${BOLD}Build Logs (Full)${NC}"
+                else
+                    echo -e "${BOLD}Build Logs (Error Context)${NC}"
+                fi
+                echo -e "${BOLD}========================================${NC}"
+                echo ""
+
+                if [ "$show_full_log" = true ]; then
+                    echo "$logs"
+                else
+                    extract_error_context "$logs"
+                    echo -e "${CYAN}💡 Tip: Use 'ic 1 --log' to see the complete build log${NC}"
+                fi
+                echo ""
+            else
+                echo -e "${YELLOW}⚠ Logs available but very short (${log_size} chars)${NC}"
+                echo -e "${CYAN}→ View complete logs in Konflux UI (link above)${NC}"
+                echo ""
+            fi
+        else
+            echo -e "${YELLOW}⚠ No logs stored in database${NC}"
+            echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
             echo ""
         fi
     fi
@@ -430,6 +576,9 @@ cmd_describe_pipelinerun() {
 # Number shortcut
 cmd_describe_by_number() {
     local number="$1"
+    shift
+    local extra_args="$@"
+
     local total=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures;")
 
     if [[ "$number" -gt "$total" ]]; then
@@ -449,7 +598,7 @@ cmd_describe_by_number() {
 
     echo -e "${CYAN}Component #$number of $total${NC}"
     echo ""
-    cmd_describe_component "$component"
+    cmd_describe_component "$component" $extra_args
 }
 
 # Config commands
@@ -1072,7 +1221,7 @@ case "${1:-}" in
         ;;
     describe)
         case "${2:-}" in
-            component) cmd_describe_component "$3" ;;
+            component) shift 2; cmd_describe_component "$@" ;;
             pipelinerun|pr) cmd_describe_pipelinerun "$3" ;;
             *) usage ;;
         esac
@@ -1146,7 +1295,7 @@ case "${1:-}" in
     *)
         # Number shortcut
         if [[ "$1" =~ ^[0-9]+$ ]]; then
-            cmd_describe_by_number "$1"
+            cmd_describe_by_number "$@"
         else
             echo -e "${RED}Error: Unknown command: $1${NC}"
             echo ""
