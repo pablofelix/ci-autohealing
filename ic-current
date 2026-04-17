@@ -145,30 +145,57 @@ EOF
 # GET commands
 cmd_get_components() {
     echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Failing Components${NC}"
+    echo -e "${BOLD}Currently Failing Components${NC}"
     echo -e "${BOLD}========================================${NC}"
     echo ""
 
-    local total=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures;")
-    local with_logs=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures WHERE build_logs IS NOT NULL;")
-    local total_failures=$(sql "SELECT COUNT(*) FROM build_failures;")
+    # Get currently failing components (last build = Failed)
+    local currently_failing=$(sql "
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name,
+                status
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed';
+    ")
+
+    local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
 
     echo -e "${BOLD}Summary:${NC}"
-    echo -e "  Components: ${total}"
-    echo -e "  Total failures: ${total_failures}"
-    echo -e "  With logs: ${with_logs} / ${total}"
+    echo -e "  Currently failing: ${RED}${currently_failing}${NC}"
+    echo -e "  Total build records: ${total_records}"
     echo ""
 
     sql_table "
+    WITH latest_builds AS (
+        SELECT DISTINCT ON (component_name)
+            component_name,
+            pipelinerun_name,
+            status,
+            first_detected_at,
+            build_logs IS NOT NULL as has_logs,
+            (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures,
+            (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name AND bf.build_logs IS NOT NULL) as with_logs
+        FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+        ORDER BY component_name, first_detected_at DESC
+    )
     SELECT
-        ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) as \"#\",
+        ROW_NUMBER() OVER (ORDER BY total_failures DESC) as \"#\",
         component_name as \"Component\",
-        COUNT(*) as \"Failures\",
-        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"Logs\"
-    FROM build_failures
-    GROUP BY component_name
-    ORDER BY COUNT(*) DESC;
+        total_failures as \"Failures\",
+        with_logs as \"Logs\"
+    FROM latest_builds
+    WHERE status = 'Failed'
+    ORDER BY total_failures DESC;
     "
+    echo ""
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic working' to see components that are currently working"
+    echo -e "${CYAN}Tip:${NC} Use 'ic history <component>' to see full build history"
     echo ""
 }
 
