@@ -1,0 +1,50 @@
+# Environment and secrets
+.env
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Database data
+data/
+*.db
+*.sqlite
+*.sql.gz
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Test outputs
+test-output/
+coverage/
+.pytest_cache/
+
+# Agent outputs (Claude Code temporary files)
+.claude/
