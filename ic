@@ -115,9 +115,6 @@ extract_error_context() {
 
     done
 
-    echo -e "${CYAN}💡 Tip: Use 'ic 1 --log' to see the complete build log (all TaskRuns)${NC}"
-    echo ""
-
     rm -f "$tmp_file"
 }
 
@@ -466,17 +463,17 @@ cmd_describe_component() {
         echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
         echo ""
 
-        # Show logs if available and substantial
+        # Show logs if available
         if [ "$has_logs" = "Yes" ]; then
             local logs=$(sql "SELECT build_logs FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
             local log_size=$(echo "$logs" | wc -c)
 
-            if [ "$log_size" -gt 500 ]; then
+            if [ "$log_size" -gt 10 ]; then
                 echo -e "${BOLD}========================================${NC}"
                 if [ "$show_full_log" = true ]; then
                     echo -e "${BOLD}Build Logs (Full)${NC}"
                 else
-                    echo -e "${BOLD}Build Logs (Error Context)${NC}"
+                    echo -e "${BOLD}Build Logs${NC}"
                 fi
                 echo -e "${BOLD}========================================${NC}"
                 echo ""
@@ -484,13 +481,23 @@ cmd_describe_component() {
                 if [ "$show_full_log" = true ]; then
                     echo "$logs"
                 else
-                    extract_error_context "$logs"
-                    echo -e "${CYAN}💡 Tip: Use 'ic 1 --log' to see the complete build log${NC}"
+                    # For short logs, show them directly
+                    if [ "$log_size" -lt 1000 ]; then
+                        echo "$logs"
+                    else
+                        # For long logs, extract context
+                        extract_error_context "$logs"
+                    fi
+
+                    if [ "$log_size" -gt 1000 ]; then
+                        echo ""
+                        echo -e "${CYAN}💡 Tip: Add --log flag to see the complete build log${NC}"
+                    fi
                 fi
                 echo ""
             else
-                echo -e "${YELLOW}⚠ Logs available but very short (${log_size} chars)${NC}"
-                echo -e "${CYAN}→ View complete logs in Konflux UI (link above)${NC}"
+                echo -e "${YELLOW}⚠ Logs available but empty${NC}"
+                echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
                 echo ""
             fi
         else
