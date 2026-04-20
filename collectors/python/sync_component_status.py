@@ -71,7 +71,7 @@ class StatusSynchronizer:
             return None
 
     def get_current_status(self, component_name: str) -> Optional[Dict[str, Any]]:
-        """Get current build status for a component from Kubernetes.
+        """Get current build status for a component from live cluster + KubeArchive.
 
         Args:
             component_name: Component name.
@@ -79,58 +79,123 @@ class StatusSynchronizer:
         Returns:
             Dict with last_build status, name, uid or None.
         """
+        import requests
+
+        latest = None  # (timestamp, name, uid, reason)
+
+        # Source 1: Live cluster
         try:
-            # Use oc directly instead of kubectl tekton
             result = subprocess.run(
                 ['oc', 'get', 'pipelinerun', '-n', self.config.k8s.namespace,
-                 '-l', f'appstudio.openshift.io/component={component_name}',
-                 '--sort-by', '.metadata.creationTimestamp',
+                 '-l', f'appstudio.openshift.io/component={component_name},pipelines.appstudio.openshift.io/type=build',
                  '-o', 'json'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
-                check=True,
                 timeout=15
             )
 
-            import json
-            data = json.loads(result.stdout)
-            items = data.get('items', [])
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                for pr in data.get('items', []):
+                    ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                    conditions = pr.get('status', {}).get('conditions', [])
+                    if conditions:
+                        name = pr.get('metadata', {}).get('name')
+                        uid = pr.get('metadata', {}).get('uid')
+                        reason = conditions[-1].get('reason', '')
+                        if not latest or ts > latest[0]:
+                            latest = (ts, name, uid, reason)
+        except Exception:
+            pass
 
-            if not items:
-                return None
-
-            # Get last (most recent) PipelineRun
-            last_pr = items[-1]
-
-            name = last_pr.get('metadata', {}).get('name')
-            uid = last_pr.get('metadata', {}).get('uid')
-
-            # Get status from conditions
-            conditions = last_pr.get('status', {}).get('conditions', [])
-            if conditions:
-                reason = conditions[0].get('reason', '')
-
-                # Map status
-                if reason == 'Succeeded':
-                    status = BuildStatus.SUCCEEDED
-                elif reason == 'Failed':
-                    status = BuildStatus.FAILED
-                elif reason == 'Running':
-                    status = BuildStatus.RUNNING
-                else:
-                    status = BuildStatus.PENDING
-
-                return {
-                    'name': name,
-                    'uid': uid,
-                    'status': status
+        # Source 2: KubeArchive (archived PipelineRuns)
+        try:
+            kubearchive_url = self._get_kubearchive_url()
+            token = self._get_oc_token()
+            if kubearchive_url and token:
+                session = requests.Session()
+                session.headers.update({
+                    'Authorization': f'Bearer {token}',
+                    'Accept': 'application/json'
+                })
+                url = f"{kubearchive_url}/apis/tekton.dev/v1/namespaces/{self.config.k8s.namespace}/pipelineruns"
+                params = {
+                    'labelSelector': f'appstudio.openshift.io/component={component_name},pipelines.appstudio.openshift.io/type=build',
+                    'limit': 50
                 }
+                resp = session.get(url, params=params, timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for pr in data.get('items', []):
+                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                        conditions = pr.get('status', {}).get('conditions', [])
+                        if conditions:
+                            name = pr.get('metadata', {}).get('name')
+                            uid = pr.get('metadata', {}).get('uid')
+                            reason = conditions[-1].get('reason', '')
+                            if not latest or ts > latest[0]:
+                                latest = (ts, name, uid, reason)
+        except Exception:
+            pass
 
+        if not latest:
             return None
 
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return None
+        ts, name, uid, reason = latest
+
+        # Map reason to BuildStatus
+        if reason in ('Succeeded', 'Completed'):
+            status = BuildStatus.SUCCEEDED
+        elif reason == 'Failed':
+            status = BuildStatus.FAILED
+        elif reason in ('PipelineRunTimeout',):
+            status = BuildStatus.FAILED
+        elif reason == 'Running':
+            status = BuildStatus.RUNNING
+        else:
+            status = BuildStatus.PENDING
+
+        return {
+            'name': name,
+            'uid': uid,
+            'status': status
+        }
+
+    @staticmethod
+    def _get_kubearchive_url() -> Optional[str]:
+        """Get KubeArchive API URL."""
+        try:
+            result = subprocess.run(
+                ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
+                 '-o', 'jsonpath={.data.URL}'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
+
+    @staticmethod
+    def _get_oc_token() -> Optional[str]:
+        """Get OpenShift authentication token."""
+        try:
+            result = subprocess.run(
+                ['oc', 'whoami', '-t'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
 
     def get_unresolved_components(self) -> Set[str]:
         """Get list of components with unresolved failures.
