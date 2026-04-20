@@ -293,17 +293,18 @@ cmd_get_components() {
         echo ""
     fi
 
-    # Get currently failing components (last build = Failed)
+    # Get currently failing components (last build = Failed AND not resolved)
     local currently_failing=$(sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
                 component_name,
-                status
+                status,
+                is_resolved
             FROM build_failures
             WHERE application = '$APPLICATION_NAME'
             ORDER BY component_name, first_detected_at DESC
         )
-        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed';
+        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed' AND is_resolved = FALSE;
     ")
 
     local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
@@ -319,6 +320,7 @@ cmd_get_components() {
             component_name,
             pipelinerun_name,
             status,
+            is_resolved,
             first_detected_at,
             build_logs IS NOT NULL as has_logs,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures,
@@ -333,7 +335,7 @@ cmd_get_components() {
         total_failures as \"Failures\",
         with_logs as \"Logs\"
     FROM latest_builds
-    WHERE status = 'Failed'
+    WHERE status = 'Failed' AND is_resolved = FALSE
     ORDER BY total_failures DESC;
     "
     echo ""
@@ -920,12 +922,13 @@ cmd_triage() {
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
                 component_name,
-                status
+                status,
+                is_resolved
             FROM build_failures
             WHERE application = '$APPLICATION_NAME'
             ORDER BY component_name, first_detected_at DESC
         )
-        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed';
+        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed' AND is_resolved = FALSE;
     ")
     local currently_working=$(sql "
         WITH latest_builds AS (
