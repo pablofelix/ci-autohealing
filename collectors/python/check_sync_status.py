@@ -26,49 +26,80 @@ def check_oc_login() -> bool:
 
 
 def get_failing_components_from_cluster() -> Set[str]:
-    """Get list of failing components from Kubernetes cluster."""
+    """Get list of failing components from Kubernetes cluster.
+
+    Discovers components automatically using 'oc get components' and checks
+    the latest PipelineRun status for each component.
+    """
     try:
-        # Get all PipelineRuns for the application (last 24h should be enough)
+        # Step 1: Discover all components in the application
         result = subprocess.run(
-            ['oc', 'get', 'pipelinerun',
+            ['oc', 'get', 'component',
              '-n', 'NAMESPACE_PLACEHOLDER',
-             '-l', 'build.appstudio.redhat.com/application=acme-v2-0',
-             '--sort-by', '.metadata.creationTimestamp',
              '-o', 'json'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            timeout=30
+            timeout=15
         )
 
         if result.returncode != 0:
             return set()
 
         data = json.loads(result.stdout)
-        items = data.get('items', [])
+        all_components = data.get('items', [])
 
-        # Group by component and get latest status for each
-        component_status = {}
-        for pr in items:
-            labels = pr.get('metadata', {}).get('labels', {})
-            component = labels.get('build.appstudio.redhat.com/component')
+        # Filter components by application name in spec
+        components = [
+            comp for comp in all_components
+            if comp.get('spec', {}).get('application') == 'acme-v2-0'
+        ]
 
-            if not component:
+        if not components:
+            return set()
+
+        # Step 2: For each component, get latest PipelineRun status
+        failing_components = set()
+
+        for comp in components:
+            component_name = comp.get('metadata', {}).get('name')
+            if not component_name:
                 continue
 
-            # Get status
-            conditions = pr.get('status', {}).get('conditions', [])
+            # Get latest PipelineRun for this component
+            pr_result = subprocess.run(
+                ['oc', 'get', 'pipelinerun',
+                 '-n', 'NAMESPACE_PLACEHOLDER',
+                 '-l', f'appstudio.openshift.io/component={component_name}',
+                 '--sort-by', '.metadata.creationTimestamp',
+                 '-o', 'json'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=10
+            )
+
+            if pr_result.returncode != 0:
+                continue
+
+            pr_data = json.loads(pr_result.stdout)
+            pipelineruns = pr_data.get('items', [])
+
+            if not pipelineruns:
+                continue
+
+            # Get status of the LATEST PipelineRun (last in sorted list)
+            latest_pr = pipelineruns[-1]
+            conditions = latest_pr.get('status', {}).get('conditions', [])
+
             if conditions:
                 last_condition = conditions[-1]
-                status = 'Succeeded' if last_condition.get('status') == 'True' else 'Failed'
-            else:
-                status = 'Running'
+                # Check if Failed (status=False and reason=Failed)
+                if (last_condition.get('status') == 'False' and
+                    last_condition.get('reason') == 'Failed'):
+                    failing_components.add(component_name)
 
-            # Store latest status (items are sorted by creation time)
-            component_status[component] = status
-
-        # Return only failing components
-        return {comp for comp, status in component_status.items() if status == 'Failed'}
+        return failing_components
 
     except Exception as e:
         return set()

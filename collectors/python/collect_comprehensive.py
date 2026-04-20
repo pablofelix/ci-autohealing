@@ -67,6 +67,108 @@ class ComprehensiveCollector:
             namespace=config.k8s.namespace
         )
 
+    def discover_components_from_cluster(self) -> List[Component]:
+        """Discover components dynamically from Kubernetes cluster.
+
+        Efficient approach:
+        1. Query PipelineRuns for the application to find failing components
+        2. Get metadata only for components with failures
+
+        Returns:
+            List of Component objects with failing builds.
+        """
+        try:
+            # Step 1: Get ALL PipelineRuns for the application
+            print(f"  → Querying PipelineRuns for application {self.config.k8s.application_name}...")
+            pr_result = subprocess.run(
+                ['oc', 'get', 'pipelinerun',
+                 '-n', self.config.k8s.namespace,
+                 '-l', f'appstudio.openshift.io/application={self.config.k8s.application_name}',
+                 '--sort-by', '.metadata.creationTimestamp',
+                 '-o', 'json'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=30
+            )
+
+            if pr_result.returncode != 0:
+                error_msg = pr_result.stderr.strip() if pr_result.stderr else "Unknown error"
+                print(f"  ✗ Cannot query PipelineRuns: {error_msg}")
+                return []
+
+            pr_data = json.loads(pr_result.stdout)
+            pipelineruns = pr_data.get('items', [])
+            print(f"  ✓ Found {len(pipelineruns)} PipelineRuns")
+
+            # Step 2: Group by component and get latest status
+            component_latest_status = {}
+            for pr in pipelineruns:
+                labels = pr.get('metadata', {}).get('labels', {})
+                component = labels.get('appstudio.openshift.io/component')
+
+                if not component:
+                    continue
+
+                # Get status
+                conditions = pr.get('status', {}).get('conditions', [])
+                if conditions:
+                    last_condition = conditions[-1]
+                    status = last_condition.get('status')
+                    reason = last_condition.get('reason')
+
+                    # Store latest (pipelineruns are sorted by creation time)
+                    component_latest_status[component] = (status, reason)
+
+            # Find components with failing status
+            failing_component_names = [
+                comp for comp, (status, reason) in component_latest_status.items()
+                if status == 'False' and reason == 'Failed'
+            ]
+
+            if not failing_component_names:
+                print(f"  ✓ No failing components found")
+                return []
+
+            print(f"  ✓ Found {len(failing_component_names)} components with failed builds")
+
+            # Step 3: Get metadata only for failing components
+            failing_components = []
+            for component_name in failing_component_names:
+                comp_result = subprocess.run(
+                    ['oc', 'get', 'component', component_name,
+                     '-n', self.config.k8s.namespace,
+                     '-o', 'json'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    timeout=10
+                )
+
+                if comp_result.returncode != 0:
+                    # Component might not exist anymore, skip
+                    continue
+
+                comp_data = json.loads(comp_result.stdout)
+                repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
+                branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
+
+                failing_components.append(Component(
+                    name=component_name,
+                    repository_url=repo_url,
+                    branch=branch,
+                    namespace=self.config.k8s.namespace
+                ))
+
+            print(f"  ✓ Retrieved metadata for {len(failing_components)} components")
+            return failing_components
+
+        except Exception as e:
+            import traceback
+            print(f"  ✗ Error discovering components: {e}")
+            traceback.print_exc()
+            return []
+
     def get_component_metadata(self, component_name: str) -> Optional[Component]:
         """Fetch component metadata from Kubernetes.
 
@@ -545,20 +647,27 @@ class ComprehensiveCollector:
 
         # Load components
         if components is None:
-            if self.config.components_file:
+            # Try automatic discovery from cluster first
+            print(f"Discovering failing components from cluster...")
+            components = self.discover_components_from_cluster()
+
+            # Fallback to file if discovery fails and file is configured
+            if not components and self.config.components_file:
+                print(f"Falling back to components file: {self.config.components_file}")
                 components = Component.from_file(
                     str(self.config.components_file),
                     self.config.k8s.namespace
                 )
-            else:
-                raise ValueError("No components provided and no components file configured")
+
+            if not components:
+                raise ValueError("No components discovered from cluster and no components file configured")
 
         # Apply limit if specified
         if limit:
             components = components[:limit]
 
-        # Enrich components with metadata
-        print(f"Loading component metadata...")
+        # Enrich components with metadata if needed
+        print(f"Enriching component metadata...")
         components = [
             comp if comp.repository_url else replace(
                 comp,
