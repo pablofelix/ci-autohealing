@@ -302,7 +302,16 @@ class StatusSynchronizer:
         current = self.get_current_status(component.name)
 
         if not current:
-            # No PipelineRuns in Kubernetes, use last known status from DB
+            # No PipelineRuns in Kubernetes
+            # If component was failing, mark as resolved (archived/cleaned up)
+            if result['was_failing']:
+                if self.mark_as_resolved(component.name, 'archived'):
+                    result['now_resolved'] = True
+                    print(f"  ✓ Marked as resolved (no PipelineRuns in cluster - likely archived)")
+                    result['current_status'] = 'archived'
+                    return result
+
+            # Use last known status from DB
             db_status = self.get_last_db_status(component.name)
             result['current_status'] = db_status if db_status else 'unknown'
             print(f"  → current status: {result['current_status']} (from DB, not in K8s)")
@@ -346,16 +355,34 @@ class StatusSynchronizer:
 
         # Load components
         if components is None:
-            if self.config.components_file:
-                components = Component.from_file(
-                    str(self.config.components_file),
-                    self.config.k8s.namespace
+            # Get components that have unresolved failures in the DB
+            print(f"Loading components with unresolved failures from database...")
+            unresolved_names = self.get_unresolved_components()
+
+            if not unresolved_names:
+                print(f"  ✓ No unresolved failures found")
+                return {
+                    'components_synced': 0,
+                    'resolved': 0,
+                    'successes': 0,
+                    'duration': time.time() - start_time
+                }
+
+            print(f"  ✓ Found {len(unresolved_names)} components with unresolved failures")
+
+            # Create Component objects from names
+            components = [
+                Component(
+                    name=name,
+                    namespace=self.config.k8s.namespace,
+                    repository_url='',
+                    branch=''
                 )
-            else:
-                raise ValueError("No components provided and no components file configured")
+                for name in unresolved_names
+            ]
 
         # Enrich components with metadata
-        print(f"Loading component metadata...")
+        print(f"Enriching component metadata...")
         components = [
             comp if comp.repository_url else replace(
                 comp,

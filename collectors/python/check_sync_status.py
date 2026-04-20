@@ -116,12 +116,14 @@ def get_components_from_db() -> Set[str]:
              WITH latest_builds AS (
                  SELECT DISTINCT ON (component_name)
                      component_name,
-                     status
+                     status,
+                     is_resolved
                  FROM build_failures
                  WHERE application = 'acme-v2-0'
                  ORDER BY component_name, first_detected_at DESC
              )
-             SELECT component_name FROM latest_builds WHERE status = 'Failed';
+             SELECT component_name FROM latest_builds
+             WHERE status = 'Failed' AND is_resolved = FALSE;
              """],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
