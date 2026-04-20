@@ -551,6 +551,24 @@ FOR EACH ROW
 EXECUTE FUNCTION trigger_set_timestamp();
 
 -- ============================================================================
+-- 8. SYNC STATUS - Cached sync check results (singleton row)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS sync_status (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    last_checked_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    in_sync BOOLEAN NOT NULL DEFAULT FALSE,
+    cluster_connected BOOLEAN NOT NULL DEFAULT TRUE,
+    cluster_components JSONB DEFAULT '[]',
+    db_components JSONB DEFAULT '[]',
+    missing_in_db JSONB DEFAULT '[]',
+    extra_in_db JSONB DEFAULT '[]',
+    error TEXT,
+    check_duration_seconds NUMERIC(8,2),
+    CONSTRAINT singleton CHECK (id = 1)
+);
+INSERT INTO sync_status (id) VALUES (1) ON CONFLICT DO NOTHING;
+
+-- ============================================================================
 -- GRANTS - Permissions
 -- ============================================================================
 

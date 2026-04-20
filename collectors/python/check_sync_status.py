@@ -200,8 +200,45 @@ def get_components_from_db() -> Set[str]:
         return None  # Signal error
 
 
+def save_sync_status(status: Dict[str, Any], duration: float) -> None:
+    """Save sync status to database for caching."""
+    try:
+        # Escape single quotes in error message
+        error_val = "NULL"
+        if status.get('error'):
+            escaped = status['error'].replace("'", "''")
+            error_val = f"'{escaped}'"
+
+        sql = f"""
+        UPDATE sync_status SET
+            last_checked_at = NOW(),
+            in_sync = {'TRUE' if status['in_sync'] else 'FALSE'},
+            cluster_connected = {'TRUE' if status['cluster_connected'] else 'FALSE'},
+            cluster_components = '{json.dumps(status['cluster_components'])}',
+            db_components = '{json.dumps(status['db_components'])}',
+            missing_in_db = '{json.dumps(status['missing_in_db'])}',
+            extra_in_db = '{json.dumps(status['extra_in_db'])}',
+            error = {error_val},
+            check_duration_seconds = {duration:.2f}
+        WHERE id = 1;
+        """
+
+        subprocess.run(
+            ['docker', 'exec', 'ci-autohealing-db',
+             'psql', '-U', 'postgres', '-d', 'konflux_monitoring', '-c', sql],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5
+        )
+    except Exception:
+        pass
+
+
 def main():
     """Check sync status and return JSON."""
+    import time
+    start_time = time.time()
+
     status = {
         'cluster_connected': False,
         'in_sync': False,
@@ -215,6 +252,7 @@ def main():
     # Check cluster connection
     if not check_oc_login():
         status['error'] = 'Not logged into OpenShift cluster'
+        save_sync_status(status, time.time() - start_time)
         print(json.dumps(status))
         sys.exit(0)
 
@@ -224,6 +262,7 @@ def main():
     db_components = get_components_from_db()
     if db_components is None:
         status['error'] = 'Database connection failed'
+        save_sync_status(status, time.time() - start_time)
         print(json.dumps(status))
         sys.exit(0)
 
@@ -240,6 +279,9 @@ def main():
     status['missing_in_db'] = sorted(missing_in_db)
     status['extra_in_db'] = sorted(extra_in_db)
     status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
+
+    # Save to DB cache
+    save_sync_status(status, time.time() - start_time)
 
     print(json.dumps(status))
 

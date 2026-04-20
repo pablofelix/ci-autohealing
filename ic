@@ -226,71 +226,145 @@ EOF
     exit 0
 }
 
+SYNC_PID_FILE="$SCRIPT_DIR/.sync_status.pid"
+SYNC_STALENESS_MINUTES=${SYNC_STALENESS_MINUTES:-10}
+
+trigger_background_sync() {
+    # Check if already running
+    if [ -f "$SYNC_PID_FILE" ]; then
+        local old_pid=$(cat "$SYNC_PID_FILE" 2>/dev/null)
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            return 1  # Already running
+        fi
+        rm -f "$SYNC_PID_FILE"
+    fi
+
+    (
+        echo $$ > "$SYNC_PID_FILE"
+        python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
+        # If out of sync, also launch collector
+        local is_sync=$(sql "SELECT in_sync FROM sync_status WHERE id = 1;" 2>/dev/null)
+        if [ "$is_sync" = "f" ]; then
+            "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1
+        fi
+        rm -f "$SYNC_PID_FILE"
+    ) &
+    return 0
+}
+
 # GET commands
 cmd_get_components() {
-    # Check synchronization status
-    local sync_status=$(python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" 2>/dev/null)
-    local cluster_connected=$(echo "$sync_status" | jq -r '.cluster_connected // false' 2>/dev/null)
-    local in_sync=$(echo "$sync_status" | jq -r '.in_sync // false' 2>/dev/null)
-    local error=$(echo "$sync_status" | jq -r '.error // ""' 2>/dev/null)
-    local missing_count=$(echo "$sync_status" | jq -r '.missing_in_db | length' 2>/dev/null || echo "0")
-    local extra_count=$(echo "$sync_status" | jq -r '.extra_in_db | length' 2>/dev/null || echo "0")
+    local refresh=false
+    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
 
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Currently Failing Components${NC}"
     echo -e "${BOLD}========================================${NC}"
     echo ""
 
-    # Show sync status
-    if [ "$cluster_connected" != "true" ]; then
-        echo -e "${RED}⚠ Cluster Status: DISCONNECTED${NC}"
-        echo -e "${YELLOW}  $error${NC}"
-        echo -e "${YELLOW}  Database is OUT OF SYNC with Konflux${NC}"
-        echo -e "${CYAN}  → Login to cluster: oc login <cluster-url>${NC}"
-        echo ""
-    elif [ "$in_sync" != "true" ]; then
-        echo -e "${YELLOW}⚠ Sync Status: OUT OF SYNC${NC}"
+    # Read cached sync status from DB (instant)
+    read_sync_cache() {
+        sql "
+            SELECT
+                EXTRACT(EPOCH FROM (NOW() - last_checked_at))::int,
+                in_sync,
+                cluster_connected,
+                COALESCE(missing_in_db::text, '[]'),
+                COALESCE(extra_in_db::text, '[]'),
+                COALESCE(error, ''),
+                COALESCE(check_duration_seconds::text, '0'),
+                TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS')
+            FROM sync_status WHERE id = 1;
+        " 2>/dev/null
+    }
 
-        # Show error if present
-        if [ -n "$error" ] && [ "$error" != "null" ]; then
-            echo -e "${YELLOW}  Issue: $error${NC}"
+    local sync_row=$(read_sync_cache)
+
+    local age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date
+    IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date <<< "$sync_row"
+
+    # Trim whitespace
+    age_seconds=$(echo "$age_seconds" | tr -d ' ')
+    in_sync=$(echo "$in_sync" | tr -d ' ')
+    cluster_connected=$(echo "$cluster_connected" | tr -d ' ')
+    error=$(echo "$error" | xargs 2>/dev/null || echo "")
+    sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
+
+    # Force refresh if requested
+    if [ "$refresh" = true ]; then
+        echo -e "${CYAN}Refreshing sync status (querying KubeArchive)...${NC}"
+        python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
+
+        # If out of sync, also trigger comprehensive collection
+        local refresh_sync=$(sql "SELECT in_sync FROM sync_status WHERE id = 1;" 2>/dev/null | tr -d ' ')
+        if [ "$refresh_sync" = "f" ]; then
+            echo -e "${CYAN}Out of sync — collecting missing component data...${NC}"
+            "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1
+            # Re-check sync after collection
+            python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
         fi
 
-        # Show differences
+        # Re-read cache
+        sync_row=$(read_sync_cache)
+        IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date <<< "$sync_row"
+        age_seconds=$(echo "$age_seconds" | tr -d ' ')
+        in_sync=$(echo "$in_sync" | tr -d ' ')
+        cluster_connected=$(echo "$cluster_connected" | tr -d ' ')
+        error=$(echo "$error" | xargs 2>/dev/null || echo "")
+        sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
+    fi
+
+    # Calculate staleness
+    local age_minutes=0
+    [ -n "$age_seconds" ] && age_minutes=$((age_seconds / 60))
+    local staleness_seconds=$((SYNC_STALENESS_MINUTES * 60))
+    local is_stale=false
+    [ -z "$age_seconds" ] || [ "$age_seconds" -gt "$staleness_seconds" ] && is_stale=true
+
+    # Show sync status from cache
+    if [ -z "$age_seconds" ] || [ "$age_seconds" = "" ]; then
+        echo -e "${YELLOW}⚠ Sync Status: NEVER CHECKED${NC}"
+        echo -e "${CYAN}  → Checking in background...${NC}"
+        trigger_background_sync
+        echo ""
+    elif [ "$cluster_connected" = "f" ]; then
+        echo -e "${RED}⚠ Cluster: DISCONNECTED${NC} (last sync: ${sync_date:-unknown})"
+        [ -n "$error" ] && echo -e "${YELLOW}  $error${NC}"
+        echo -e "${CYAN}  → Login: oc login <cluster-url>${NC}"
+        echo ""
+    elif [ "$in_sync" = "t" ]; then
+        echo -e "${GREEN}✓ Sync: IN SYNC${NC} (last sync: ${sync_date:-unknown}, ${age_minutes}m ago)"
+        echo ""
+    else
+        echo -e "${YELLOW}⚠ Sync: OUT OF SYNC${NC} (last sync: ${sync_date:-unknown}, ${age_minutes}m ago)"
+
+        [ -n "$error" ] && [ "$error" != "null" ] && echo -e "${YELLOW}  Issue: $error${NC}"
+
+        # Show differences from cached JSON
+        local missing_count=$(echo "$missing_json" | jq 'length' 2>/dev/null || echo "0")
+        local extra_count=$(echo "$extra_json" | jq 'length' 2>/dev/null || echo "0")
+
         if [ "$missing_count" != "0" ]; then
             echo -e "${YELLOW}  Missing in DB: ${missing_count} component(s)${NC}"
-            local missing=$(echo "$sync_status" | jq -r '.missing_in_db[]' 2>/dev/null)
-            while IFS= read -r comp; do
+            echo "$missing_json" | jq -r '.[]' 2>/dev/null | while IFS= read -r comp; do
                 [ -n "$comp" ] && echo -e "${YELLOW}    - $comp${NC}"
-            done <<< "$missing"
+            done
         fi
         if [ "$extra_count" != "0" ]; then
             echo -e "${YELLOW}  Extra in DB (resolved): ${extra_count} component(s)${NC}"
-            local extra=$(echo "$sync_status" | jq -r '.extra_in_db[]' 2>/dev/null)
-            while IFS= read -r comp; do
+            echo "$extra_json" | jq -r '.[]' 2>/dev/null | while IFS= read -r comp; do
                 [ -n "$comp" ] && echo -e "${YELLOW}    - $comp${NC}"
-            done <<< "$extra"
+            done
         fi
+        echo ""
+    fi
 
-        # Show DB components when cluster query fails
-        if [ "$missing_count" = "0" ] && [ "$extra_count" = "0" ] && [ -n "$error" ]; then
-            local db_count=$(echo "$sync_status" | jq -r '.db_components | length' 2>/dev/null || echo "0")
-            echo -e "${YELLOW}  Components in DB: ${db_count}${NC}"
-            echo -e "${YELLOW}  Expected from UI: 8 (rhai-on-openshift-chart-v3-4, acme-fbc-fragment-v3-4, + 6 others)${NC}"
+    # If stale, trigger background refresh (non-blocking)
+    if [ "$is_stale" = true ] && [ "$refresh" != true ]; then
+        if trigger_background_sync; then
+            echo -e "${CYAN}  ↻ Sync data is ${age_minutes}m old, refreshing in background...${NC}"
+            echo ""
         fi
-
-        echo -e "${CYAN}  → Auto-syncing in background...${NC}"
-        echo ""
-
-        # Launch sync in background
-        nohup "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1 &
-        local sync_pid=$!
-        echo -e "${GREEN}  ✓ Sync started (PID: $sync_pid)${NC}"
-        echo -e "${CYAN}  Run 'ic get components' again in ~2 minutes to see updated data${NC}"
-        echo ""
-    else
-        echo -e "${GREEN}✓ Sync Status: IN SYNC${NC}"
-        echo ""
     fi
 
     # Get currently failing components (last build = Failed AND not resolved)
@@ -340,8 +414,8 @@ cmd_get_components() {
     "
     echo ""
 
+    echo -e "${CYAN}Tip:${NC} Use 'ic get components --refresh' to force a fresh sync check"
     echo -e "${CYAN}Tip:${NC} Use 'ic working' to see components that are currently working"
-    echo -e "${CYAN}Tip:${NC} Use 'ic history <component>' to see full build history"
     echo ""
 }
 
@@ -1231,10 +1305,10 @@ case "${1:-}" in
     get)
         case "${2:-}" in
             components|component)
-                if [ -n "$3" ]; then
+                if [ -n "$3" ] && [[ "$3" != -* ]]; then
                     cmd_get_component "$3"
                 else
-                    cmd_get_components
+                    cmd_get_components "${3:-}"
                 fi
                 ;;
             pipelineruns|pipelinerun|pr|failures)

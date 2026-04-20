@@ -79,7 +79,7 @@ class ComprehensiveCollector:
         import requests
 
         try:
-            component_latest = {}  # component -> (timestamp, status, reason)
+            component_latest = {}  # component -> (timestamp, status, reason, pr_metadata)
 
             # Source 1: KubeArchive (has the full PipelineRun history)
             print(f"  → Querying KubeArchive for application {self.config.k8s.application_name}...")
@@ -124,7 +124,8 @@ class ComprehensiveCollector:
                         if conditions:
                             c = conditions[-1]
                             if comp not in component_latest or ts > component_latest[comp][0]:
-                                component_latest[comp] = (ts, c.get('status'), c.get('reason'))
+                                annotations = pr.get('metadata', {}).get('annotations', {})
+                                component_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
             except Exception as e:
                 print(f"  ⚠ KubeArchive query failed: {e}")
 
@@ -155,13 +156,14 @@ class ComprehensiveCollector:
                         if conditions:
                             c = conditions[-1]
                             if comp not in component_latest or ts > component_latest[comp][0]:
-                                component_latest[comp] = (ts, c.get('status'), c.get('reason'))
+                                annotations = pr.get('metadata', {}).get('annotations', {})
+                                component_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
             except Exception:
                 pass
 
             # Find components whose latest build failed
             failing_component_names = [
-                comp for comp, (ts, status, reason) in component_latest.items()
+                comp for comp, (ts, status, reason, _) in component_latest.items()
                 if status == 'False'
             ]
 
@@ -171,25 +173,45 @@ class ComprehensiveCollector:
 
             print(f"  ✓ Found {len(failing_component_names)} components with failed builds")
 
-            # Get metadata only for failing components
+            # Get metadata for failing components
+            # Try oc get component first, fall back to PipelineRun annotations
             failing_components = []
             for component_name in failing_component_names:
-                comp_result = subprocess.run(
-                    ['oc', 'get', 'component', component_name,
-                     '-n', self.config.k8s.namespace,
-                     '-o', 'json'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    timeout=10
-                )
+                repo_url = ''
+                branch = ''
 
-                if comp_result.returncode != 0:
-                    continue
+                # Try getting metadata from cluster
+                try:
+                    comp_result = subprocess.run(
+                        ['oc', 'get', 'component', component_name,
+                         '-n', self.config.k8s.namespace,
+                         '-o', 'json'],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True,
+                        timeout=10
+                    )
 
-                comp_data = json.loads(comp_result.stdout)
-                repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
-                branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
+                    if comp_result.returncode == 0:
+                        comp_data = json.loads(comp_result.stdout)
+                        repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
+                        branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
+                except Exception:
+                    pass
+
+                # Fall back to PipelineRun annotations if cluster metadata unavailable
+                if not repo_url:
+                    pr_annotations = component_latest[component_name][3]
+                    repo_url = (
+                        pr_annotations.get('pipelinesascode.tekton.dev/repo-url', '') or
+                        pr_annotations.get('pipelinesascode.tekton.dev/source-repo-url', '')
+                    )
+                    branch = (
+                        pr_annotations.get('build.appstudio.redhat.com/target_branch', '') or
+                        pr_annotations.get('pipelinesascode.tekton.dev/branch', '')
+                    )
+                    if repo_url:
+                        print(f"  → {component_name}: metadata from PipelineRun annotations (cluster unavailable)")
 
                 failing_components.append(Component(
                     name=component_name,
