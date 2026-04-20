@@ -68,62 +68,101 @@ class ComprehensiveCollector:
         )
 
     def discover_components_from_cluster(self) -> List[Component]:
-        """Discover components dynamically from Kubernetes cluster.
+        """Discover components dynamically from KubeArchive + live cluster.
 
-        Efficient approach:
-        1. Query PipelineRuns for the application to find failing components
-        2. Get metadata only for components with failures
+        Queries KubeArchive for archived PipelineRuns (live cluster only retains
+        a few recent ones) and finds components with failed latest builds.
 
         Returns:
             List of Component objects with failing builds.
         """
+        import requests
+
         try:
-            # Step 1: Get ALL PipelineRuns for the application
-            print(f"  → Querying PipelineRuns for application {self.config.k8s.application_name}...")
-            pr_result = subprocess.run(
-                ['oc', 'get', 'pipelinerun',
-                 '-n', self.config.k8s.namespace,
-                 '-l', f'appstudio.openshift.io/application={self.config.k8s.application_name}',
-                 '--sort-by', '.metadata.creationTimestamp',
-                 '-o', 'json'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=30
-            )
+            component_latest = {}  # component -> (timestamp, status, reason)
 
-            if pr_result.returncode != 0:
-                error_msg = pr_result.stderr.strip() if pr_result.stderr else "Unknown error"
-                print(f"  ✗ Cannot query PipelineRuns: {error_msg}")
-                return []
+            # Source 1: KubeArchive (has the full PipelineRun history)
+            print(f"  → Querying KubeArchive for application {self.config.k8s.application_name}...")
+            try:
+                api_url = self.kubearchive.api_url
+                token = self.kubearchive.token
+                session = requests.Session()
+                session.headers.update({
+                    'Authorization': f'Bearer {token}',
+                    'Accept': 'application/json'
+                })
 
-            pr_data = json.loads(pr_result.stdout)
-            pipelineruns = pr_data.get('items', [])
-            print(f"  ✓ Found {len(pipelineruns)} PipelineRuns")
+                url = f"{api_url}/apis/tekton.dev/v1/namespaces/{self.config.k8s.namespace}/pipelineruns"
+                params = {
+                    'labelSelector': f'appstudio.openshift.io/application={self.config.k8s.application_name},pipelines.appstudio.openshift.io/type=build',
+                    'limit': 500
+                }
 
-            # Step 2: Group by component and get latest status
-            component_latest_status = {}
-            for pr in pipelineruns:
-                labels = pr.get('metadata', {}).get('labels', {})
-                component = labels.get('appstudio.openshift.io/component')
+                # Paginate through results (max 3 pages = 1500 PipelineRuns)
+                all_archive_prs = []
+                for _ in range(3):
+                    resp = session.get(url, params=params, timeout=30)
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    all_archive_prs.extend(data.get('items', []))
+                    cont = data.get('metadata', {}).get('continue')
+                    if cont:
+                        params['continue'] = cont
+                    else:
+                        break
 
-                if not component:
-                    continue
+                if all_archive_prs:
+                    print(f"  ✓ Found {len(all_archive_prs)} PipelineRuns in KubeArchive")
 
-                # Get status
-                conditions = pr.get('status', {}).get('conditions', [])
-                if conditions:
-                    last_condition = conditions[-1]
-                    status = last_condition.get('status')
-                    reason = last_condition.get('reason')
+                    for pr in all_archive_prs:
+                        comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
+                        if not comp:
+                            continue
+                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                        conditions = pr.get('status', {}).get('conditions', [])
+                        if conditions:
+                            c = conditions[-1]
+                            if comp not in component_latest or ts > component_latest[comp][0]:
+                                component_latest[comp] = (ts, c.get('status'), c.get('reason'))
+            except Exception as e:
+                print(f"  ⚠ KubeArchive query failed: {e}")
 
-                    # Store latest (pipelineruns are sorted by creation time)
-                    component_latest_status[component] = (status, reason)
+            # Source 2: Live cluster (may have very recent PipelineRuns)
+            try:
+                pr_result = subprocess.run(
+                    ['oc', 'get', 'pipelinerun',
+                     '-n', self.config.k8s.namespace,
+                     '-l', f'appstudio.openshift.io/application={self.config.k8s.application_name},pipelines.appstudio.openshift.io/type=build',
+                     '-o', 'json'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    timeout=15
+                )
 
-            # Find components with failing status
+                if pr_result.returncode == 0:
+                    data = json.loads(pr_result.stdout)
+                    live_prs = data.get('items', [])
+                    print(f"  ✓ Found {len(live_prs)} PipelineRuns in live cluster")
+
+                    for pr in live_prs:
+                        comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
+                        if not comp:
+                            continue
+                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                        conditions = pr.get('status', {}).get('conditions', [])
+                        if conditions:
+                            c = conditions[-1]
+                            if comp not in component_latest or ts > component_latest[comp][0]:
+                                component_latest[comp] = (ts, c.get('status'), c.get('reason'))
+            except Exception:
+                pass
+
+            # Find components whose latest build failed
             failing_component_names = [
-                comp for comp, (status, reason) in component_latest_status.items()
-                if status == 'False' and reason == 'Failed'
+                comp for comp, (ts, status, reason) in component_latest.items()
+                if status == 'False'
             ]
 
             if not failing_component_names:
@@ -132,7 +171,7 @@ class ComprehensiveCollector:
 
             print(f"  ✓ Found {len(failing_component_names)} components with failed builds")
 
-            # Step 3: Get metadata only for failing components
+            # Get metadata only for failing components
             failing_components = []
             for component_name in failing_component_names:
                 comp_result = subprocess.run(
@@ -146,7 +185,6 @@ class ComprehensiveCollector:
                 )
 
                 if comp_result.returncode != 0:
-                    # Component might not exist anymore, skip
                     continue
 
                 comp_data = json.loads(comp_result.stdout)

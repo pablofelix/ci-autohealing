@@ -2,13 +2,18 @@
 """
 Check synchronization status between Konflux and local database.
 Returns JSON with sync status and missing/extra components.
+
+Uses KubeArchive API to get archived PipelineRuns (live cluster only
+retains a few recent ones, while KubeArchive has the full history).
 """
 
 import sys
 import json
 import subprocess
-from pathlib import Path
-from typing import Set, Dict, Any
+from collections import defaultdict
+from typing import Set, Dict, Any, Optional
+
+import requests
 
 
 def check_oc_login() -> bool:
@@ -25,17 +30,107 @@ def check_oc_login() -> bool:
         return False
 
 
-def get_failing_components_from_cluster() -> Set[str]:
-    """Get list of failing components from Kubernetes cluster.
-
-    Discovers components automatically using 'oc get components' and checks
-    the latest PipelineRun status for each component.
-    """
+def get_kubearchive_url() -> str:
+    """Get KubeArchive API URL."""
     try:
-        # Step 1: Discover all components in the application
         result = subprocess.run(
-            ['oc', 'get', 'component',
+            ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
+             '-o', 'jsonpath={.data.URL}'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
+
+
+def get_oc_token() -> Optional[str]:
+    """Get OpenShift authentication token."""
+    try:
+        result = subprocess.run(
+            ['oc', 'whoami', '-t'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_failing_components_from_cluster() -> Set[str]:
+    """Get list of failing components from KubeArchive + live cluster.
+
+    Queries KubeArchive for archived PipelineRuns (which has the full history)
+    and also checks live cluster PipelineRuns. Groups by component, sorts by
+    timestamp, and returns components whose latest build failed.
+    """
+    token = get_oc_token()
+    if not token:
+        return set()
+
+    # Track latest status per component across all sources
+    component_latest = {}  # component -> (timestamp, status, reason)
+
+    # Source 1: KubeArchive (has archived PipelineRuns)
+    try:
+        api_url = get_kubearchive_url()
+        session = requests.Session()
+        session.headers.update({
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json'
+        })
+
+        url = f"{api_url}/apis/tekton.dev/v1/namespaces/NAMESPACE_PLACEHOLDER/pipelineruns"
+        params = {
+            'labelSelector': 'appstudio.openshift.io/application=acme-v2-0,pipelines.appstudio.openshift.io/type=build',
+            'limit': 500
+        }
+
+        # Paginate through results (max 3 pages = 1500 PipelineRuns)
+        all_prs = []
+        for _ in range(3):
+            resp = session.get(url, params=params, timeout=30)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            all_prs.extend(data.get('items', []))
+            cont = data.get('metadata', {}).get('continue')
+            if cont:
+                params['continue'] = cont
+            else:
+                break
+
+        if all_prs:
+            for pr in all_prs:
+                comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
+                if not comp:
+                    continue
+                ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                conditions = pr.get('status', {}).get('conditions', [])
+                if conditions:
+                    c = conditions[-1]
+                    status = c.get('status')
+                    reason = c.get('reason')
+                    # Keep the most recent per component
+                    if comp not in component_latest or ts > component_latest[comp][0]:
+                        component_latest[comp] = (ts, status, reason)
+    except Exception:
+        pass
+
+    # Source 2: Live cluster PipelineRuns (may have very recent ones not yet in KubeArchive)
+    try:
+        result = subprocess.run(
+            ['oc', 'get', 'pipelinerun',
              '-n', 'NAMESPACE_PLACEHOLDER',
+             '-l', 'appstudio.openshift.io/application=acme-v2-0,pipelines.appstudio.openshift.io/type=build',
              '-o', 'json'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -43,66 +138,30 @@ def get_failing_components_from_cluster() -> Set[str]:
             timeout=15
         )
 
-        if result.returncode != 0:
-            return set()
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            for pr in data.get('items', []):
+                comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
+                if not comp:
+                    continue
+                ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                conditions = pr.get('status', {}).get('conditions', [])
+                if conditions:
+                    c = conditions[-1]
+                    status = c.get('status')
+                    reason = c.get('reason')
+                    if comp not in component_latest or ts > component_latest[comp][0]:
+                        component_latest[comp] = (ts, status, reason)
+    except Exception:
+        pass
 
-        data = json.loads(result.stdout)
-        all_components = data.get('items', [])
+    # Return components whose latest build failed
+    failing = set()
+    for comp, (ts, status, reason) in component_latest.items():
+        if status == 'False':
+            failing.add(comp)
 
-        # Filter components by application name in spec
-        components = [
-            comp for comp in all_components
-            if comp.get('spec', {}).get('application') == 'acme-v2-0'
-        ]
-
-        if not components:
-            return set()
-
-        # Step 2: For each component, get latest PipelineRun status
-        failing_components = set()
-
-        for comp in components:
-            component_name = comp.get('metadata', {}).get('name')
-            if not component_name:
-                continue
-
-            # Get latest PipelineRun for this component
-            pr_result = subprocess.run(
-                ['oc', 'get', 'pipelinerun',
-                 '-n', 'NAMESPACE_PLACEHOLDER',
-                 '-l', f'appstudio.openshift.io/component={component_name}',
-                 '--sort-by', '.metadata.creationTimestamp',
-                 '-o', 'json'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=10
-            )
-
-            if pr_result.returncode != 0:
-                continue
-
-            pr_data = json.loads(pr_result.stdout)
-            pipelineruns = pr_data.get('items', [])
-
-            if not pipelineruns:
-                continue
-
-            # Get status of the LATEST PipelineRun (last in sorted list)
-            latest_pr = pipelineruns[-1]
-            conditions = latest_pr.get('status', {}).get('conditions', [])
-
-            if conditions:
-                last_condition = conditions[-1]
-                # Check if Failed (status=False and reason=Failed)
-                if (last_condition.get('status') == 'False' and
-                    last_condition.get('reason') == 'Failed'):
-                    failing_components.add(component_name)
-
-        return failing_components
-
-    except Exception as e:
-        return set()
+    return failing
 
 
 def get_components_from_db() -> Set[str]:
@@ -168,19 +227,8 @@ def main():
         print(json.dumps(status))
         sys.exit(0)
 
-    # Get components from cluster
+    # Get components from cluster + KubeArchive
     cluster_components = get_failing_components_from_cluster()
-
-    # If cluster query returns empty but we have DB components, something is wrong
-    if len(cluster_components) == 0 and len(db_components) > 0:
-        # Could be: 1) All resolved (unlikely), 2) Query failed, 3) No access
-        # Check if we can query at all
-        status['error'] = 'Cannot query cluster components (may lack permissions)'
-        status['db_components'] = sorted(db_components)
-        status['cluster_components'] = []
-        status['in_sync'] = False
-        print(json.dumps(status))
-        sys.exit(0)
 
     # Calculate differences
     missing_in_db = cluster_components - db_components
