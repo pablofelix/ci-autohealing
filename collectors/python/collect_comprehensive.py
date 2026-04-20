@@ -243,54 +243,74 @@ class ComprehensiveCollector:
     def get_last_failed_pipelinerun(self, component_name: str) -> Optional[Dict[str, Any]]:
         """Get the MOST RECENT failed PipelineRun for a component.
 
+        Checks both live cluster and KubeArchive for archived PipelineRuns.
+
         Args:
             component_name: Component name.
 
         Returns:
             PipelineRun dictionary with name, uid, status, start_time or None.
         """
+        latest_failed = None  # (timestamp, name, uid)
+
+        # Source 1: Live cluster
         try:
             result = subprocess.run(
-                ['bash', '-c',
-                 f"yes '' 2>/dev/null | kubectl tekton get pr -n {self.config.k8s.namespace} "
-                 f"--labels='appstudio.openshift.io/component={component_name}' "
-                 f"--limit 30 2>/dev/null | grep -v '^NAME' | grep -v '^Next' | "
-                 f"grep -v '^$' | grep -v 'Press any key' | head -30"],
+                ['oc', 'get', 'pipelinerun',
+                 '-n', self.config.k8s.namespace,
+                 '-l', f'appstudio.openshift.io/component={component_name},pipelines.appstudio.openshift.io/type=build',
+                 '-o', 'json'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
-                timeout=30
+                timeout=15
             )
 
-            if result.returncode != 0 or not result.stdout.strip():
-                return None
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                for pr in data.get('items', []):
+                    conditions = pr.get('status', {}).get('conditions', [])
+                    if conditions and conditions[-1].get('status') == 'False':
+                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                        name = pr.get('metadata', {}).get('name')
+                        uid = pr.get('metadata', {}).get('uid')
+                        if not latest_failed or ts > latest_failed[0]:
+                            latest_failed = (ts, name, uid)
+        except Exception:
+            pass
 
-            # Find first (most recent) failure
-            for line in result.stdout.strip().split('\n'):
-                if not line.strip():
-                    continue
+        # Source 2: KubeArchive (archived PipelineRuns)
+        try:
+            import requests
+            url = f"{self.kubearchive.api_url}/apis/tekton.dev/v1/namespaces/{self.config.k8s.namespace}/pipelineruns"
+            params = {
+                'labelSelector': f'appstudio.openshift.io/component={component_name},pipelines.appstudio.openshift.io/type=build',
+                'limit': 50
+            }
+            resp = self.kubearchive.session.get(url, params=params, timeout=30)
 
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
+            if resp.status_code == 200:
+                data = resp.json()
+                for pr in data.get('items', []):
+                    conditions = pr.get('status', {}).get('conditions', [])
+                    if conditions and conditions[-1].get('status') == 'False':
+                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                        name = pr.get('metadata', {}).get('name')
+                        uid = pr.get('metadata', {}).get('uid')
+                        if not latest_failed or ts > latest_failed[0]:
+                            latest_failed = (ts, name, uid)
+        except Exception:
+            pass
 
-                name = parts[0]
-                uid = parts[1]
-                started = parts[2] if len(parts) > 2 else None
-                status_str = parts[-1]
+        if latest_failed:
+            return {
+                'name': latest_failed[1],
+                'uid': latest_failed[2],
+                'status': BuildStatus.FAILED,
+                'started': latest_failed[0]
+            }
 
-                if status_str.startswith('Failed'):
-                    return {
-                        'name': name,
-                        'uid': uid,
-                        'status': BuildStatus.FAILED,
-                        'started': started
-                    }
-
-            return None
-
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return None
+        return None
 
     def extract_all_details(self, pr_data: Dict[str, Any], source: str = 'kubearchive') -> Dict[str, Any]:
         """Extract ALL useful details from PipelineRun.
