@@ -65,19 +65,47 @@ def get_oc_token() -> Optional[str]:
     return None
 
 
-def get_failing_components_from_cluster() -> Set[str]:
-    """Get list of failing components from KubeArchive + live cluster.
+def get_failing_components_from_cluster() -> Dict[str, Any]:
+    """Get failing components from KubeArchive + live cluster (push builds only).
 
-    Queries KubeArchive for archived PipelineRuns (which has the full history)
-    and also checks live cluster PipelineRuns. Groups by component, sorts by
-    timestamp, and returns components whose latest build failed.
+    Queries KubeArchive for archived PipelineRuns and live cluster.
+    Groups by component, tracks latest push build and latest incoming build
+    separately. Returns components whose latest push build failed, and
+    identifies which ones have a successful incoming re-trigger.
+
+    Returns:
+        Dict with 'failing' (set of component names with failed push builds)
+        and 'retriggered' (set of components with successful incoming after push failure).
     """
     token = get_oc_token()
     if not token:
-        return set()
+        return {'failing': set(), 'retriggered': set()}
 
-    # Track latest status per component across all sources
-    component_latest = {}  # component -> (timestamp, status, reason)
+    # Track latest push and incoming builds per component
+    push_latest = {}      # component -> (timestamp, status, reason)
+    incoming_latest = {}   # component -> (timestamp, status, reason)
+
+    def process_pipelinerun(pr):
+        """Process a single PipelineRun into push/incoming tracking."""
+        labels = pr.get('metadata', {}).get('labels', {})
+        comp = labels.get('appstudio.openshift.io/component')
+        if not comp:
+            return
+        event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+        ts = pr.get('metadata', {}).get('creationTimestamp', '')
+        conditions = pr.get('status', {}).get('conditions', [])
+        if not conditions:
+            return
+        c = conditions[-1]
+        status = c.get('status')
+        reason = c.get('reason')
+
+        if event_type == 'push':
+            if comp not in push_latest or ts > push_latest[comp][0]:
+                push_latest[comp] = (ts, status, reason)
+        elif event_type == 'incoming':
+            if comp not in incoming_latest or ts > incoming_latest[comp][0]:
+                incoming_latest[comp] = (ts, status, reason)
 
     # Source 1: KubeArchive (has archived PipelineRuns)
     try:
@@ -95,33 +123,18 @@ def get_failing_components_from_cluster() -> Set[str]:
         }
 
         # Paginate through results (max 3 pages = 1500 PipelineRuns)
-        all_prs = []
         for _ in range(3):
             resp = session.get(url, params=params, timeout=30)
             if resp.status_code != 200:
                 break
             data = resp.json()
-            all_prs.extend(data.get('items', []))
+            for pr in data.get('items', []):
+                process_pipelinerun(pr)
             cont = data.get('metadata', {}).get('continue')
             if cont:
                 params['continue'] = cont
             else:
                 break
-
-        if all_prs:
-            for pr in all_prs:
-                comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
-                if not comp:
-                    continue
-                ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                conditions = pr.get('status', {}).get('conditions', [])
-                if conditions:
-                    c = conditions[-1]
-                    status = c.get('status')
-                    reason = c.get('reason')
-                    # Keep the most recent per component
-                    if comp not in component_latest or ts > component_latest[comp][0]:
-                        component_latest[comp] = (ts, status, reason)
     except Exception:
         pass
 
@@ -141,27 +154,23 @@ def get_failing_components_from_cluster() -> Set[str]:
         if result.returncode == 0:
             data = json.loads(result.stdout)
             for pr in data.get('items', []):
-                comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
-                if not comp:
-                    continue
-                ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                conditions = pr.get('status', {}).get('conditions', [])
-                if conditions:
-                    c = conditions[-1]
-                    status = c.get('status')
-                    reason = c.get('reason')
-                    if comp not in component_latest or ts > component_latest[comp][0]:
-                        component_latest[comp] = (ts, status, reason)
+                process_pipelinerun(pr)
     except Exception:
         pass
 
-    # Return components whose latest build failed
+    # Determine failing components (latest push build failed)
     failing = set()
-    for comp, (ts, status, reason) in component_latest.items():
-        if status == 'False':
+    retriggered = set()
+    for comp, (push_ts, push_status, push_reason) in push_latest.items():
+        if push_status == 'False':
             failing.add(comp)
+            # Check if a successful incoming build exists AFTER the push failure
+            if comp in incoming_latest:
+                inc_ts, inc_status, inc_reason = incoming_latest[comp]
+                if inc_status == 'True' and inc_ts > push_ts:
+                    retriggered.add(comp)
 
-    return failing
+    return {'failing': failing, 'retriggered': retriggered}
 
 
 def get_components_from_db() -> Set[str]:
@@ -218,6 +227,7 @@ def save_sync_status(status: Dict[str, Any], duration: float) -> None:
             db_components = '{json.dumps(status['db_components'])}',
             missing_in_db = '{json.dumps(status['missing_in_db'])}',
             extra_in_db = '{json.dumps(status['extra_in_db'])}',
+            retriggered_components = '{json.dumps(status.get('retriggered_components', []))}',
             error = {error_val},
             check_duration_seconds = {duration:.2f}
         WHERE id = 1;
@@ -246,6 +256,7 @@ def main():
         'db_components': [],
         'missing_in_db': [],
         'extra_in_db': [],
+        'retriggered_components': [],
         'error': None
     }
 
@@ -266,10 +277,12 @@ def main():
         print(json.dumps(status))
         sys.exit(0)
 
-    # Get components from cluster + KubeArchive
-    cluster_components = get_failing_components_from_cluster()
+    # Get components from cluster + KubeArchive (push builds only)
+    cluster_result = get_failing_components_from_cluster()
+    cluster_components = cluster_result['failing']
+    retriggered = cluster_result['retriggered']
 
-    # Calculate differences
+    # Calculate differences (exclude retriggered from "missing" — they'll be collected)
     missing_in_db = cluster_components - db_components
     extra_in_db = db_components - cluster_components
 
@@ -278,6 +291,7 @@ def main():
     status['db_components'] = sorted(db_components)
     status['missing_in_db'] = sorted(missing_in_db)
     status['extra_in_db'] = sorted(extra_in_db)
+    status['retriggered_components'] = sorted(retriggered)
     status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
 
     # Save to DB cache

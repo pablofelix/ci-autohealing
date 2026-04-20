@@ -273,15 +273,16 @@ cmd_get_components() {
                 COALESCE(extra_in_db::text, '[]'),
                 COALESCE(error, ''),
                 COALESCE(check_duration_seconds::text, '0'),
-                TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS')
+                TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS'),
+                COALESCE(retriggered_components::text, '[]')
             FROM sync_status WHERE id = 1;
         " 2>/dev/null
     }
 
     local sync_row=$(read_sync_cache)
 
-    local age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date
-    IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date <<< "$sync_row"
+    local age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date retriggered_json
+    IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date retriggered_json <<< "$sync_row"
 
     # Trim whitespace
     age_seconds=$(echo "$age_seconds" | tr -d ' ')
@@ -306,7 +307,7 @@ cmd_get_components() {
 
         # Re-read cache
         sync_row=$(read_sync_cache)
-        IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date <<< "$sync_row"
+        IFS='|' read -r age_seconds in_sync cluster_connected missing_json extra_json error duration sync_date retriggered_json <<< "$sync_row"
         age_seconds=$(echo "$age_seconds" | tr -d ' ')
         in_sync=$(echo "$in_sync" | tr -d ' ')
         cluster_connected=$(echo "$cluster_connected" | tr -d ' ')
@@ -367,50 +368,94 @@ cmd_get_components() {
         fi
     fi
 
-    # Get currently failing components (last build = Failed AND not resolved)
-    local currently_failing=$(sql "
+    # Get re-triggered component list from cache
+    local retriggered_list=""
+    if [ -n "$retriggered_json" ] && [ "$retriggered_json" != "[]" ]; then
+        retriggered_list=$(echo "$retriggered_json" | jq -r '.[]' 2>/dev/null | paste -sd',' -)
+    fi
+
+    # Build the SQL for a unified table with status column
+    # Push Failed components first (sorted by failures desc), then Re-triggered (sorted by date desc)
+    local retriggered_filter="AND 1=0"  # no retriggered by default
+    if [ -n "$retriggered_list" ]; then
+        # Build SQL IN clause from comma-separated list
+        local in_clause=$(echo "$retriggered_list" | sed "s/,/','/g" | sed "s/^/'/;s/$/'/")
+        retriggered_filter="AND component_name IN ($in_clause)"
+    fi
+
+    # Count currently failing (push failed, not re-triggered)
+    local push_failing=$(sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
-                component_name,
-                status,
-                is_resolved
+                component_name, status, is_resolved
             FROM build_failures
             WHERE application = '$APPLICATION_NAME'
             ORDER BY component_name, first_detected_at DESC
         )
-        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed' AND is_resolved = FALSE;
+        SELECT COUNT(*) FROM latest_builds
+        WHERE status = 'Failed' AND is_resolved = FALSE;
     ")
+
+    local retriggered_count=0
+    [ -n "$retriggered_json" ] && retriggered_count=$(echo "$retriggered_json" | jq 'length' 2>/dev/null || echo "0")
 
     local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
 
     echo -e "${BOLD}Summary:${NC}"
-    echo -e "  Currently failing: ${RED}${currently_failing}${NC}"
+    echo -e "  Push build failures: ${RED}${push_failing}${NC}"
+    if [ "$retriggered_count" != "0" ]; then
+        echo -e "  Re-triggered OK:     ${YELLOW}${retriggered_count}${NC}"
+    fi
     echo -e "  Total build records: ${total_records}"
     echo ""
 
+    # Unified table: Push Failed first, then Re-triggered
     sql_table "
-    WITH latest_builds AS (
+    WITH push_failed AS (
         SELECT DISTINCT ON (component_name)
             component_name,
-            pipelinerun_name,
             status,
             is_resolved,
             first_detected_at,
-            build_logs IS NOT NULL as has_logs,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name AND bf.build_logs IS NOT NULL) as with_logs
         FROM build_failures
         WHERE application = '$APPLICATION_NAME'
         ORDER BY component_name, first_detected_at DESC
+    ),
+    failing AS (
+        SELECT component_name, total_failures, with_logs,
+            TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
+            1 as sort_group
+        FROM push_failed
+        WHERE status = 'Failed' AND is_resolved = FALSE
+            AND component_name NOT IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
+    ),
+    retriggered AS (
+        SELECT component_name, total_failures, with_logs,
+            TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
+            2 as sort_group
+        FROM push_failed
+        WHERE status = 'Failed' AND is_resolved = FALSE
+            AND component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
+    ),
+    combined AS (
+        SELECT * FROM failing
+        UNION ALL
+        SELECT * FROM retriggered
     )
     SELECT
-        ROW_NUMBER() OVER (ORDER BY total_failures DESC) as \"#\",
+        ROW_NUMBER() OVER (ORDER BY sort_group, total_failures DESC) as \"#\",
         component_name as \"Component\",
-        total_failures as \"Failures\",
+        CASE sort_group
+            WHEN 1 THEN 'Push Failed'
+            WHEN 2 THEN 'Re-triggered ✓'
+        END as \"Status\",
+        failed_date as \"Failed\",
+        total_failures as \"Builds\",
         with_logs as \"Logs\"
-    FROM latest_builds
-    WHERE status = 'Failed' AND is_resolved = FALSE
-    ORDER BY total_failures DESC;
+    FROM combined
+    ORDER BY sort_group, total_failures DESC;
     "
     echo ""
 
@@ -698,24 +743,61 @@ cmd_describe_by_number() {
     shift
     local extra_args="$@"
 
-    local total=$(sql "SELECT COUNT(DISTINCT component_name) FROM build_failures;")
+    # Read retriggered components from sync cache
+    local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE id = 1;" 2>/dev/null)
 
-    if [[ "$number" -gt "$total" ]]; then
-        echo -e "${RED}Error: Component #$number does not exist${NC}"
-        echo "Only $total components are failing."
-        exit 1
-    fi
-
+    # Use same ordering as cmd_get_components: Push Failed first (by failures desc), then Re-triggered
     local component=$(sql "
-        SELECT component_name
-        FROM build_failures
-        GROUP BY component_name
-        ORDER BY COUNT(*) DESC
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, status, is_resolved, first_detected_at,
+                (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        ),
+        failing AS (
+            SELECT component_name, total_failures,
+                CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
+                    THEN 2 ELSE 1
+                END as sort_group
+            FROM latest_builds
+            WHERE status = 'Failed' AND is_resolved = FALSE
+        )
+        SELECT component_name FROM failing
+        ORDER BY sort_group, total_failures DESC
         OFFSET $((number - 1))
         LIMIT 1;
     ")
 
-    echo -e "${CYAN}Component #$number of $total${NC}"
+    if [ -z "$component" ]; then
+        local total=$(sql "
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (component_name) component_name, status, is_resolved
+                FROM build_failures WHERE application = '$APPLICATION_NAME'
+                ORDER BY component_name, first_detected_at DESC
+            ) lb WHERE status = 'Failed' AND is_resolved = FALSE;
+        ")
+        echo -e "${RED}Error: Component #$number does not exist${NC}"
+        echo "Only $total components are currently failing."
+        exit 1
+    fi
+
+    # Check if it's re-triggered
+    local is_retriggered=""
+    if echo "$retriggered_json" | jq -e --arg c "$component" 'index($c) != null' > /dev/null 2>&1; then
+        is_retriggered=" (Re-triggered ✓)"
+    fi
+
+    local total=$(sql "
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name, status, is_resolved
+            FROM build_failures WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        ) lb WHERE status = 'Failed' AND is_resolved = FALSE;
+    ")
+
+    echo -e "${CYAN}Component #$number of $total${is_retriggered}${NC}"
     echo ""
     cmd_describe_component "$component" $extra_args
 }

@@ -562,6 +562,7 @@ CREATE TABLE IF NOT EXISTS sync_status (
     db_components JSONB DEFAULT '[]',
     missing_in_db JSONB DEFAULT '[]',
     extra_in_db JSONB DEFAULT '[]',
+    retriggered_components JSONB DEFAULT '[]',
     error TEXT,
     check_duration_seconds NUMERIC(8,2),
     CONSTRAINT singleton CHECK (id = 1)

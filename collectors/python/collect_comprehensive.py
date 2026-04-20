@@ -79,7 +79,25 @@ class ComprehensiveCollector:
         import requests
 
         try:
-            component_latest = {}  # component -> (timestamp, status, reason, pr_metadata)
+            push_latest = {}      # component -> (timestamp, status, reason, annotations)
+
+            def process_pipelinerun(pr):
+                """Track latest push build per component."""
+                labels = pr.get('metadata', {}).get('labels', {})
+                comp = labels.get('appstudio.openshift.io/component')
+                if not comp:
+                    return
+                event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+                if event_type != 'push':
+                    return
+                ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                conditions = pr.get('status', {}).get('conditions', [])
+                if not conditions:
+                    return
+                c = conditions[-1]
+                if comp not in push_latest or ts > push_latest[comp][0]:
+                    annotations = pr.get('metadata', {}).get('annotations', {})
+                    push_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
 
             # Source 1: KubeArchive (has the full PipelineRun history)
             print(f"  → Querying KubeArchive for application {self.config.k8s.application_name}...")
@@ -99,33 +117,24 @@ class ComprehensiveCollector:
                 }
 
                 # Paginate through results (max 3 pages = 1500 PipelineRuns)
-                all_archive_prs = []
+                total_archive = 0
                 for _ in range(3):
                     resp = session.get(url, params=params, timeout=30)
                     if resp.status_code != 200:
                         break
                     data = resp.json()
-                    all_archive_prs.extend(data.get('items', []))
+                    items = data.get('items', [])
+                    total_archive += len(items)
+                    for pr in items:
+                        process_pipelinerun(pr)
                     cont = data.get('metadata', {}).get('continue')
                     if cont:
                         params['continue'] = cont
                     else:
                         break
 
-                if all_archive_prs:
-                    print(f"  ✓ Found {len(all_archive_prs)} PipelineRuns in KubeArchive")
-
-                    for pr in all_archive_prs:
-                        comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
-                        if not comp:
-                            continue
-                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                        conditions = pr.get('status', {}).get('conditions', [])
-                        if conditions:
-                            c = conditions[-1]
-                            if comp not in component_latest or ts > component_latest[comp][0]:
-                                annotations = pr.get('metadata', {}).get('annotations', {})
-                                component_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
+                if total_archive:
+                    print(f"  ✓ Found {total_archive} PipelineRuns in KubeArchive")
             except Exception as e:
                 print(f"  ⚠ KubeArchive query failed: {e}")
 
@@ -146,24 +155,14 @@ class ComprehensiveCollector:
                     data = json.loads(pr_result.stdout)
                     live_prs = data.get('items', [])
                     print(f"  ✓ Found {len(live_prs)} PipelineRuns in live cluster")
-
                     for pr in live_prs:
-                        comp = pr.get('metadata', {}).get('labels', {}).get('appstudio.openshift.io/component')
-                        if not comp:
-                            continue
-                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                        conditions = pr.get('status', {}).get('conditions', [])
-                        if conditions:
-                            c = conditions[-1]
-                            if comp not in component_latest or ts > component_latest[comp][0]:
-                                annotations = pr.get('metadata', {}).get('annotations', {})
-                                component_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
+                        process_pipelinerun(pr)
             except Exception:
                 pass
 
-            # Find components whose latest build failed
+            # Find components whose latest push build failed
             failing_component_names = [
-                comp for comp, (ts, status, reason, _) in component_latest.items()
+                comp for comp, (ts, status, reason, _) in push_latest.items()
                 if status == 'False'
             ]
 
@@ -201,7 +200,7 @@ class ComprehensiveCollector:
 
                 # Fall back to PipelineRun annotations if cluster metadata unavailable
                 if not repo_url:
-                    pr_annotations = component_latest[component_name][3]
+                    pr_annotations = push_latest[component_name][3]
                     repo_url = (
                         pr_annotations.get('pipelinesascode.tekton.dev/repo-url', '') or
                         pr_annotations.get('pipelinesascode.tekton.dev/source-repo-url', '')
@@ -263,9 +262,10 @@ class ComprehensiveCollector:
             return None
 
     def get_last_failed_pipelinerun(self, component_name: str) -> Optional[Dict[str, Any]]:
-        """Get the MOST RECENT failed PipelineRun for a component.
+        """Get the MOST RECENT failed push PipelineRun for a component.
 
         Checks both live cluster and KubeArchive for archived PipelineRuns.
+        Only considers push builds (not incoming re-triggers or pull_request).
 
         Args:
             component_name: Component name.
@@ -274,6 +274,21 @@ class ComprehensiveCollector:
             PipelineRun dictionary with name, uid, status, start_time or None.
         """
         latest_failed = None  # (timestamp, name, uid)
+
+        def check_pr(pr):
+            """Check if PR is a failed push build and track if latest."""
+            nonlocal latest_failed
+            labels = pr.get('metadata', {}).get('labels', {})
+            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+            if event_type != 'push':
+                return
+            conditions = pr.get('status', {}).get('conditions', [])
+            if conditions and conditions[-1].get('status') == 'False':
+                ts = pr.get('metadata', {}).get('creationTimestamp', '')
+                name = pr.get('metadata', {}).get('name')
+                uid = pr.get('metadata', {}).get('uid')
+                if not latest_failed or ts > latest_failed[0]:
+                    latest_failed = (ts, name, uid)
 
         # Source 1: Live cluster
         try:
@@ -291,13 +306,7 @@ class ComprehensiveCollector:
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 for pr in data.get('items', []):
-                    conditions = pr.get('status', {}).get('conditions', [])
-                    if conditions and conditions[-1].get('status') == 'False':
-                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                        name = pr.get('metadata', {}).get('name')
-                        uid = pr.get('metadata', {}).get('uid')
-                        if not latest_failed or ts > latest_failed[0]:
-                            latest_failed = (ts, name, uid)
+                    check_pr(pr)
         except Exception:
             pass
 
@@ -314,13 +323,7 @@ class ComprehensiveCollector:
             if resp.status_code == 200:
                 data = resp.json()
                 for pr in data.get('items', []):
-                    conditions = pr.get('status', {}).get('conditions', [])
-                    if conditions and conditions[-1].get('status') == 'False':
-                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                        name = pr.get('metadata', {}).get('name')
-                        uid = pr.get('metadata', {}).get('uid')
-                        if not latest_failed or ts > latest_failed[0]:
-                            latest_failed = (ts, name, uid)
+                    check_pr(pr)
         except Exception:
             pass
 

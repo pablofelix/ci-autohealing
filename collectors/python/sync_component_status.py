@@ -71,7 +71,10 @@ class StatusSynchronizer:
             return None
 
     def get_current_status(self, component_name: str) -> Optional[Dict[str, Any]]:
-        """Get current build status for a component from live cluster + KubeArchive.
+        """Get current push build status for a component from live cluster + KubeArchive.
+
+        Only considers push builds (not incoming re-triggers) so that a
+        successful re-trigger doesn't incorrectly resolve a push failure.
 
         Args:
             component_name: Component name.
@@ -82,6 +85,22 @@ class StatusSynchronizer:
         import requests
 
         latest = None  # (timestamp, name, uid, reason)
+
+        def check_pr(pr):
+            """Track latest push build only."""
+            nonlocal latest
+            labels = pr.get('metadata', {}).get('labels', {})
+            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+            if event_type != 'push':
+                return
+            ts = pr.get('metadata', {}).get('creationTimestamp', '')
+            conditions = pr.get('status', {}).get('conditions', [])
+            if conditions:
+                name = pr.get('metadata', {}).get('name')
+                uid = pr.get('metadata', {}).get('uid')
+                reason = conditions[-1].get('reason', '')
+                if not latest or ts > latest[0]:
+                    latest = (ts, name, uid, reason)
 
         # Source 1: Live cluster
         try:
@@ -98,14 +117,7 @@ class StatusSynchronizer:
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 for pr in data.get('items', []):
-                    ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                    conditions = pr.get('status', {}).get('conditions', [])
-                    if conditions:
-                        name = pr.get('metadata', {}).get('name')
-                        uid = pr.get('metadata', {}).get('uid')
-                        reason = conditions[-1].get('reason', '')
-                        if not latest or ts > latest[0]:
-                            latest = (ts, name, uid, reason)
+                    check_pr(pr)
         except Exception:
             pass
 
@@ -128,14 +140,7 @@ class StatusSynchronizer:
                 if resp.status_code == 200:
                     data = resp.json()
                     for pr in data.get('items', []):
-                        ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                        conditions = pr.get('status', {}).get('conditions', [])
-                        if conditions:
-                            name = pr.get('metadata', {}).get('name')
-                            uid = pr.get('metadata', {}).get('uid')
-                            reason = conditions[-1].get('reason', '')
-                            if not latest or ts > latest[0]:
-                                latest = (ts, name, uid, reason)
+                        check_pr(pr)
         except Exception:
             pass
 
