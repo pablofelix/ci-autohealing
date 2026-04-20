@@ -228,10 +228,55 @@ EOF
 
 # GET commands
 cmd_get_components() {
+    # Check synchronization status
+    local sync_status=$(python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" 2>/dev/null)
+    local cluster_connected=$(echo "$sync_status" | jq -r '.cluster_connected // false' 2>/dev/null)
+    local in_sync=$(echo "$sync_status" | jq -r '.in_sync // false' 2>/dev/null)
+    local error=$(echo "$sync_status" | jq -r '.error // ""' 2>/dev/null)
+    local missing_count=$(echo "$sync_status" | jq -r '.missing_in_db | length' 2>/dev/null || echo "0")
+    local extra_count=$(echo "$sync_status" | jq -r '.extra_in_db | length' 2>/dev/null || echo "0")
+
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Currently Failing Components${NC}"
     echo -e "${BOLD}========================================${NC}"
     echo ""
+
+    # Show sync status
+    if [ "$cluster_connected" != "true" ]; then
+        echo -e "${RED}⚠ Cluster Status: DISCONNECTED${NC}"
+        echo -e "${YELLOW}  $error${NC}"
+        echo -e "${YELLOW}  Database is OUT OF SYNC with Konflux${NC}"
+        echo -e "${CYAN}  → Login to cluster: oc login <cluster-url>${NC}"
+        echo ""
+    elif [ "$in_sync" != "true" ]; then
+        echo -e "${YELLOW}⚠ Sync Status: OUT OF SYNC${NC}"
+        if [ "$missing_count" != "0" ]; then
+            echo -e "${YELLOW}  Missing in DB: ${missing_count} component(s)${NC}"
+            local missing=$(echo "$sync_status" | jq -r '.missing_in_db[]' 2>/dev/null)
+            while IFS= read -r comp; do
+                [ -n "$comp" ] && echo -e "${YELLOW}    - $comp${NC}"
+            done <<< "$missing"
+        fi
+        if [ "$extra_count" != "0" ]; then
+            echo -e "${YELLOW}  Extra in DB (resolved): ${extra_count} component(s)${NC}"
+            local extra=$(echo "$sync_status" | jq -r '.extra_in_db[]' 2>/dev/null)
+            while IFS= read -r comp; do
+                [ -n "$comp" ] && echo -e "${YELLOW}    - $comp${NC}"
+            done <<< "$extra"
+        fi
+        echo -e "${CYAN}  → Auto-syncing in background...${NC}"
+        echo ""
+
+        # Launch sync in background
+        nohup "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1 &
+        local sync_pid=$!
+        echo -e "${GREEN}  ✓ Sync started (PID: $sync_pid)${NC}"
+        echo -e "${CYAN}  Run 'ic get components' again in ~2 minutes to see updated data${NC}"
+        echo ""
+    else
+        echo -e "${GREEN}✓ Sync Status: IN SYNC${NC}"
+        echo ""
+    fi
 
     # Get currently failing components (last build = Failed)
     local currently_failing=$(sql "
