@@ -1,4 +1,3 @@
-odh-dashboard-v3-4
 odh-mod-arch-mlflow-v3-4
 acme-api-registry-sync-v3-4
 odh-spark-operator-v3-4

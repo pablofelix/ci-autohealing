@@ -77,13 +77,10 @@ def get_failing_components_from_cluster() -> Set[str]:
 def get_components_from_db() -> Set[str]:
     """Get list of currently failing components from database."""
     try:
+        # Use docker exec instead of direct psql
         result = subprocess.run(
-            ['psql',
-             '-h', 'localhost',
-             '-p', '5433',
-             '-U', 'postgres',
-             '-d', 'konflux_monitoring',
-             '-tAc',
+            ['docker', 'exec', 'ci-autohealing-db',
+             'psql', '-U', 'postgres', '-d', 'konflux_monitoring', '-tAc',
              """
              WITH latest_builds AS (
                  SELECT DISTINCT ON (component_name)
@@ -98,17 +95,17 @@ def get_components_from_db() -> Set[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            timeout=10,
-            env={'PGPASSWORD': 'admin'}
+            timeout=10
         )
 
         if result.returncode != 0:
-            return set()
+            return None  # Signal error instead of empty set
 
-        return {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
+        components = {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
+        return components if components else set()  # Empty set is valid (no failures)
 
     except Exception:
-        return set()
+        return None  # Signal error
 
 
 def main():
@@ -131,15 +128,26 @@ def main():
 
     status['cluster_connected'] = True
 
+    # Get components from database (always should work if DB is running)
+    db_components = get_components_from_db()
+    if db_components is None:
+        status['error'] = 'Database connection failed'
+        print(json.dumps(status))
+        sys.exit(0)
+
     # Get components from cluster
     cluster_components = get_failing_components_from_cluster()
-    if not cluster_components and status['cluster_connected']:
-        # Could mean no failures, or query failed
-        # We'll assume it's OK and just show empty
-        pass
 
-    # Get components from database
-    db_components = get_components_from_db()
+    # If cluster query returns empty but we have DB components, something is wrong
+    if len(cluster_components) == 0 and len(db_components) > 0:
+        # Could be: 1) All resolved (unlikely), 2) Query failed, 3) No access
+        # Check if we can query at all
+        status['error'] = 'Cannot query cluster components (may lack permissions)'
+        status['db_components'] = sorted(db_components)
+        status['cluster_components'] = []
+        status['in_sync'] = False
+        print(json.dumps(status))
+        sys.exit(0)
 
     # Calculate differences
     missing_in_db = cluster_components - db_components

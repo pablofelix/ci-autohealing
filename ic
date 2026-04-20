@@ -250,6 +250,13 @@ cmd_get_components() {
         echo ""
     elif [ "$in_sync" != "true" ]; then
         echo -e "${YELLOW}⚠ Sync Status: OUT OF SYNC${NC}"
+
+        # Show error if present
+        if [ -n "$error" ] && [ "$error" != "null" ]; then
+            echo -e "${YELLOW}  Issue: $error${NC}"
+        fi
+
+        # Show differences
         if [ "$missing_count" != "0" ]; then
             echo -e "${YELLOW}  Missing in DB: ${missing_count} component(s)${NC}"
             local missing=$(echo "$sync_status" | jq -r '.missing_in_db[]' 2>/dev/null)
@@ -264,6 +271,14 @@ cmd_get_components() {
                 [ -n "$comp" ] && echo -e "${YELLOW}    - $comp${NC}"
             done <<< "$extra"
         fi
+
+        # Show DB components when cluster query fails
+        if [ "$missing_count" = "0" ] && [ "$extra_count" = "0" ] && [ -n "$error" ]; then
+            local db_count=$(echo "$sync_status" | jq -r '.db_components | length' 2>/dev/null || echo "0")
+            echo -e "${YELLOW}  Components in DB: ${db_count}${NC}"
+            echo -e "${YELLOW}  Expected from UI: 8 (rhai-on-openshift-chart-v3-4, acme-fbc-fragment-v3-4, + 6 others)${NC}"
+        fi
+
         echo -e "${CYAN}  → Auto-syncing in background...${NC}"
         echo ""
 
