@@ -36,7 +36,10 @@ class ConformaCollector:
         )
 
     def get_failing_conforma_pipelineruns(self) -> Dict[str, Dict[str, Any]]:
-        """Get latest failed Conforma PipelineRun per component.
+        """Get components whose latest Conforma PipelineRun failed.
+
+        Tracks the latest PipelineRun per component regardless of status,
+        then returns only those whose latest result is a failure.
 
         Returns:
             Dict of component_name -> {pr_name, pr_uid, scenario, timestamp, pr_data}
@@ -61,7 +64,7 @@ class ConformaCollector:
                 return
 
             status = conditions[-1].get('status')
-            if status != 'False':
+            if status == 'Unknown':
                 return
 
             if comp not in latest_per_component or ts > latest_per_component[comp]['timestamp']:
@@ -70,6 +73,7 @@ class ConformaCollector:
                     'pr_uid': pr.get('metadata', {}).get('uid', ''),
                     'scenario': scenario,
                     'timestamp': ts,
+                    'status': status,
                     'pr_data': pr
                 }
 
@@ -112,7 +116,11 @@ class ConformaCollector:
         except Exception:
             pass
 
-        return latest_per_component
+        # Only return components whose latest PipelineRun failed
+        return {
+            comp: info for comp, info in latest_per_component.items()
+            if info.get('status') == 'False'
+        }
 
     def get_verify_taskrun(self, pr_data: Dict[str, Any]) -> Optional[str]:
         """Find the 'verify' TaskRun name from PipelineRun childReferences."""
