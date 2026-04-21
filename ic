@@ -637,7 +637,11 @@ cmd_describe_component() {
         SELECT pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
                CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
                COALESCE(konflux_logs_url, konflux_url),
-               COALESCE(commit_sha, ''), COALESCE(commit_url, '')
+               COALESCE(commit_sha, ''), COALESCE(commit_url, ''),
+               COALESCE(commit_author, ''), COALESCE(LEFT(commit_message, 120), ''),
+               COALESCE(failed_step_name, ''), COALESCE(error_type, ''),
+               COALESCE(LEFT(error_message, 200), ''),
+               COALESCE(build_duration_seconds::text, '')
         FROM build_failures
         WHERE component_name = '$component'
         ORDER BY first_detected_at DESC
@@ -645,26 +649,50 @@ cmd_describe_component() {
     ")
 
     if [ -n "$pr_data" ]; then
-        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url commit_sha commit_url <<< "$pr_data"
+        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url \
+            commit_sha commit_url commit_author commit_message \
+            failed_step error_type error_message build_duration <<< "$pr_data"
 
         echo -e "${BOLD}========================================${NC}"
         echo -e "${BOLD}Latest PipelineRun${NC}"
         echo -e "${BOLD}========================================${NC}"
         echo ""
         echo -e "${BOLD}PipelineRun:${NC} $pr_name"
-        echo -e "${BOLD}UID:${NC} $pr_uid"
         echo -e "${BOLD}Status:${NC} $status"
         echo -e "${BOLD}Repository:${NC} $repo_url"
         echo -e "${BOLD}Branch:${NC} $branch"
 
         commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
         commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
+        commit_author=$(echo "$commit_author" | xargs 2>/dev/null || echo "")
+        commit_message=$(echo "$commit_message" | xargs 2>/dev/null || echo "")
+        failed_step=$(echo "$failed_step" | xargs 2>/dev/null || echo "")
+        error_type=$(echo "$error_type" | xargs 2>/dev/null || echo "")
+        error_message=$(echo "$error_message" | xargs 2>/dev/null || echo "")
+        build_duration=$(echo "$build_duration" | xargs 2>/dev/null || echo "")
+
         [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
+        [ -n "$commit_author" ] && echo -e "${BOLD}Author:${NC}      $commit_author"
+        [ -n "$commit_message" ] && echo -e "${BOLD}Message:${NC}     $commit_message"
         [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
 
-        echo -e "${BOLD}Has Logs:${NC} $has_logs"
+        if [ -n "$failed_step" ] || [ -n "$error_type" ]; then
+            echo ""
+            echo -e "${BOLD}Failure Info:${NC}"
+            [ -n "$failed_step" ] && echo -e "  Failed Step: ${RED}$failed_step${NC}"
+            [ -n "$error_type" ] && echo -e "  Error Type:  $error_type"
+            [ -n "$error_message" ] && echo -e "  Error:       $error_message"
+            [ -n "$build_duration" ] && echo -e "  Duration:    ${build_duration}s"
+        fi
+
         echo ""
         echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
+
+        # Quay image (derive from component naming convention)
+        local quay_repo=$(echo "$repo_url" | sed 's|https://github.com/acme-org/||' | sed 's|\.git$||')
+        if [ -n "$quay_repo" ]; then
+            echo -e "${BOLD}Quay:${NC}       ${CYAN}https://quay.io/repository/rhoai/${component}${NC}"
+        fi
         echo ""
 
         # Show logs if available
@@ -1688,6 +1716,19 @@ cmd_describe_conforma() {
     [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
     [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
     [ -n "$snapshot" ] && echo -e "${BOLD}Snapshot:${NC}    $snapshot"
+
+    # Container image from violation_details JSON
+    local container_image=$(sql "
+        SELECT violation_details->'components'->0->>'containerImage'
+        FROM conforma_results
+        WHERE pipelinerun_name = '$pr_name' LIMIT 1;
+    " 2>/dev/null | xargs 2>/dev/null || echo "")
+    if [ -n "$container_image" ]; then
+        echo -e "${BOLD}Image:${NC}       $container_image"
+        # Extract Quay repository URL (e.g., quay.io/acme/component@sha256:... -> quay.io/repository/rhoai/component)
+        local quay_path=$(echo "$container_image" | sed -n 's|quay\.io/\([^@]*\)@.*|quay.io/repository/\1|p')
+        [ -n "$quay_path" ] && echo -e "${BOLD}Quay:${NC}        ${CYAN}https://${quay_path}${NC}"
+    fi
 
     # Konflux UI link
     local konflux_url="https://konflux-ui.apps.CLUSTER_DOMAIN/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
