@@ -5,6 +5,9 @@
 
 set -e
 
+# Ensure oc and other tools are in PATH for cron environment
+export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 PYTHON_DIR="$PROJECT_DIR/collectors/python"
