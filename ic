@@ -545,10 +545,16 @@ cmd_get_apps() {
     echo -e "${BOLD}========================================${NC}"
     echo ""
 
-    local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "rhoai-v" | sort -V)
+    local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "rhoai" | sort -V)
 
     if [ -z "$apps" ]; then
-        echo -e "${YELLOW}No RHOAI applications found${NC}"
+        echo -e "${YELLOW}⚠ Cluster unreachable — showing applications from database${NC}"
+        echo ""
+        apps=$(sql "SELECT DISTINCT application FROM build_failures ORDER BY application;" 2>/dev/null)
+    fi
+
+    if [ -z "$apps" ]; then
+        echo -e "${YELLOW}No applications found${NC}"
         exit 1
     fi
 
@@ -556,11 +562,13 @@ cmd_get_apps() {
     local count=0
 
     while IFS= read -r app; do
+        [ -z "$app" ] && continue
         count=$((count + 1))
+        local db_count=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$app';" 2>/dev/null)
         if [ "$app" = "$current" ]; then
-            echo -e "  ${GREEN}✓ ${BOLD}$app${NC} ${CYAN}(current)${NC}"
+            echo -e "  ${GREEN}✓ ${BOLD}$app${NC} ${CYAN}(current)${NC} — ${db_count:-0} records"
         else
-            echo -e "    $app"
+            echo -e "    $app — ${db_count:-0} records"
         fi
     done <<< "$apps"
 
@@ -834,23 +842,34 @@ cmd_config_set_app() {
         exit 1
     fi
 
-    if ! oc get application "$new_app" -n "$NAMESPACE" &>/dev/null; then
-        echo -e "${RED}Error: Application '$new_app' not found${NC}"
-        echo ""
-        cmd_get_apps
-        exit 1
+    # Validate against cluster if reachable, otherwise accept
+    if oc whoami &>/dev/null; then
+        if ! oc get application "$new_app" -n "$NAMESPACE" &>/dev/null; then
+            echo -e "${RED}Error: Application '$new_app' not found in namespace $NAMESPACE${NC}"
+            echo ""
+            cmd_get_apps
+            exit 1
+        fi
+    else
+        echo -e "${YELLOW}⚠ Cluster unreachable, skipping validation${NC}"
     fi
 
     local env_file="$SCRIPT_DIR/.env"
+    touch "$env_file"
     if grep -q "^APPLICATION_NAME=" "$env_file" 2>/dev/null; then
         sed -i "s/^APPLICATION_NAME=.*/APPLICATION_NAME=$new_app/" "$env_file"
     else
         echo "APPLICATION_NAME=$new_app" >> "$env_file"
     fi
 
+    # Clear sync cache (old data is for previous application)
+    sql "UPDATE sync_status SET in_sync = FALSE, cluster_components = '[]', db_components = '[]', missing_in_db = '[]', extra_in_db = '[]', retriggered_components = '[]' WHERE id = 1;" > /dev/null 2>&1
+
+    APPLICATION_NAME="$new_app"
+    export APPLICATION_NAME
+
     echo -e "${GREEN}✓ Application set to: ${CYAN}${new_app}${NC}"
-    echo ""
-    echo "Reload config with: source .env"
+    echo -e "  Sync cache cleared. Run ${CYAN}ic get components -r${NC} to sync."
     echo ""
 }
 

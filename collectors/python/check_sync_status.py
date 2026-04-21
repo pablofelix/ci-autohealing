@@ -7,6 +7,7 @@ Uses KubeArchive API to get archived PipelineRuns (live cluster only
 retains a few recent ones, while KubeArchive has the full history).
 """
 
+import os
 import sys
 import json
 import subprocess
@@ -14,6 +15,9 @@ from collections import defaultdict
 from typing import Set, Dict, Any, Optional
 
 import requests
+
+APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
+NAMESPACE = os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
 
 
 def check_oc_login() -> bool:
@@ -116,9 +120,9 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
             'Accept': 'application/json'
         })
 
-        url = f"{api_url}/apis/tekton.dev/v1/namespaces/NAMESPACE_PLACEHOLDER/pipelineruns"
+        url = f"{api_url}/apis/tekton.dev/v1/namespaces/{NAMESPACE}/pipelineruns"
         params = {
-            'labelSelector': 'appstudio.openshift.io/application=acme-v2-0,pipelines.appstudio.openshift.io/type=build',
+            'labelSelector': f'appstudio.openshift.io/application={APPLICATION_NAME},pipelines.appstudio.openshift.io/type=build',
             'limit': 500
         }
 
@@ -142,8 +146,8 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
     try:
         result = subprocess.run(
             ['oc', 'get', 'pipelinerun',
-             '-n', 'NAMESPACE_PLACEHOLDER',
-             '-l', 'appstudio.openshift.io/application=acme-v2-0,pipelines.appstudio.openshift.io/type=build',
+             '-n', NAMESPACE,
+             '-l', f'appstudio.openshift.io/application={APPLICATION_NAME},pipelines.appstudio.openshift.io/type=build',
              '-o', 'json'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -180,14 +184,14 @@ def get_components_from_db() -> Set[str]:
         result = subprocess.run(
             ['docker', 'exec', 'ci-autohealing-db',
              'psql', '-U', 'postgres', '-d', 'konflux_monitoring', '-tAc',
-             """
+             f"""
              WITH latest_builds AS (
                  SELECT DISTINCT ON (component_name)
                      component_name,
                      status,
                      is_resolved
                  FROM build_failures
-                 WHERE application = 'acme-v2-0'
+                 WHERE application = '{APPLICATION_NAME}'
                  ORDER BY component_name, first_detected_at DESC
              )
              SELECT component_name FROM latest_builds
