@@ -144,6 +144,8 @@ ${BOLD}COMMANDS:${NC}
     ic get components                        List all failing components
     ic get component <name>                  Get component summary
     ic get alerts                            Unified view: builds + Conforma
+    ic get alerts --date <date>              Alerts on a specific date
+    ic get alerts --from <date> --to <date>  Changes between two dates
     ic get conforma                          Conforma test failures
     ic get pipelineruns [--limit N]          List all PipelineRun failures
     ic get pipelinerun <name>                Get PipelineRun details
@@ -1553,8 +1555,56 @@ cmd_get_conforma() {
 # GET ALERTS - unified view of build failures + conforma
 cmd_get_alerts() {
     local refresh=false
-    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
+    local target_date=""
+    local from_date=""
+    local to_date=""
 
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --refresh|-r) refresh=true; shift ;;
+            --date)
+                shift
+                target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                if [ -z "$target_date" ]; then
+                    echo -e "${RED}Error: Invalid date: $1${NC}"
+                    echo "Examples: --date 2026-04-20, --date yesterday, --date '3 days ago'"
+                    exit 1
+                fi
+                shift ;;
+            --from)
+                shift
+                from_date=$(date -d "${1:?--from requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                if [ -z "$from_date" ]; then
+                    echo -e "${RED}Error: Invalid date: $1${NC}"
+                    exit 1
+                fi
+                shift ;;
+            --to)
+                shift
+                to_date=$(date -d "${1:?--to requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                if [ -z "$to_date" ]; then
+                    echo -e "${RED}Error: Invalid date: $1${NC}"
+                    exit 1
+                fi
+                shift ;;
+            *) shift ;;
+        esac
+    done
+
+    # Dispatch to historical view if date flags are used
+    if [ -n "$target_date" ]; then
+        cmd_get_alerts_on_date "$target_date"
+        return
+    fi
+
+    if [ -n "$from_date" ]; then
+        [ -z "$to_date" ] && to_date=$(date '+%Y-%m-%d')
+        cmd_get_alerts_range "$from_date" "$to_date"
+        return
+    fi
+
+    # --- Current alerts (original behavior) ---
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Alerts — ${APPLICATION_NAME}${NC}"
     echo -e "${BOLD}========================================${NC}"
@@ -1747,6 +1797,243 @@ cmd_get_alerts() {
     echo ""
     echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --date yesterday' to see past alerts"
+    echo ""
+}
+
+# GET ALERTS ON DATE - snapshot of alerts on a specific date
+cmd_get_alerts_on_date() {
+    local target_date="$1"
+    local target_end="${target_date} 23:59:59"
+    local display_date=$(date -d "$target_date" '+%a %d %b %Y')
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Alerts on ${display_date} — ${APPLICATION_NAME}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Build failures that were active on that date
+    local build_count=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at <= '$target_end'
+          AND (resolved_at > '$target_date' OR is_resolved = FALSE);
+    ")
+
+    echo -e "${BOLD}Build Failures (${build_count:-0}):${NC}"
+
+    if [ "${build_count:-0}" = "0" ]; then
+        echo -e "  ${GREEN}✓ No build failures on this date${NC}"
+    else
+        sql_table "
+        WITH active_on_date AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, status, pipelinerun_name,
+                first_detected_at, resolved_at, is_resolved
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+              AND first_detected_at <= '$target_end'
+              AND (resolved_at > '$target_date' OR is_resolved = FALSE)
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT
+            component_name as \"Component\",
+            status as \"Status\",
+            TO_CHAR(first_detected_at, 'DD Mon HH24:MI') as \"Detected\",
+            CASE WHEN resolved_at IS NOT NULL AND resolved_at <= '$target_end'
+                THEN TO_CHAR(resolved_at, 'DD Mon HH24:MI')
+                WHEN is_resolved THEN 'Later'
+                ELSE 'Still open'
+            END as \"Resolved\"
+        FROM active_on_date
+        ORDER BY first_detected_at DESC;
+        "
+    fi
+    echo ""
+
+    # Conforma failures that were active on that date
+    local conforma_count=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at <= '$target_end'
+          AND (resolved_at > '$target_date' OR is_resolved = FALSE);
+    ")
+
+    echo -e "${BOLD}Conforma Failures (${conforma_count:-0}):${NC}"
+
+    if [ "${conforma_count:-0}" = "0" ]; then
+        echo -e "  ${GREEN}✓ No Conforma failures on this date${NC}"
+    else
+        sql_table "
+        WITH active_on_date AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, violations_count, warnings_count,
+                first_detected_at, resolved_at, is_resolved
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND first_detected_at <= '$target_end'
+              AND (resolved_at > '$target_date' OR is_resolved = FALSE)
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT
+            component_name as \"Component\",
+            violations_count as \"Violations\",
+            warnings_count as \"Warnings\",
+            TO_CHAR(first_detected_at, 'DD Mon HH24:MI') as \"Detected\",
+            CASE WHEN resolved_at IS NOT NULL AND resolved_at <= '$target_end'
+                THEN TO_CHAR(resolved_at, 'DD Mon HH24:MI')
+                WHEN is_resolved THEN 'Later'
+                ELSE 'Still open'
+            END as \"Resolved\"
+        FROM active_on_date
+        ORDER BY violations_count DESC;
+        "
+    fi
+    echo ""
+
+    local total=$((${build_count:-0} + ${conforma_count:-0}))
+    echo -e "${BOLD}Total: ${total}${NC} (${build_count:-0} builds, ${conforma_count:-0} conforma)"
+    echo ""
+}
+
+# GET ALERTS RANGE - changes between two dates
+cmd_get_alerts_range() {
+    local from_date="$1"
+    local to_date="$2"
+    local to_end="${to_date} 23:59:59"
+    local display_from=$(date -d "$from_date" '+%a %d %b')
+    local display_to=$(date -d "$to_date" '+%a %d %b %Y')
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Alerts ${display_from} → ${display_to} — ${APPLICATION_NAME}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # --- New failures in this range ---
+    local new_build=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at >= '$from_date'
+          AND first_detected_at <= '$to_end';
+    ")
+    local new_conforma=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at >= '$from_date'
+          AND first_detected_at <= '$to_end';
+    ")
+    local new_total=$(( ${new_build:-0} + ${new_conforma:-0} ))
+
+    echo -e "${BOLD}New Failures (${new_total}):${NC}"
+
+    if [ "$new_total" = "0" ]; then
+        echo -e "  ${GREEN}✓ No new failures in this period${NC}"
+    else
+        if [ "${new_build:-0}" != "0" ]; then
+            sql_table "
+            SELECT DISTINCT ON (component_name)
+                component_name as \"Component\",
+                'Build' as \"Type\",
+                status as \"Status\",
+                TO_CHAR(first_detected_at, 'DD Mon HH24:MI') as \"Detected\"
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+              AND first_detected_at >= '$from_date'
+              AND first_detected_at <= '$to_end'
+            ORDER BY component_name, first_detected_at DESC;
+            "
+        fi
+        if [ "${new_conforma:-0}" != "0" ]; then
+            sql_table "
+            SELECT DISTINCT ON (component_name)
+                component_name as \"Component\",
+                'Conforma' as \"Type\",
+                violations_count || ' violations' as \"Status\",
+                TO_CHAR(first_detected_at, 'DD Mon HH24:MI') as \"Detected\"
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND first_detected_at >= '$from_date'
+              AND first_detected_at <= '$to_end'
+            ORDER BY component_name, first_detected_at DESC;
+            "
+        fi
+    fi
+    echo ""
+
+    # --- Resolved in this range ---
+    local resolved_build=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+          AND resolved_at >= '$from_date'
+          AND resolved_at <= '$to_end';
+    ")
+    local resolved_conforma=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND resolved_at >= '$from_date'
+          AND resolved_at <= '$to_end';
+    ")
+    local resolved_total=$(( ${resolved_build:-0} + ${resolved_conforma:-0} ))
+
+    echo -e "${BOLD}Resolved (${resolved_total}):${NC}"
+
+    if [ "$resolved_total" = "0" ]; then
+        echo -e "  ${YELLOW}No failures resolved in this period${NC}"
+    else
+        if [ "${resolved_build:-0}" != "0" ]; then
+            sql_table "
+            SELECT DISTINCT ON (component_name)
+                component_name as \"Component\",
+                'Build' as \"Type\",
+                TO_CHAR(first_detected_at, 'DD Mon') as \"Failed\",
+                TO_CHAR(resolved_at, 'DD Mon HH24:MI') as \"Resolved\",
+                EXTRACT(EPOCH FROM (resolved_at - first_detected_at))::int / 3600 || 'h' as \"Open For\"
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+              AND resolved_at >= '$from_date'
+              AND resolved_at <= '$to_end'
+            ORDER BY component_name, resolved_at DESC;
+            "
+        fi
+        if [ "${resolved_conforma:-0}" != "0" ]; then
+            sql_table "
+            SELECT DISTINCT ON (component_name)
+                component_name as \"Component\",
+                'Conforma' as \"Type\",
+                TO_CHAR(first_detected_at, 'DD Mon') as \"Failed\",
+                TO_CHAR(resolved_at, 'DD Mon HH24:MI') as \"Resolved\",
+                EXTRACT(EPOCH FROM (resolved_at - first_detected_at))::int / 3600 || 'h' as \"Open For\"
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND resolved_at >= '$from_date'
+              AND resolved_at <= '$to_end'
+            ORDER BY component_name, resolved_at DESC;
+            "
+        fi
+    fi
+    echo ""
+
+    # --- Still open at end of range ---
+    local still_open_build=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM build_failures
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at <= '$to_end'
+          AND (resolved_at > '$to_end' OR is_resolved = FALSE);
+    ")
+    local still_open_conforma=$(sql "
+        SELECT COUNT(DISTINCT component_name) FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND first_detected_at <= '$to_end'
+          AND (resolved_at > '$to_end' OR is_resolved = FALSE);
+    ")
+    local still_open=$(( ${still_open_build:-0} + ${still_open_conforma:-0} ))
+
+    echo -e "${BOLD}Still Open at end of period (${still_open}):${NC}"
+    if [ "$still_open" = "0" ]; then
+        echo -e "  ${GREEN}✓ All clear${NC}"
+    else
+        echo -e "  ${still_open_build:-0} build failures, ${still_open_conforma:-0} conforma failures"
+    fi
     echo ""
 }
 
@@ -1853,7 +2140,8 @@ case "${1:-}" in
                 fi
                 ;;
             alerts)
-                cmd_get_alerts "${3:-}"
+                shift 2
+                cmd_get_alerts "$@"
                 ;;
             conforma)
                 cmd_get_conforma "${3:-}"
