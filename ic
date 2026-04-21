@@ -834,6 +834,8 @@ cmd_config_show() {
 
 cmd_config_set_app() {
     local new_app="$1"
+    local force=false
+    [[ "${2:-}" == "--force" || "${2:-}" == "-f" ]] && force=true
 
     if [ -z "$new_app" ]; then
         echo -e "${RED}Error: Application name required${NC}"
@@ -843,7 +845,7 @@ cmd_config_set_app() {
         exit 1
     fi
 
-    # Validate against cluster if reachable, otherwise accept
+    # Validate against cluster if reachable
     if oc whoami &>/dev/null; then
         if ! oc get application "$new_app" -n "$NAMESPACE" &>/dev/null; then
             echo -e "${RED}Error: Application '$new_app' not found in namespace $NAMESPACE${NC}"
@@ -852,7 +854,19 @@ cmd_config_set_app() {
             exit 1
         fi
     else
-        echo -e "${YELLOW}⚠ Cluster unreachable, skipping validation${NC}"
+        # Cluster unreachable — validate against DB
+        local in_db=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$new_app';" 2>/dev/null)
+        if [ "${in_db:-0}" = "0" ] && [ "$force" != true ]; then
+            echo -e "${YELLOW}⚠ Cluster unreachable${NC}"
+            echo -e "${RED}Error: Application '$new_app' not found in database${NC}"
+            echo ""
+            cmd_get_apps
+            echo -e "${CYAN}Use --force to set anyway:${NC} ic config set-app $new_app --force"
+            echo ""
+            exit 1
+        elif [ "${in_db:-0}" = "0" ]; then
+            echo -e "${YELLOW}⚠ Cluster unreachable, application not in database — setting anyway${NC}"
+        fi
     fi
 
     local env_file="$SCRIPT_DIR/.env"
@@ -1439,7 +1453,7 @@ case "${1:-}" in
         ;;
     config)
         case "${2:-}" in
-            set-app) cmd_config_set_app "$3" ;;
+            set-app) cmd_config_set_app "$3" "${4:-}" ;;
             "") cmd_config_show ;;
             *) usage ;;
         esac
