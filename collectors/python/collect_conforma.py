@@ -190,7 +190,23 @@ class ConformaCollector:
 
         return result
 
-    def extract_component_info(self, pr_data: Dict[str, Any]) -> Dict[str, Any]:
+    def get_component_repo_url(self, component_name: str) -> str:
+        """Look up repository URL from the Kubernetes component resource."""
+        try:
+            result = subprocess.run(
+                ['oc', 'get', 'component', component_name,
+                 '-n', self.config.k8s.namespace,
+                 '-o', 'jsonpath={.spec.source.git.url}'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return ''
+
+    def extract_component_info(self, pr_data: Dict[str, Any], component_name: str) -> Dict[str, Any]:
         """Extract snapshot, image, repo, commit from PipelineRun."""
         labels = pr_data.get('metadata', {}).get('labels', {})
         annotations = pr_data.get('metadata', {}).get('annotations', {})
@@ -198,7 +214,6 @@ class ConformaCollector:
 
         snapshot = labels.get('appstudio.openshift.io/snapshot', '')
 
-        # Try to get image from params
         image = ''
         for p in params:
             if p.get('name') == 'IMAGES':
@@ -209,11 +224,21 @@ class ConformaCollector:
         commit_sha = annotations.get('build.appstudio.redhat.com/commit_sha', '') or \
                      annotations.get('pipelinesascode.tekton.dev/sha', '')
 
+        # Test PipelineRuns often lack repo-url — look it up from the component resource
+        if not repo_url:
+            repo_url = self.get_component_repo_url(component_name)
+
+        # Build commit URL from repo + sha
+        commit_url = ''
+        if repo_url and commit_sha:
+            commit_url = f"{repo_url.rstrip('.git')}/commit/{commit_sha}"
+
         return {
             'snapshot_name': snapshot,
             'container_image': image,
             'repository_url': repo_url,
-            'commit_sha': commit_sha
+            'commit_sha': commit_sha,
+            'commit_url': commit_url
         }
 
     def save_to_db(self, component: str, scenario: str, pr_name: str, pr_uid: str,
@@ -248,12 +273,17 @@ class ConformaCollector:
                             successes_count = %s,
                             violation_summary = %s,
                             violation_details = %s,
+                            repository_url = COALESCE(NULLIF(%s, ''), repository_url),
+                            commit_url = COALESCE(NULLIF(%s, ''), commit_url),
                             last_updated_at = NOW()
                         WHERE pipelinerun_name = %s
                         """,
                         (violations['violations_count'], violations['warnings_count'],
                          violations['successes_count'], violations['violation_summary'],
-                         violation_details_json, pr_name)
+                         violation_details_json,
+                         comp_info.get('repository_url', ''),
+                         comp_info.get('commit_url', ''),
+                         pr_name)
                     )
                     print(f"    ✓ Updated in DB")
                 else:
@@ -264,9 +294,9 @@ class ConformaCollector:
                             pipelinerun_name, pipelinerun_uid,
                             status, violations_count, warnings_count, successes_count,
                             violation_summary, violation_details,
-                            snapshot_name, container_image, repository_url, commit_sha
+                            snapshot_name, container_image, repository_url, commit_sha, commit_url
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         """,
                         (self.config.k8s.application_name, component, scenario,
@@ -275,7 +305,8 @@ class ConformaCollector:
                          violations['successes_count'], violations['violation_summary'],
                          violation_details_json,
                          comp_info.get('snapshot_name'), comp_info.get('container_image'),
-                         comp_info.get('repository_url'), comp_info.get('commit_sha'))
+                         comp_info.get('repository_url'), comp_info.get('commit_sha'),
+                         comp_info.get('commit_url'))
                     )
                     print(f"    ✓ Inserted into DB")
 
@@ -349,7 +380,7 @@ class ConformaCollector:
             violations = self.extract_violation_details(info['pr_name'], info['pr_data'])
 
             # Extract component info (image, repo, commit)
-            comp_info = self.extract_component_info(info['pr_data'])
+            comp_info = self.extract_component_info(info['pr_data'], component)
 
             # Save to DB
             if self.save_to_db(component, info['scenario'], info['pr_name'],

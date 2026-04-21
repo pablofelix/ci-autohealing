@@ -588,6 +588,7 @@ CREATE TABLE IF NOT EXISTS conforma_results (
     container_image TEXT,
     repository_url TEXT,
     commit_sha VARCHAR(100),
+    commit_url TEXT,
     first_detected_at TIMESTAMP DEFAULT NOW(),
     last_updated_at TIMESTAMP DEFAULT NOW(),
     is_resolved BOOLEAN DEFAULT FALSE,

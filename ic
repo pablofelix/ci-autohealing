@@ -636,7 +636,8 @@ cmd_describe_component() {
     local pr_data=$(sql "
         SELECT pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
                CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
-               konflux_logs_url
+               COALESCE(konflux_logs_url, konflux_url),
+               COALESCE(commit_sha, ''), COALESCE(commit_url, '')
         FROM build_failures
         WHERE component_name = '$component'
         ORDER BY first_detected_at DESC
@@ -644,7 +645,7 @@ cmd_describe_component() {
     ")
 
     if [ -n "$pr_data" ]; then
-        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url <<< "$pr_data"
+        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url commit_sha commit_url <<< "$pr_data"
 
         echo -e "${BOLD}========================================${NC}"
         echo -e "${BOLD}Latest PipelineRun${NC}"
@@ -655,6 +656,12 @@ cmd_describe_component() {
         echo -e "${BOLD}Status:${NC} $status"
         echo -e "${BOLD}Repository:${NC} $repo_url"
         echo -e "${BOLD}Branch:${NC} $branch"
+
+        commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
+        commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
+        [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
+        [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
+
         echo -e "${BOLD}Has Logs:${NC} $has_logs"
         echo ""
         echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
@@ -1644,7 +1651,8 @@ cmd_describe_conforma() {
         SELECT component_name, scenario, pipelinerun_name, status,
                violations_count, warnings_count, successes_count,
                TO_CHAR(first_detected_at, 'YYYY-MM-DD HH24:MI:SS'),
-               COALESCE(repository_url, ''), COALESCE(commit_sha, ''), COALESCE(snapshot_name, '')
+               COALESCE(repository_url, ''), COALESCE(commit_sha, ''),
+               COALESCE(snapshot_name, ''), COALESCE(commit_url, '')
         FROM conforma_results
         WHERE component_name = '$component'
           AND application = '$APPLICATION_NAME'
@@ -1660,7 +1668,7 @@ cmd_describe_conforma() {
     fi
 
     IFS='|' read -r comp_name scenario pr_name status violations warnings successes \
-        detected_at repo_url commit_sha snapshot <<< "$data"
+        detected_at repo_url commit_sha snapshot commit_url <<< "$data"
 
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Conforma Results: $comp_name${NC}"
@@ -1674,9 +1682,11 @@ cmd_describe_conforma() {
     repo_url=$(echo "$repo_url" | xargs 2>/dev/null || echo "")
     commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
     snapshot=$(echo "$snapshot" | xargs 2>/dev/null || echo "")
+    commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
 
     [ -n "$repo_url" ] && echo -e "${BOLD}Repository:${NC}  $repo_url"
     [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
+    [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
     [ -n "$snapshot" ] && echo -e "${BOLD}Snapshot:${NC}    $snapshot"
 
     # Konflux UI link
