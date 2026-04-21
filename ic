@@ -243,7 +243,7 @@ trigger_background_sync() {
         echo $$ > "$SYNC_PID_FILE"
         python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
         # If out of sync, also launch collector
-        local is_sync=$(sql "SELECT in_sync FROM sync_status WHERE id = 1;" 2>/dev/null)
+        local is_sync=$(sql "SELECT in_sync FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
         if [ "$is_sync" = "f" ]; then
             "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1
         fi
@@ -259,6 +259,7 @@ cmd_get_components() {
 
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Currently Failing Components${NC}"
+    echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
     echo -e "${BOLD}========================================${NC}"
     echo ""
 
@@ -275,7 +276,7 @@ cmd_get_components() {
                 COALESCE(check_duration_seconds::text, '0'),
                 TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS'),
                 COALESCE(retriggered_components::text, '[]')
-            FROM sync_status WHERE id = 1;
+            FROM sync_status WHERE application = '$APPLICATION_NAME';
         " 2>/dev/null
     }
 
@@ -297,7 +298,7 @@ cmd_get_components() {
         python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
 
         # If out of sync, also trigger comprehensive collection
-        local refresh_sync=$(sql "SELECT in_sync FROM sync_status WHERE id = 1;" 2>/dev/null | tr -d ' ')
+        local refresh_sync=$(sql "SELECT in_sync FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null | tr -d ' ')
         if [ "$refresh_sync" = "f" ]; then
             echo -e "${CYAN}Out of sync — collecting missing component data...${NC}"
             "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1
@@ -752,7 +753,7 @@ cmd_describe_by_number() {
     local extra_args="$@"
 
     # Read retriggered components from sync cache
-    local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE id = 1;" 2>/dev/null)
+    local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
 
     # Use same ordering as cmd_get_components: Push Failed first (by failures desc), then Re-triggered
     local component=$(sql "
@@ -862,14 +863,17 @@ cmd_config_set_app() {
         echo "APPLICATION_NAME=$new_app" >> "$env_file"
     fi
 
-    # Clear sync cache (old data is for previous application)
-    sql "UPDATE sync_status SET in_sync = FALSE, cluster_components = '[]', db_components = '[]', missing_in_db = '[]', extra_in_db = '[]', retriggered_components = '[]' WHERE id = 1;" > /dev/null 2>&1
-
     APPLICATION_NAME="$new_app"
     export APPLICATION_NAME
 
     echo -e "${GREEN}✓ Application set to: ${CYAN}${new_app}${NC}"
-    echo -e "  Sync cache cleared. Run ${CYAN}ic get components -r${NC} to sync."
+    # Check if we have cached data for this app
+    local has_cache=$(sql "SELECT COUNT(*) FROM sync_status WHERE application = '$new_app';" 2>/dev/null)
+    if [ "$has_cache" = "0" ] || [ -z "$has_cache" ]; then
+        echo -e "  No cached data yet. Run ${CYAN}ic get components -r${NC} to sync."
+    else
+        echo -e "  Cached sync data available. Run ${CYAN}ic get components${NC} to view."
+    fi
     echo ""
 }
 

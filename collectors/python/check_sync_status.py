@@ -223,18 +223,31 @@ def save_sync_status(status: Dict[str, Any], duration: float) -> None:
             error_val = f"'{escaped}'"
 
         sql = f"""
-        UPDATE sync_status SET
+        INSERT INTO sync_status (application, last_checked_at, in_sync, cluster_connected,
+            cluster_components, db_components, missing_in_db, extra_in_db,
+            retriggered_components, error, check_duration_seconds)
+        VALUES (
+            '{APPLICATION_NAME}', NOW(),
+            {'TRUE' if status['in_sync'] else 'FALSE'},
+            {'TRUE' if status['cluster_connected'] else 'FALSE'},
+            '{json.dumps(status['cluster_components'])}',
+            '{json.dumps(status['db_components'])}',
+            '{json.dumps(status['missing_in_db'])}',
+            '{json.dumps(status['extra_in_db'])}',
+            '{json.dumps(status.get('retriggered_components', []))}',
+            {error_val}, {duration:.2f}
+        )
+        ON CONFLICT (application) DO UPDATE SET
             last_checked_at = NOW(),
-            in_sync = {'TRUE' if status['in_sync'] else 'FALSE'},
-            cluster_connected = {'TRUE' if status['cluster_connected'] else 'FALSE'},
-            cluster_components = '{json.dumps(status['cluster_components'])}',
-            db_components = '{json.dumps(status['db_components'])}',
-            missing_in_db = '{json.dumps(status['missing_in_db'])}',
-            extra_in_db = '{json.dumps(status['extra_in_db'])}',
-            retriggered_components = '{json.dumps(status.get('retriggered_components', []))}',
-            error = {error_val},
-            check_duration_seconds = {duration:.2f}
-        WHERE id = 1;
+            in_sync = EXCLUDED.in_sync,
+            cluster_connected = EXCLUDED.cluster_connected,
+            cluster_components = EXCLUDED.cluster_components,
+            db_components = EXCLUDED.db_components,
+            missing_in_db = EXCLUDED.missing_in_db,
+            extra_in_db = EXCLUDED.extra_in_db,
+            retriggered_components = EXCLUDED.retriggered_components,
+            error = EXCLUDED.error,
+            check_duration_seconds = EXCLUDED.check_duration_seconds;
         """
 
         subprocess.run(
