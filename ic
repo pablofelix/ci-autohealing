@@ -1740,7 +1740,7 @@ cmd_get_alerts() {
     fi
 
     local total=$((${build_count:-0} + ${conforma_count:-0}))
-    echo -e "${BOLD}Total alerts: ${RED}${total}${NC}"
+    echo -e "${BOLD}Total alerts: ${RED}${total}${NC} (${build_count:-0} builds, ${conforma_count:-0} conforma)"
     if [ "$running_count" -gt 0 ]; then
         echo -e "${BOLD}In progress: ${YELLOW}${running_count}${NC}"
     fi

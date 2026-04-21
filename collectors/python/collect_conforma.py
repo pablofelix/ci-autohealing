@@ -287,6 +287,17 @@ class ConformaCollector:
                     )
                     print(f"    ✓ Updated in DB")
                 else:
+                    # Resolve older entries for this component before inserting
+                    cursor.execute(
+                        """
+                        UPDATE conforma_results
+                        SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
+                        WHERE component_name = %s AND application = %s AND is_resolved = FALSE
+                        """,
+                        (component, self.config.k8s.application_name)
+                    )
+                    superseded = cursor.rowcount
+
                     cursor.execute(
                         """
                         INSERT INTO conforma_results (
@@ -308,7 +319,10 @@ class ConformaCollector:
                          comp_info.get('repository_url'), comp_info.get('commit_sha'),
                          comp_info.get('commit_url'))
                     )
-                    print(f"    ✓ Inserted into DB")
+                    if superseded:
+                        print(f"    ✓ Inserted into DB (superseded {superseded} older entries)")
+                    else:
+                        print(f"    ✓ Inserted into DB")
 
                 conn.commit()
                 return True
