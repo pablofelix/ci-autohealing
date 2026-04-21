@@ -11,8 +11,8 @@ if ! command -v crontab &> /dev/null; then
     exit 1
 fi
 
-# Cron schedule: Every 15 minutes
-CRON_SCHEDULE="*/15 * * * *"
+# Cron schedule: Every 20 minutes
+CRON_SCHEDULE="*/20 * * * *"
 
 # Cron job entry
 CRON_JOB="$CRON_SCHEDULE $CRON_SCRIPT"
@@ -20,7 +20,7 @@ CRON_COMMENT="# CI Auto-Healing: Collect logs from failed PipelineRuns"
 
 echo "Installing cron job for log collection..."
 echo ""
-echo "Schedule: Every 15 minutes"
+echo "Schedule: Every 20 minutes"
 echo "Script: $CRON_SCRIPT"
 echo ""
 
