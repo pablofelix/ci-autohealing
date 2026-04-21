@@ -60,6 +60,7 @@ def get_failing_conforma_components() -> Dict[str, Any]:
     # Track latest conforma test per component
     # component -> (timestamp, pr_name, pr_uid, status, scenario)
     latest_per_component = {}
+    running_conforma = {}  # component -> (timestamp, pr_name, scenario)
 
     def process_pipelinerun(pr):
         labels = pr.get('metadata', {}).get('labels', {})
@@ -74,14 +75,22 @@ def get_failing_conforma_components() -> Dict[str, Any]:
             return
 
         ts = pr.get('metadata', {}).get('creationTimestamp', '')
+        pr_name = pr.get('metadata', {}).get('name', '')
+        pr_uid = pr.get('metadata', {}).get('uid', '')
         conditions = pr.get('status', {}).get('conditions', [])
+
         if not conditions:
+            if comp not in running_conforma or ts > running_conforma[comp][0]:
+                running_conforma[comp] = (ts, pr_name, scenario)
             return
 
         c = conditions[-1]
         status = c.get('status')
-        pr_name = pr.get('metadata', {}).get('name', '')
-        pr_uid = pr.get('metadata', {}).get('uid', '')
+
+        if status == 'Unknown':
+            if comp not in running_conforma or ts > running_conforma[comp][0]:
+                running_conforma[comp] = (ts, pr_name, scenario)
+            return
 
         if comp not in latest_per_component or ts > latest_per_component[comp][0]:
             latest_per_component[comp] = (ts, pr_name, pr_uid, status, scenario)
@@ -144,7 +153,18 @@ def get_failing_conforma_components() -> Dict[str, Any]:
                 'timestamp': ts
             }
 
-    return {'failing': failing, 'details': details}
+    # Only report running conforma tests that are newer than completed ones
+    active_running = {}
+    for comp, (run_ts, run_pr, run_scenario) in running_conforma.items():
+        if comp not in latest_per_component or run_ts > latest_per_component[comp][0]:
+            active_running[comp] = {
+                'timestamp': run_ts,
+                'pipelinerun_name': run_pr,
+                'scenario': run_scenario,
+                'type': 'conforma'
+            }
+
+    return {'failing': failing, 'details': details, 'running': active_running}
 
 
 def get_conforma_components_from_db() -> Set[str]:
@@ -168,13 +188,17 @@ def get_conforma_components_from_db() -> Set[str]:
         return set()
 
 
-def save_conforma_status(failing_components: Set[str]) -> None:
-    """Save failing Conforma components to sync_status cache."""
+def save_conforma_status(failing_components: Set[str], running: Dict[str, Any] = None) -> None:
+    """Save failing Conforma components and running tests to sync_status cache."""
     try:
         components_json = json.dumps(sorted(failing_components))
+        running_json = json.dumps([
+            {'component': comp, **info} for comp, info in sorted((running or {}).items())
+        ])
         sql = f"""
         UPDATE sync_status
-        SET conforma_components = '{components_json}'
+        SET conforma_components = '{components_json}',
+            running_conforma = '{running_json}'
         WHERE application = '{APPLICATION_NAME}';
         """
         subprocess.run(
@@ -195,6 +219,7 @@ def main():
     cluster_result = get_failing_conforma_components()
     failing = cluster_result['failing']
     details = cluster_result['details']
+    running = cluster_result.get('running', {})
 
     db_components = get_conforma_components_from_db()
 
@@ -202,12 +227,14 @@ def main():
     extra_in_db = db_components - failing
 
     # Save to sync_status cache
-    save_conforma_status(failing)
+    save_conforma_status(failing, running)
 
     duration = time.time() - start_time
 
     print(f"  Conforma failures in cluster: {len(failing)}")
     print(f"  Conforma failures in DB: {len(db_components)}")
+    if running:
+        print(f"  Conforma tests running: {len(running)} ({sorted(running.keys())})")
     if missing_in_db:
         print(f"  Missing in DB: {sorted(missing_in_db)}")
     if extra_in_db:
@@ -219,6 +246,7 @@ def main():
         'db_components': sorted(db_components),
         'missing_in_db': sorted(missing_in_db),
         'extra_in_db': sorted(extra_in_db),
+        'running_conforma': [{'component': c, **i} for c, i in sorted(running.items())],
         'details': {k: v for k, v in details.items()},
         'duration': round(duration, 2)
     }

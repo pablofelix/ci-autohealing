@@ -564,6 +564,8 @@ CREATE TABLE IF NOT EXISTS sync_status (
     extra_in_db JSONB DEFAULT '[]',
     retriggered_components JSONB DEFAULT '[]',
     conforma_components JSONB DEFAULT '[]',
+    running_builds JSONB DEFAULT '[]',
+    running_conforma JSONB DEFAULT '[]',
     error TEXT,
     check_duration_seconds NUMERIC(8,2)
 );

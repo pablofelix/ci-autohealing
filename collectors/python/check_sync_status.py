@@ -88,6 +88,7 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
     # Track latest push and incoming builds per component
     push_latest = {}      # component -> (timestamp, status, reason)
     incoming_latest = {}   # component -> (timestamp, status, reason)
+    running_builds = {}    # component -> (timestamp, pr_name) for currently running builds
 
     def process_pipelinerun(pr):
         """Process a single PipelineRun into push/incoming tracking."""
@@ -97,12 +98,26 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
             return
         event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
         ts = pr.get('metadata', {}).get('creationTimestamp', '')
+        pr_name = pr.get('metadata', {}).get('name', '')
         conditions = pr.get('status', {}).get('conditions', [])
+
         if not conditions:
+            # No conditions = still initializing, track as running
+            if event_type in ('push', 'incoming'):
+                if comp not in running_builds or ts > running_builds[comp][0]:
+                    running_builds[comp] = (ts, pr_name)
             return
+
         c = conditions[-1]
         status = c.get('status')
         reason = c.get('reason')
+
+        # status 'Unknown' = still running in Tekton
+        if status == 'Unknown':
+            if event_type in ('push', 'incoming'):
+                if comp not in running_builds or ts > running_builds[comp][0]:
+                    running_builds[comp] = (ts, pr_name)
+            return
 
         if event_type == 'push':
             if comp not in push_latest or ts > push_latest[comp][0]:
@@ -174,7 +189,20 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
                 if inc_status == 'True' and inc_ts > push_ts:
                     retriggered.add(comp)
 
-    return {'failing': failing, 'retriggered': retriggered}
+    # Don't report running builds for components that already have a completed build
+    # (only track truly in-progress ones where no final result exists yet, or the
+    # running build is newer than the latest completed one)
+    active_running = {}
+    for comp, (run_ts, run_pr) in running_builds.items():
+        is_newer = True
+        if comp in push_latest and run_ts <= push_latest[comp][0]:
+            is_newer = False
+        if comp in incoming_latest and run_ts <= incoming_latest[comp][0]:
+            is_newer = False
+        if is_newer:
+            active_running[comp] = {'timestamp': run_ts, 'pipelinerun_name': run_pr, 'type': 'build'}
+
+    return {'failing': failing, 'retriggered': retriggered, 'running': active_running}
 
 
 def get_components_from_db() -> Set[str]:
@@ -222,10 +250,12 @@ def save_sync_status(status: Dict[str, Any], duration: float) -> None:
             escaped = status['error'].replace("'", "''")
             error_val = f"'{escaped}'"
 
+        running_builds_json = json.dumps(status.get('running_builds', []))
+
         sql = f"""
         INSERT INTO sync_status (application, last_checked_at, in_sync, cluster_connected,
             cluster_components, db_components, missing_in_db, extra_in_db,
-            retriggered_components, error, check_duration_seconds)
+            retriggered_components, running_builds, error, check_duration_seconds)
         VALUES (
             '{APPLICATION_NAME}', NOW(),
             {'TRUE' if status['in_sync'] else 'FALSE'},
@@ -235,6 +265,7 @@ def save_sync_status(status: Dict[str, Any], duration: float) -> None:
             '{json.dumps(status['missing_in_db'])}',
             '{json.dumps(status['extra_in_db'])}',
             '{json.dumps(status.get('retriggered_components', []))}',
+            '{running_builds_json}',
             {error_val}, {duration:.2f}
         )
         ON CONFLICT (application) DO UPDATE SET
@@ -246,6 +277,7 @@ def save_sync_status(status: Dict[str, Any], duration: float) -> None:
             missing_in_db = EXCLUDED.missing_in_db,
             extra_in_db = EXCLUDED.extra_in_db,
             retriggered_components = EXCLUDED.retriggered_components,
+            running_builds = EXCLUDED.running_builds,
             error = EXCLUDED.error,
             check_duration_seconds = EXCLUDED.check_duration_seconds;
         """
@@ -274,6 +306,7 @@ def main():
         'missing_in_db': [],
         'extra_in_db': [],
         'retriggered_components': [],
+        'running_builds': [],
         'error': None
     }
 
@@ -298,6 +331,7 @@ def main():
     cluster_result = get_failing_components_from_cluster()
     cluster_components = cluster_result['failing']
     retriggered = cluster_result['retriggered']
+    running = cluster_result.get('running', {})
 
     # Calculate differences (exclude retriggered from "missing" — they'll be collected)
     missing_in_db = cluster_components - db_components
@@ -309,6 +343,9 @@ def main():
     status['missing_in_db'] = sorted(missing_in_db)
     status['extra_in_db'] = sorted(extra_in_db)
     status['retriggered_components'] = sorted(retriggered)
+    status['running_builds'] = [
+        {'component': comp, **info} for comp, info in sorted(running.items())
+    ]
     status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
 
     # Save to DB cache

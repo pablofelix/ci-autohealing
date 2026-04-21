@@ -287,8 +287,14 @@ class ComprehensiveCollector:
                 ts = pr.get('metadata', {}).get('creationTimestamp', '')
                 name = pr.get('metadata', {}).get('name')
                 uid = pr.get('metadata', {}).get('uid')
+                reason = conditions[-1].get('reason', '')
+                status = BuildStatus.FAILED
+                if reason == 'PipelineRunCancelled':
+                    status = 'Cancelled'
+                elif reason in ('PipelineRunTimeout', 'TaskRunTimeout'):
+                    status = 'Timeout'
                 if not latest_failed or ts > latest_failed[0]:
-                    latest_failed = (ts, name, uid)
+                    latest_failed = (ts, name, uid, status)
 
         # Source 1: Live cluster
         try:
@@ -328,10 +334,11 @@ class ComprehensiveCollector:
             pass
 
         if latest_failed:
+            status = latest_failed[3] if len(latest_failed) > 3 else BuildStatus.FAILED
             return {
                 'name': latest_failed[1],
                 'uid': latest_failed[2],
-                'status': BuildStatus.FAILED,
+                'status': status,
                 'started': latest_failed[0]
             }
 
@@ -694,7 +701,9 @@ class ComprehensiveCollector:
                          details.get('commit_sha'), details.get('commit_short_sha'),
                          details.get('commit_url'), details.get('commit_message'),
                          details.get('commit_author'), details.get('pr_number'),
-                         details.get('pr_url'), 'Failed', error_message, error_type,
+                         details.get('pr_url'),
+                         pr_info['status'].value if isinstance(pr_info['status'], BuildStatus) else pr_info['status'],
+                         error_message, error_type,
                          failed_step, duration, details.get('konflux_url'),
                          details.get('pipeline_url'), logs)
                     )

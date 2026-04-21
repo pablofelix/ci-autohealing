@@ -658,7 +658,11 @@ cmd_describe_component() {
         echo -e "${BOLD}========================================${NC}"
         echo ""
         echo -e "${BOLD}PipelineRun:${NC} $pr_name"
-        echo -e "${BOLD}Status:${NC} $status"
+        case "$status" in
+            Cancelled) echo -e "${BOLD}Status:${NC} ${YELLOW}Cancelled${NC}" ;;
+            Timeout)   echo -e "${BOLD}Status:${NC} ${YELLOW}Timeout${NC}" ;;
+            *)         echo -e "${BOLD}Status:${NC} $status" ;;
+        esac
         echo -e "${BOLD}Repository:${NC} $repo_url"
         echo -e "${BOLD}Branch:${NC} $branch"
 
@@ -807,7 +811,14 @@ cmd_describe_by_number() {
     ")
     build_count=${build_count:-0}
 
-    local conforma_count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+    local conforma_count=$(sql "
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY component_name, last_updated_at DESC
+        ) sub;
+    " 2>/dev/null)
     conforma_count=${conforma_count:-0}
 
     local total=$((build_count + conforma_count))
@@ -856,9 +867,15 @@ cmd_describe_by_number() {
         # Falls in conforma range
         local conforma_offset=$((number - build_count - 1))
         local component=$(sql "
-            SELECT component_name FROM conforma_results
-            WHERE application = '$APPLICATION_NAME'
-              AND is_resolved = FALSE
+            WITH latest_conforma AS (
+                SELECT DISTINCT ON (component_name)
+                    component_name, violations_count
+                FROM conforma_results
+                WHERE application = '$APPLICATION_NAME'
+                  AND is_resolved = FALSE
+                ORDER BY component_name, last_updated_at DESC
+            )
+            SELECT component_name FROM latest_conforma
             ORDER BY violations_count DESC
             OFFSET $conforma_offset
             LIMIT 1;
@@ -1633,7 +1650,14 @@ cmd_get_alerts() {
     echo ""
 
     # --- Section 2: Conforma Failures ---
-    local conforma_count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+    local conforma_count=$(sql "
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY component_name, last_updated_at DESC
+        ) sub;
+    " 2>/dev/null)
 
     echo -e "${BOLD}Conforma Failures (${conforma_count:-0}):${NC}"
 
@@ -1643,22 +1667,83 @@ cmd_get_alerts() {
         # Offset numbering to continue from build failures
         local offset=${build_count:-0}
         sql_table "
+        WITH latest_conforma AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, violations_count, warnings_count, first_detected_at
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND is_resolved = FALSE
+            ORDER BY component_name, last_updated_at DESC
+        )
         SELECT
             (ROW_NUMBER() OVER (ORDER BY violations_count DESC) + $offset) as \"#\",
             component_name as \"Component\",
             violations_count as \"Violations\",
             warnings_count as \"Warnings\",
             TO_CHAR(first_detected_at, 'DD Mon') as \"Since\"
-        FROM conforma_results
-        WHERE application = '$APPLICATION_NAME'
-          AND is_resolved = FALSE
+        FROM latest_conforma
         ORDER BY violations_count DESC;
         "
     fi
     echo ""
 
+    # --- Section 3: In Progress ---
+    local running_builds_json running_conforma_json
+    running_builds_json=$(sql "SELECT COALESCE(running_builds::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
+    running_conforma_json=$(sql "SELECT COALESCE(running_conforma::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
+
+    # Combine both into a single list
+    local running_count=0
+    local running_items=""
+
+    if [ -n "$running_builds_json" ] && [ "$running_builds_json" != "[]" ]; then
+        local build_items=$(echo "$running_builds_json" | jq -r '.[] | "\(.component)|\(.timestamp)|\(.pipelinerun_name)|Build"' 2>/dev/null)
+        if [ -n "$build_items" ]; then
+            running_items="$build_items"
+        fi
+    fi
+
+    if [ -n "$running_conforma_json" ] && [ "$running_conforma_json" != "[]" ]; then
+        local conforma_items=$(echo "$running_conforma_json" | jq -r '.[] | "\(.component)|\(.timestamp)|\(.pipelinerun_name)|Conforma"' 2>/dev/null)
+        if [ -n "$conforma_items" ]; then
+            if [ -n "$running_items" ]; then
+                running_items="$running_items"$'\n'"$conforma_items"
+            else
+                running_items="$conforma_items"
+            fi
+        fi
+    fi
+
+    if [ -n "$running_items" ]; then
+        running_count=$(echo "$running_items" | wc -l)
+        echo -e "${BOLD}In Progress (${running_count}):${NC}"
+        printf "  %-40s %-10s %-18s %s\n" "Component" "Type" "Started" "Duration"
+        printf "  %-40s %-10s %-18s %s\n" "$(printf '%0.s-' {1..40})" "$(printf '%0.s-' {1..10})" "$(printf '%0.s-' {1..18})" "$(printf '%0.s-' {1..10})"
+
+        local now_epoch=$(date +%s)
+        echo "$running_items" | while IFS='|' read -r r_comp r_ts r_pr r_type; do
+            local start_epoch=$(date -d "$r_ts" +%s 2>/dev/null || echo "$now_epoch")
+            local elapsed=$(( now_epoch - start_epoch ))
+            local duration_str=""
+            if [ "$elapsed" -ge 7200 ]; then
+                duration_str="${YELLOW}⚠ $((elapsed / 3600))h $((elapsed % 3600 / 60))m (stuck?)${NC}"
+            elif [ "$elapsed" -ge 3600 ]; then
+                duration_str="$((elapsed / 3600))h $((elapsed % 3600 / 60))m"
+            else
+                duration_str="$((elapsed / 60))m"
+            fi
+            local started_fmt=$(date -d "$r_ts" '+%d %b %H:%M' 2>/dev/null || echo "$r_ts")
+            printf "  %-40s %-10s %-18s " "${r_comp:0:40}" "$r_type" "$started_fmt"
+            echo -e "$duration_str"
+        done
+        echo ""
+    fi
+
     local total=$((${build_count:-0} + ${conforma_count:-0}))
     echo -e "${BOLD}Total alerts: ${RED}${total}${NC}"
+    if [ "$running_count" -gt 0 ]; then
+        echo -e "${BOLD}In progress: ${YELLOW}${running_count}${NC}"
+    fi
     echo ""
     echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
