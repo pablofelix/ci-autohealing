@@ -563,9 +563,40 @@ CREATE TABLE IF NOT EXISTS sync_status (
     missing_in_db JSONB DEFAULT '[]',
     extra_in_db JSONB DEFAULT '[]',
     retriggered_components JSONB DEFAULT '[]',
+    conforma_components JSONB DEFAULT '[]',
     error TEXT,
     check_duration_seconds NUMERIC(8,2)
 );
+
+-- ============================================================================
+-- 9. CONFORMA RESULTS - Enterprise Contract compliance test results
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS conforma_results (
+    id SERIAL PRIMARY KEY,
+    application VARCHAR(255) NOT NULL,
+    component_name VARCHAR(255) NOT NULL,
+    scenario VARCHAR(255) NOT NULL,
+    pipelinerun_name VARCHAR(255) NOT NULL,
+    pipelinerun_uid VARCHAR(100),
+    status VARCHAR(50) NOT NULL,
+    violations_count INTEGER DEFAULT 0,
+    warnings_count INTEGER DEFAULT 0,
+    successes_count INTEGER DEFAULT 0,
+    violation_summary TEXT,
+    violation_details JSONB,
+    snapshot_name VARCHAR(255),
+    container_image TEXT,
+    repository_url TEXT,
+    commit_sha VARCHAR(100),
+    first_detected_at TIMESTAMP DEFAULT NOW(),
+    last_updated_at TIMESTAMP DEFAULT NOW(),
+    is_resolved BOOLEAN DEFAULT FALSE,
+    resolved_at TIMESTAMP,
+    UNIQUE(pipelinerun_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conforma_app_component ON conforma_results(application, component_name);
+CREATE INDEX IF NOT EXISTS idx_conforma_unresolved ON conforma_results(application) WHERE is_resolved = FALSE;
 
 -- ============================================================================
 -- GRANTS - Permissions

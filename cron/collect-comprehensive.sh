@@ -41,11 +41,27 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
 
     echo ""
     echo "========================================================================"
-    echo "[3/3] Updating sync status cache..."
+    echo "[3/5] Updating sync status cache..."
     echo "========================================================================"
     echo ""
 
     python3 check_sync_status.py 2>&1
+
+    echo ""
+    echo "========================================================================"
+    echo "[4/5] Checking Conforma test status..."
+    echo "========================================================================"
+    echo ""
+
+    python3 check_conforma_status.py 2>&1
+
+    echo ""
+    echo "========================================================================"
+    echo "[5/5] Collecting Conforma failure details..."
+    echo "========================================================================"
+    echo ""
+
+    python3 collect_conforma.py 2>&1
 
     echo ""
     echo "========================================================================"

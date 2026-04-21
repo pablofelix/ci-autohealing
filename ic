@@ -132,6 +132,8 @@ ${BOLD}USAGE:${NC}
 ${BOLD}RESOURCES:${NC}
 
   ${CYAN}components${NC}           Components with build failures
+  ${CYAN}alerts${NC}               Unified view: build failures + Conforma violations
+  ${CYAN}conforma${NC}             Conforma (Enterprise Contract) test failures
   ${CYAN}pipelineruns, pr${NC}     PipelineRun failures
   ${CYAN}failures${NC}             Build failures (alias for pipelineruns)
   ${CYAN}apps${NC}                 Available applications (versions)
@@ -141,6 +143,8 @@ ${BOLD}COMMANDS:${NC}
   ${CYAN}get <resource>${NC}
     ic get components                        List all failing components
     ic get component <name>                  Get component summary
+    ic get alerts                            Unified view: builds + Conforma
+    ic get conforma                          Conforma test failures
     ic get pipelineruns [--limit N]          List all PipelineRun failures
     ic get pipelinerun <name>                Get PipelineRun details
     ic get pr <name>                         Alias for pipelinerun
@@ -150,6 +154,7 @@ ${BOLD}COMMANDS:${NC}
   ${CYAN}describe <resource> <name> [options]${NC}
     ic describe component <name> [--log]     Full component details + logs
                                              --log: Show complete logs (default: error context)
+    ic describe conforma <name>              Conforma violation details for component
     ic describe pipelinerun <name>           Full PipelineRun details + logs
     ic describe pr <name>                    Alias for pipelinerun
 
@@ -241,7 +246,9 @@ trigger_background_sync() {
 
     (
         echo $$ > "$SYNC_PID_FILE"
-        python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
+        cd "$SCRIPT_DIR/collectors/python"
+        python3 check_sync_status.py > /dev/null 2>&1
+        python3 check_conforma_status.py > /dev/null 2>&1
         # If out of sync, also launch collector
         local is_sync=$(sql "SELECT in_sync FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
         if [ "$is_sync" = "f" ]; then
@@ -746,7 +753,7 @@ cmd_describe_pipelinerun() {
     fi
 }
 
-# Number shortcut
+# Number shortcut — works across build failures AND conforma failures
 cmd_describe_by_number() {
     local number="$1"
     shift
@@ -755,60 +762,82 @@ cmd_describe_by_number() {
     # Read retriggered components from sync cache
     local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
 
-    # Use same ordering as cmd_get_components: Push Failed first (by failures desc), then Re-triggered
-    local component=$(sql "
-        WITH latest_builds AS (
-            SELECT DISTINCT ON (component_name)
-                component_name, status, is_resolved, first_detected_at,
-                (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
-            FROM build_failures
-            WHERE application = '$APPLICATION_NAME'
-            ORDER BY component_name, first_detected_at DESC
-        ),
-        failing AS (
-            SELECT component_name, total_failures,
-                CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
-                    THEN 2 ELSE 1
-                END as sort_group
-            FROM latest_builds
-            WHERE status = 'Failed' AND is_resolved = FALSE
-        )
-        SELECT component_name FROM failing
-        ORDER BY sort_group, total_failures DESC
-        OFFSET $((number - 1))
-        LIMIT 1;
-    ")
-
-    if [ -z "$component" ]; then
-        local total=$(sql "
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT ON (component_name) component_name, status, is_resolved
-                FROM build_failures WHERE application = '$APPLICATION_NAME'
-                ORDER BY component_name, first_detected_at DESC
-            ) lb WHERE status = 'Failed' AND is_resolved = FALSE;
-        ")
-        echo -e "${RED}Error: Component #$number does not exist${NC}"
-        echo "Only $total components are currently failing."
-        exit 1
-    fi
-
-    # Check if it's re-triggered
-    local is_retriggered=""
-    if echo "$retriggered_json" | jq -e --arg c "$component" 'index($c) != null' > /dev/null 2>&1; then
-        is_retriggered=" (Re-triggered ✓)"
-    fi
-
-    local total=$(sql "
+    # Count build failures first
+    local build_count=$(sql "
         SELECT COUNT(*) FROM (
             SELECT DISTINCT ON (component_name) component_name, status, is_resolved
             FROM build_failures WHERE application = '$APPLICATION_NAME'
             ORDER BY component_name, first_detected_at DESC
         ) lb WHERE status = 'Failed' AND is_resolved = FALSE;
     ")
+    build_count=${build_count:-0}
 
-    echo -e "${CYAN}Component #$number of $total${is_retriggered}${NC}"
-    echo ""
-    cmd_describe_component "$component" $extra_args
+    local conforma_count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+    conforma_count=${conforma_count:-0}
+
+    local total=$((build_count + conforma_count))
+
+    if [ "$number" -gt "$total" ] || [ "$number" -lt 1 ]; then
+        echo -e "${RED}Error: Alert #$number does not exist${NC}"
+        echo "There are $build_count build failures and $conforma_count Conforma failures ($total total)."
+        exit 1
+    fi
+
+    # If number falls in build failures range
+    if [ "$number" -le "$build_count" ]; then
+        local component=$(sql "
+            WITH latest_builds AS (
+                SELECT DISTINCT ON (component_name)
+                    component_name, status, is_resolved, first_detected_at,
+                    (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
+                FROM build_failures
+                WHERE application = '$APPLICATION_NAME'
+                ORDER BY component_name, first_detected_at DESC
+            ),
+            failing AS (
+                SELECT component_name, total_failures,
+                    CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
+                        THEN 2 ELSE 1
+                    END as sort_group
+                FROM latest_builds
+                WHERE status = 'Failed' AND is_resolved = FALSE
+            )
+            SELECT component_name FROM failing
+            ORDER BY sort_group, total_failures DESC
+            OFFSET $((number - 1))
+            LIMIT 1;
+        ")
+
+        # Check if it's re-triggered
+        local is_retriggered=""
+        if echo "$retriggered_json" | jq -e --arg c "$component" 'index($c) != null' > /dev/null 2>&1; then
+            is_retriggered=" (Re-triggered ✓)"
+        fi
+
+        echo -e "${CYAN}Build failure #$number of $total alerts${is_retriggered}${NC}"
+        echo ""
+        cmd_describe_component "$component" $extra_args
+    else
+        # Falls in conforma range
+        local conforma_offset=$((number - build_count - 1))
+        local component=$(sql "
+            SELECT component_name FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND is_resolved = FALSE
+            ORDER BY violations_count DESC
+            OFFSET $conforma_offset
+            LIMIT 1;
+        ")
+
+        if [ -z "$component" ]; then
+            echo -e "${RED}Error: Alert #$number does not exist${NC}"
+            exit 1
+        fi
+
+        echo -e "${CYAN}Conforma failure #$number of $total alerts${NC}"
+        echo ""
+        cmd_describe_conforma "$component"
+    fi
 }
 
 # Config commands
@@ -1419,6 +1448,263 @@ cmd_errors() {
     echo ""
 }
 
+# GET CONFORMA - Conforma test failures
+cmd_get_conforma() {
+    local refresh=false
+    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Conforma Test Failures${NC}"
+    echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    if [ "$refresh" = true ]; then
+        echo -e "${CYAN}Refreshing Conforma status (querying KubeArchive)...${NC}"
+        cd "$SCRIPT_DIR/collectors/python" && python3 check_conforma_status.py > /dev/null 2>&1
+        python3 collect_conforma.py > /dev/null 2>&1
+        cd "$SCRIPT_DIR"
+    fi
+
+    local count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+
+    if [ "${count:-0}" = "0" ]; then
+        echo -e "${GREEN}✓ No Conforma failures${NC}"
+        echo ""
+        echo -e "${CYAN}Tip:${NC} Use 'ic get conforma --refresh' to check for new failures"
+        return
+    fi
+
+    echo -e "${BOLD}Summary:${NC} ${RED}${count}${NC} components failing Conforma tests"
+    echo ""
+
+    sql_table "
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY violations_count DESC) as \"#\",
+        component_name as \"Component\",
+        violations_count as \"Violations\",
+        warnings_count as \"Warnings\",
+        successes_count as \"OK\",
+        TO_CHAR(first_detected_at, 'DD Mon') as \"Since\"
+    FROM conforma_results
+    WHERE application = '$APPLICATION_NAME'
+      AND is_resolved = FALSE
+    ORDER BY violations_count DESC;
+    "
+    echo ""
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic describe conforma <component>' for violation details"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts' to see builds + Conforma in one view"
+    echo ""
+}
+
+# GET ALERTS - unified view of build failures + conforma
+cmd_get_alerts() {
+    local refresh=false
+    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Alerts — ${APPLICATION_NAME}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    if [ "$refresh" = true ]; then
+        echo -e "${CYAN}Refreshing (querying KubeArchive)...${NC}"
+        cd "$SCRIPT_DIR/collectors/python"
+        python3 check_sync_status.py > /dev/null 2>&1
+        python3 check_conforma_status.py > /dev/null 2>&1
+        python3 collect_conforma.py > /dev/null 2>&1
+        cd "$SCRIPT_DIR"
+        echo ""
+    fi
+
+    # Read sync cache for sync date and retriggered
+    local sync_row=$(sql "
+        SELECT
+            TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS'),
+            EXTRACT(EPOCH FROM (NOW() - last_checked_at))::int,
+            COALESCE(retriggered_components::text, '[]'),
+            COALESCE(conforma_components::text, '[]')
+        FROM sync_status WHERE application = '$APPLICATION_NAME';
+    " 2>/dev/null)
+
+    local sync_date age_seconds retriggered_json conforma_json
+    IFS='|' read -r sync_date age_seconds retriggered_json conforma_json <<< "$sync_row"
+    sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
+    age_seconds=$(echo "$age_seconds" | tr -d ' ')
+    local age_minutes=0
+    [ -n "$age_seconds" ] && age_minutes=$((age_seconds / 60))
+
+    if [ -n "$sync_date" ]; then
+        echo -e "${CYAN}Last sync: ${sync_date}, ${age_minutes}m ago${NC}"
+        echo ""
+    fi
+
+    # --- Section 1: Build Failures ---
+    local retriggered_list=""
+    if [ -n "$retriggered_json" ] && [ "$retriggered_json" != "[]" ]; then
+        retriggered_list=$(echo "$retriggered_json" | jq -r '.[]' 2>/dev/null | paste -sd',' -)
+    fi
+
+    local build_count=$(sql "
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, status, is_resolved
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT COUNT(*) FROM latest_builds
+        WHERE status = 'Failed' AND is_resolved = FALSE;
+    ")
+
+    echo -e "${BOLD}Build Failures (${build_count:-0}):${NC}"
+
+    if [ "${build_count:-0}" = "0" ]; then
+        echo -e "  ${GREEN}✓ No build failures${NC}"
+    else
+        sql_table "
+        WITH push_failed AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, status, is_resolved, first_detected_at,
+                (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+            ORDER BY component_name, first_detected_at DESC
+        ),
+        failing AS (
+            SELECT component_name, total_failures,
+                TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
+                CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
+                    THEN 'Re-triggered ✓'
+                    ELSE 'Push Failed'
+                END as status_label,
+                CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
+                    THEN 2 ELSE 1
+                END as sort_group
+            FROM push_failed
+            WHERE status = 'Failed' AND is_resolved = FALSE
+        )
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY sort_group, total_failures DESC) as \"#\",
+            component_name as \"Component\",
+            status_label as \"Status\",
+            failed_date as \"Failed\",
+            total_failures as \"Builds\"
+        FROM failing
+        ORDER BY sort_group, total_failures DESC;
+        "
+    fi
+    echo ""
+
+    # --- Section 2: Conforma Failures ---
+    local conforma_count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+
+    echo -e "${BOLD}Conforma Failures (${conforma_count:-0}):${NC}"
+
+    if [ "${conforma_count:-0}" = "0" ]; then
+        echo -e "  ${GREEN}✓ No Conforma failures${NC}"
+    else
+        # Offset numbering to continue from build failures
+        local offset=${build_count:-0}
+        sql_table "
+        SELECT
+            (ROW_NUMBER() OVER (ORDER BY violations_count DESC) + $offset) as \"#\",
+            component_name as \"Component\",
+            violations_count as \"Violations\",
+            warnings_count as \"Warnings\",
+            TO_CHAR(first_detected_at, 'DD Mon') as \"Since\"
+        FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND is_resolved = FALSE
+        ORDER BY violations_count DESC;
+        "
+    fi
+    echo ""
+
+    local total=$((${build_count:-0} + ${conforma_count:-0}))
+    echo -e "${BOLD}Total alerts: ${RED}${total}${NC}"
+    echo ""
+    echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
+    echo ""
+}
+
+# DESCRIBE CONFORMA - violation details for a component
+cmd_describe_conforma() {
+    local component="$1"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component name required${NC}"
+        echo "Usage: ic describe conforma <component>"
+        exit 1
+    fi
+
+    # Get metadata (without violation_summary to avoid pipe conflicts)
+    local data=$(sql "
+        SELECT component_name, scenario, pipelinerun_name, status,
+               violations_count, warnings_count, successes_count,
+               TO_CHAR(first_detected_at, 'YYYY-MM-DD HH24:MI:SS'),
+               COALESCE(repository_url, ''), COALESCE(commit_sha, ''), COALESCE(snapshot_name, '')
+        FROM conforma_results
+        WHERE component_name = '$component'
+          AND application = '$APPLICATION_NAME'
+          AND is_resolved = FALSE
+        ORDER BY first_detected_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: No Conforma results found for: $component${NC}"
+        echo -e "${CYAN}Tip:${NC} Use 'ic get conforma' to list components with failures"
+        exit 1
+    fi
+
+    IFS='|' read -r comp_name scenario pr_name status violations warnings successes \
+        detected_at repo_url commit_sha snapshot <<< "$data"
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Conforma Results: $comp_name${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${BOLD}Scenario:${NC}    $scenario"
+    echo -e "${BOLD}Result:${NC}      ${RED}FAILURE${NC} (${violations} violations, ${warnings} warnings, ${successes} successes)"
+    echo -e "${BOLD}PipelineRun:${NC} $pr_name"
+    echo -e "${BOLD}Detected:${NC}    $detected_at"
+
+    repo_url=$(echo "$repo_url" | xargs 2>/dev/null || echo "")
+    commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
+    snapshot=$(echo "$snapshot" | xargs 2>/dev/null || echo "")
+
+    [ -n "$repo_url" ] && echo -e "${BOLD}Repository:${NC}  $repo_url"
+    [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
+    [ -n "$snapshot" ] && echo -e "${BOLD}Snapshot:${NC}    $snapshot"
+
+    # Konflux UI link
+    local konflux_url="https://konflux-ui.apps.CLUSTER_DOMAIN/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
+    echo ""
+    echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Violations${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Fetch violation_summary separately (contains pipes and newlines)
+    local violation_summary=$(sql "
+        SELECT violation_summary FROM conforma_results
+        WHERE pipelinerun_name = '$pr_name' LIMIT 1;
+    " 2>/dev/null)
+
+    if [ -n "$violation_summary" ] && [ "$violation_summary" != "" ]; then
+        echo "$violation_summary"
+    else
+        echo -e "${YELLOW}No detailed violation report available.${NC}"
+        echo -e "${CYAN}→ Run 'ic get conforma --refresh' to fetch violation details${NC}"
+    fi
+    echo ""
+}
+
 # Main command router
 case "${1:-}" in
     get)
@@ -1429,6 +1715,12 @@ case "${1:-}" in
                 else
                     cmd_get_components "${3:-}"
                 fi
+                ;;
+            alerts)
+                cmd_get_alerts "${3:-}"
+                ;;
+            conforma)
+                cmd_get_conforma "${3:-}"
                 ;;
             pipelineruns|pipelinerun|pr|failures)
                 if [ -n "$3" ]; then
@@ -1447,6 +1739,7 @@ case "${1:-}" in
     describe)
         case "${2:-}" in
             component) shift 2; cmd_describe_component "$@" ;;
+            conforma) cmd_describe_conforma "$3" ;;
             pipelinerun|pr) cmd_describe_pipelinerun "$3" ;;
             *) usage ;;
         esac
