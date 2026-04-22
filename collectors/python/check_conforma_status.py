@@ -5,7 +5,6 @@ Queries KubeArchive for integration test PipelineRuns with conforma-* scenarios,
 identifies components whose latest test failed, and caches results in sync_status.
 """
 
-import os
 import sys
 import json
 import subprocess
@@ -13,22 +12,26 @@ from typing import Dict, Any, Optional, Set
 
 import requests
 
+from config import CollectorConfig
+from database import Database
 from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
 
-APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
-NAMESPACE = os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
 
-
-def get_failing_conforma_components() -> Dict[str, Any]:
+def get_failing_conforma_components(config):
+    # type: (CollectorConfig) -> Dict[str, Any]
     """Query KubeArchive + live cluster for Conforma test PipelineRuns.
 
     Returns dict with:
       - failing: set of component names with latest conforma test failed
-      - details: dict of component -> {scenario, violations, warnings, successes, pr_name, pr_uid, timestamp}
+      - details: dict of component -> {scenario, pr_name, pr_uid, timestamp}
+      - running: dict of component -> running test info
     """
     token = get_openshift_token()
     if not token:
         return {'failing': set(), 'details': {}}
+
+    namespace = config.k8s.namespace
+    application_name = config.k8s.application_name
 
     latest_per_component = {}
     running_conforma = {}
@@ -71,9 +74,9 @@ def get_failing_conforma_components() -> Dict[str, Any]:
         api_url = discover_kubearchive_api_url()
         session = create_authenticated_session(token)
 
-        url = f"{api_url}/apis/tekton.dev/v1/namespaces/{NAMESPACE}/pipelineruns"
+        url = "{}/apis/tekton.dev/v1/namespaces/{}/pipelineruns".format(api_url, namespace)
         params = {
-            'labelSelector': f'appstudio.openshift.io/application={APPLICATION_NAME},pipelines.appstudio.openshift.io/type=test',
+            'labelSelector': 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=test'.format(application_name),
             'limit': 500
         }
 
@@ -90,13 +93,13 @@ def get_failing_conforma_components() -> Dict[str, Any]:
             else:
                 break
     except Exception as e:
-        print(f"  KubeArchive query error: {e}", file=sys.stderr)
+        print("  KubeArchive query error: {}".format(e), file=sys.stderr)
 
     # Source 2: Live cluster
     try:
         result = subprocess.run(
-            ['oc', 'get', 'pipelinerun', '-n', NAMESPACE,
-             '-l', f'appstudio.openshift.io/application={APPLICATION_NAME},pipelines.appstudio.openshift.io/type=test',
+            ['oc', 'get', 'pipelinerun', '-n', namespace,
+             '-l', 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=test'.format(application_name),
              '-o', 'json'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=15
@@ -120,7 +123,6 @@ def get_failing_conforma_components() -> Dict[str, Any]:
                 'timestamp': ts
             }
 
-    # Only report running conforma tests that are newer than completed ones
     active_running = {}
     for comp, (run_ts, run_pr, run_scenario) in running_conforma.items():
         if comp not in latest_per_component or run_ts > latest_per_component[comp][0]:
@@ -134,45 +136,45 @@ def get_failing_conforma_components() -> Dict[str, Any]:
     return {'failing': failing, 'details': details, 'running': active_running}
 
 
-def get_conforma_components_from_db() -> Set[str]:
+def get_conforma_components_from_db(db, application_name):
+    # type: (Database, str) -> Set[str]
     """Get components with unresolved Conforma failures from DB."""
     try:
-        result = subprocess.run(
-            ['docker', 'exec', 'ci-autohealing-db',
-             'psql', '-U', 'postgres', '-d', 'konflux_monitoring', '-tAc',
-             f"""
-             SELECT DISTINCT component_name FROM conforma_results
-             WHERE application = '{APPLICATION_NAME}'
-               AND is_resolved = FALSE;
-             """],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=10
-        )
-        if result.returncode != 0:
-            return set()
-        return {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
+        with db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT component_name FROM conforma_results
+                WHERE application = %s
+                  AND is_resolved = FALSE
+                """,
+                (application_name,)
+            )
+            return {row[0] for row in cursor.fetchall()}
     except Exception:
         return set()
 
 
-def save_conforma_status(failing_components: Set[str], running: Dict[str, Any] = None) -> None:
+def save_conforma_status(db, application_name, failing_components, running=None):
+    # type: (Database, str, Set[str], Optional[Dict[str, Any]]) -> None
     """Save failing Conforma components and running tests to sync_status cache."""
     try:
         components_json = json.dumps(sorted(failing_components))
         running_json = json.dumps([
             {'component': comp, **info} for comp, info in sorted((running or {}).items())
         ])
-        sql = f"""
-        UPDATE sync_status
-        SET conforma_components = '{components_json}',
-            running_conforma = '{running_json}'
-        WHERE application = '{APPLICATION_NAME}';
-        """
-        subprocess.run(
-            ['docker', 'exec', 'ci-autohealing-db',
-             'psql', '-U', 'postgres', '-d', 'konflux_monitoring', '-c', sql],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
-        )
+
+        with db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE sync_status
+                SET conforma_components = %s,
+                    running_conforma = %s
+                WHERE application = %s
+                """,
+                (components_json, running_json, application_name)
+            )
     except Exception:
         pass
 
@@ -181,32 +183,35 @@ def main():
     import time
     start_time = time.time()
 
-    print(f"Checking Conforma test status for {APPLICATION_NAME}...")
+    config = CollectorConfig.from_env()
+    db = Database(config.db)
+    application_name = config.k8s.application_name
 
-    cluster_result = get_failing_conforma_components()
+    print("Checking Conforma test status for {}...".format(application_name))
+
+    cluster_result = get_failing_conforma_components(config)
     failing = cluster_result['failing']
     details = cluster_result['details']
     running = cluster_result.get('running', {})
 
-    db_components = get_conforma_components_from_db()
+    db_components = get_conforma_components_from_db(db, application_name)
 
     missing_in_db = failing - db_components
     extra_in_db = db_components - failing
 
-    # Save to sync_status cache
-    save_conforma_status(failing, running)
+    save_conforma_status(db, application_name, failing, running)
 
     duration = time.time() - start_time
 
-    print(f"  Conforma failures in cluster: {len(failing)}")
-    print(f"  Conforma failures in DB: {len(db_components)}")
+    print("  Conforma failures in cluster: {}".format(len(failing)))
+    print("  Conforma failures in DB: {}".format(len(db_components)))
     if running:
-        print(f"  Conforma tests running: {len(running)} ({sorted(running.keys())})")
+        print("  Conforma tests running: {} ({})".format(len(running), sorted(running.keys())))
     if missing_in_db:
-        print(f"  Missing in DB: {sorted(missing_in_db)}")
+        print("  Missing in DB: {}".format(sorted(missing_in_db)))
     if extra_in_db:
-        print(f"  Extra in DB (resolved?): {sorted(extra_in_db)}")
-    print(f"  Duration: {duration:.1f}s")
+        print("  Extra in DB (resolved?): {}".format(sorted(extra_in_db)))
+    print("  Duration: {:.1f}s".format(duration))
 
     status = {
         'failing_components': sorted(failing),
