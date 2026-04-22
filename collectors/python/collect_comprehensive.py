@@ -36,6 +36,13 @@ from kubernetes_client import KubernetesClient
 from tekton_results_client import TektonResultsClient
 from unified_collector import UnifiedCollector
 from models import PipelineRun, BuildStatus, ScanResult, Component
+from tekton_parsers import (
+    extract_error_from_logs,
+    extract_failed_step_from_logs,
+    extract_pipelinerun_metadata,
+    extract_pr_number_from_annotations,
+    classify_pipelinerun_status,
+)
 
 
 class ComprehensiveCollector:
@@ -288,11 +295,9 @@ class ComprehensiveCollector:
                 name = pr.get('metadata', {}).get('name')
                 uid = pr.get('metadata', {}).get('uid')
                 reason = conditions[-1].get('reason', '')
-                status = BuildStatus.FAILED
-                if reason == 'PipelineRunCancelled':
-                    status = 'Cancelled'
-                elif reason in ('PipelineRunTimeout', 'TaskRunTimeout'):
-                    status = 'Timeout'
+                status = classify_pipelinerun_status(reason)
+                if status not in ('Cancelled', 'Timeout'):
+                    status = BuildStatus.FAILED
                 if not latest_failed or ts > latest_failed[0]:
                     latest_failed = (ts, name, uid, status)
 
@@ -344,154 +349,27 @@ class ComprehensiveCollector:
 
         return None
 
-    def extract_all_details(self, pr_data: Dict[str, Any], source: str = 'kubearchive') -> Dict[str, Any]:
-        """Extract ALL useful details from PipelineRun.
-
-        Args:
-            pr_data: PipelineRun JSON from KubeArchive or Kubernetes API.
-            source: Source of data ('kubearchive' or 'kubernetes').
-
-        Returns:
-            Dictionary with all extracted details.
-        """
-        if not pr_data:
-            return {}
-
-        annotations = pr_data.get('metadata', {}).get('annotations', {})
-        params = pr_data.get('spec', {}).get('params', [])
-        status = pr_data.get('status', {})
-
-        # Extract commit details
-        commit_sha = (
-            annotations.get('build.appstudio.redhat.com/commit_sha') or
-            annotations.get('pipelinesascode.tekton.dev/sha') or
-            next((p['value'] for p in params if p.get('name') == 'revision'), None)
+    def extract_all_details(self, pr_data, source='kubearchive'):
+        # type: (Dict[str, Any], str) -> Dict[str, Any]
+        """Extract ALL useful details from PipelineRun."""
+        return extract_pipelinerun_metadata(
+            pr_data, self.config.k8s.namespace, self.config.k8s.application_name
         )
 
-        commit_url = annotations.get('pipelinesascode.tekton.dev/sha-url')
-        if not commit_url and commit_sha:
-            repo_url = next((p['value'] for p in params if p.get('name') == 'git-url'), None)
-            if repo_url:
-                commit_url = f"{repo_url.rstrip('.git')}/commit/{commit_sha}"
+    def extract_pr_number(self, annotations):
+        # type: (Dict[str, str]) -> Optional[int]
+        """Extract PR number from annotations if this is a PR build."""
+        return extract_pr_number_from_annotations(annotations)
 
-        commit_message = annotations.get('pipelinesascode.tekton.dev/sha-title', '')
-        commit_author = annotations.get('pipelinesascode.tekton.dev/sender', '')
+    def extract_error_messages(self, logs):
+        # type: (str) -> Tuple[Optional[str], Optional[str]]
+        """Extract error messages and type from logs."""
+        return extract_error_from_logs(logs)
 
-        # Extract Konflux UI URL
-        konflux_url = annotations.get('pipelinesascode.tekton.dev/log-url')
-        if not konflux_url:
-            pr_name = pr_data.get('metadata', {}).get('name')
-            namespace = pr_data.get('metadata', {}).get('namespace', self.config.k8s.namespace)
-            app_name = self.config.k8s.application_name
-            if pr_name:
-                konflux_url = (
-                    f"https://konflux-ui.apps.CLUSTER_DOMAIN"
-                    f"/ns/{namespace}/applications/{app_name}/pipelineruns/{pr_name}/logs"
-                )
-
-        # Extract pipeline configuration URL
-        pipeline_url = (
-            annotations.get('build.appstudio.openshift.io/pipeline-url') or
-            annotations.get('pipelinesascode.tekton.dev/repo-url', '')
-        )
-
-        # Extract repository details
-        repo_url = next((p['value'] for p in params if p.get('name') == 'git-url'), '')
-        branch = annotations.get('pipelinesascode.tekton.dev/branch', '')
-
-        # Extract build times
-        start_time = status.get('startTime')
-        completion_time = status.get('completionTime')
-
-        # Extract failed task information
-        failed_tasks = []
-        child_refs = status.get('childReferences', [])
-        for ref in child_refs:
-            if ref.get('kind') == 'TaskRun':
-                task_status = ref.get('pipelineTaskName')
-                if task_status:
-                    failed_tasks.append(task_status)
-
-        return {
-            'commit_sha': commit_sha,
-            'commit_short_sha': commit_sha[:8] if commit_sha else None,
-            'commit_url': commit_url,
-            'commit_message': commit_message,
-            'commit_author': commit_author,
-            'konflux_url': konflux_url,
-            'pipeline_url': pipeline_url,
-            'repository_url': repo_url,
-            'branch': branch,
-            'start_time': start_time,
-            'completion_time': completion_time,
-            'failed_tasks': failed_tasks,
-            'pr_number': self.extract_pr_number(annotations),
-            'pr_url': annotations.get('pipelinesascode.tekton.dev/pull-request-url')
-        }
-
-    def extract_pr_number(self, annotations: Dict[str, str]) -> Optional[int]:
-        """Extract PR number from annotations if this is a PR build.
-
-        Args:
-            annotations: PipelineRun annotations.
-
-        Returns:
-            PR number or None.
-        """
-        pr_url = annotations.get('pipelinesascode.tekton.dev/pull-request-url', '')
-        if pr_url:
-            match = re.search(r'/pull/(\d+)', pr_url)
-            if match:
-                return int(match.group(1))
-        return None
-
-    def extract_error_messages(self, logs: str) -> Tuple[Optional[str], Optional[str]]:
-        """Extract error messages and type from logs.
-
-        Args:
-            logs: Build logs text.
-
-        Returns:
-            Tuple of (error_message, error_type).
-        """
-        if not logs:
-            return None, None
-
-        # Common error patterns
-        error_patterns = [
-            (r'ERROR:\s*(.{0,500})', 'Build Error'),
-            (r'FAIL(?:ED)?:\s*(.{0,500})', 'Test Failure'),
-            (r'(?:exit|return) code (\d+)', 'Exit Code'),
-            (r'(timeout|timed out)', 'Timeout'),
-            (r'(resource not found|404)', 'Resource Not Found'),
-            (r'(?:fatal|FATAL):\s*(.{0,500})', 'Fatal Error'),
-        ]
-
-        for pattern, error_type in error_patterns:
-            match = re.search(pattern, logs, re.IGNORECASE | re.MULTILINE)
-            if match:
-                return match.group(0)[:500], error_type
-
-        return None, None
-
-    def extract_failed_step_from_logs(self, logs: str) -> Optional[str]:
-        """Extract failed step name from logs.
-
-        Args:
-            logs: Build logs.
-
-        Returns:
-            Failed step name or None.
-        """
-        if not logs:
-            return None
-
-        # Look for TaskRun/Step markers
-        match = re.search(r'===== TaskRun: ([^/]+) / Step: ([^=]+) =====', logs)
-        if match:
-            return match.group(2).strip()
-
-        return None
+    def extract_failed_step_from_logs(self, logs):
+        # type: (str) -> Optional[str]
+        """Extract failed step name from logs."""
+        return extract_failed_step_from_logs(logs)
 
     def get_comprehensive_logs(self, pr_name: str) -> Optional[str]:
         """Fetch comprehensive logs from ALL TaskRuns and steps.

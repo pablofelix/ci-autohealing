@@ -9,6 +9,8 @@ import json
 from typing import Optional, List, Dict, Any
 from functools import lru_cache
 
+from tekton_parsers import extract_taskrun_names, extract_failed_step_names, build_taskrun_detail
+
 
 class KubernetesClient:
     """Client for interacting with Kubernetes API directly.
@@ -121,73 +123,20 @@ class KubernetesClient:
         except subprocess.TimeoutExpired:
             return None
 
-    def extract_taskruns(self, pipelinerun_data: Dict[str, Any]) -> List[str]:
-        """Extract TaskRun names from PipelineRun childReferences.
+    def extract_taskruns(self, pipelinerun_data):
+        # type: (Dict[str, Any]) -> List[str]
+        """Extract TaskRun names from PipelineRun childReferences."""
+        return extract_taskrun_names(pipelinerun_data)
 
-        Args:
-            pipelinerun_data: PipelineRun JSON data.
+    def extract_failed_steps(self, taskrun_data):
+        # type: (Dict[str, Any]) -> List[str]
+        """Extract names of failed steps from TaskRun."""
+        return extract_failed_step_names(taskrun_data)
 
-        Returns:
-            List of TaskRun names.
-        """
-        child_refs = pipelinerun_data.get('status', {}).get('childReferences', [])
-        return [
-            ref['name']
-            for ref in child_refs
-            if ref.get('kind') == 'TaskRun'
-        ]
-
-    def extract_failed_steps(self, taskrun_data: Dict[str, Any]) -> List[str]:
-        """Extract names of failed steps from TaskRun.
-
-        Args:
-            taskrun_data: TaskRun JSON data.
-
-        Returns:
-            List of failed step names.
-        """
-        steps = taskrun_data.get('status', {}).get('steps', [])
-        return [
-            step['name']
-            for step in steps
-            if step.get('terminated', {}).get('exitCode', 0) != 0
-        ]
-
-    def get_taskrun_details(self, taskrun_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract detailed information from TaskRun.
-
-        Args:
-            taskrun_data: TaskRun JSON data.
-
-        Returns:
-            Dict with extracted details.
-        """
-        status = taskrun_data.get('status', {})
-        spec = taskrun_data.get('spec', {})
-        metadata = taskrun_data.get('metadata', {})
-
-        steps_info = []
-        for step in status.get('steps', []):
-            terminated = step.get('terminated', {})
-            steps_info.append({
-                'name': step.get('name'),
-                'container': step.get('container'),
-                'exit_code': terminated.get('exitCode'),
-                'reason': terminated.get('reason'),
-                'started': terminated.get('startedAt'),
-                'finished': terminated.get('finishedAt')
-            })
-
-        return {
-            'name': metadata.get('name'),
-            'pod_name': status.get('podName'),
-            'task_name': spec.get('taskRef', {}).get('name'),
-            'pipeline_task': metadata.get('labels', {}).get('tekton.dev/pipelineTask'),
-            'start_time': status.get('startTime'),
-            'completion_time': status.get('completionTime'),
-            'steps': steps_info,
-            'failed_steps': self.extract_failed_steps(taskrun_data)
-        }
+    def get_taskrun_details(self, taskrun_data):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
+        """Extract detailed information from TaskRun."""
+        return build_taskrun_detail(taskrun_data)
 
     def get_pipelinerun_logs(
         self,

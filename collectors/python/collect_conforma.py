@@ -20,6 +20,7 @@ import requests
 
 from config import CollectorConfig
 from kubearchive_client import KubeArchiveClient
+from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
 
 APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
@@ -122,15 +123,10 @@ class ConformaCollector:
             if info.get('status') == 'False'
         }
 
-    def get_verify_taskrun(self, pr_data: Dict[str, Any]) -> Optional[str]:
+    def get_verify_taskrun(self, pr_data):
+        # type: (Dict[str, Any]) -> Optional[str]
         """Find the 'verify' TaskRun name from PipelineRun childReferences."""
-        child_refs = pr_data.get('status', {}).get('childReferences', [])
-        for ref in child_refs:
-            if ref.get('kind') == 'TaskRun':
-                task_name = ref.get('pipelineTaskName', '')
-                if task_name == 'verify':
-                    return ref.get('name')
-        return None
+        return extract_verify_taskrun_name(pr_data)
 
     def get_step_logs(self, pod_name: str, step_name: str) -> Optional[str]:
         """Fetch logs for a specific step from KubeArchive."""
@@ -214,40 +210,11 @@ class ConformaCollector:
             pass
         return ''
 
-    def extract_component_info(self, pr_data: Dict[str, Any], component_name: str) -> Dict[str, Any]:
+    def extract_component_info(self, pr_data, component_name):
+        # type: (Dict[str, Any], str) -> Dict[str, Any]
         """Extract snapshot, image, repo, commit from PipelineRun."""
-        labels = pr_data.get('metadata', {}).get('labels', {})
-        annotations = pr_data.get('metadata', {}).get('annotations', {})
-        params = pr_data.get('spec', {}).get('params', [])
-
-        snapshot = labels.get('appstudio.openshift.io/snapshot', '')
-
-        image = ''
-        for p in params:
-            if p.get('name') == 'IMAGES':
-                image = p.get('value', '')
-                break
-
-        repo_url = annotations.get('pipelinesascode.tekton.dev/repo-url', '')
-        commit_sha = annotations.get('build.appstudio.redhat.com/commit_sha', '') or \
-                     annotations.get('pipelinesascode.tekton.dev/sha', '')
-
-        # Test PipelineRuns often lack repo-url — look it up from the component resource
-        if not repo_url:
-            repo_url = self.get_component_repo_url(component_name)
-
-        # Build commit URL from repo + sha
-        commit_url = ''
-        if repo_url and commit_sha:
-            commit_url = f"{repo_url.rstrip('.git')}/commit/{commit_sha}"
-
-        return {
-            'snapshot_name': snapshot,
-            'container_image': image,
-            'repository_url': repo_url,
-            'commit_sha': commit_sha,
-            'commit_url': commit_url
-        }
+        repo_url_fallback = self.get_component_repo_url(component_name)
+        return extract_conforma_component_info(pr_data, component_name, repo_url_fallback)
 
     def save_to_db(self, component: str, scenario: str, pr_name: str, pr_uid: str,
                    violations: Dict[str, Any], comp_info: Dict[str, Any]) -> bool:
