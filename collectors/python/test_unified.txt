@@ -1,3 +1,0 @@
-odh-trustyai-nemo-guardrails-server-v3-4
-odh-pipelines-components-v3-4
-odh-feature-server-v3-4
