@@ -19,7 +19,8 @@ from typing import Dict, Any, Optional, List, Set
 import requests
 
 from config import CollectorConfig
-from kubearchive_client import KubeArchiveClient
+from repositories import DatabaseConnection, ConformaRepository
+from clients import KubeArchiveClient
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
 
@@ -31,6 +32,8 @@ class ConformaCollector:
 
     def __init__(self, config: CollectorConfig):
         self.config = config
+        db = DatabaseConnection(config.db)
+        self.conforma_repo = ConformaRepository(db)
         self.kubearchive = KubeArchiveClient(
             api_url=config.k8s.kubearchive_api_url,
             namespace=config.k8s.namespace
@@ -216,130 +219,29 @@ class ConformaCollector:
         repo_url_fallback = self.get_component_repo_url(component_name)
         return extract_conforma_component_info(pr_data, component_name, repo_url_fallback)
 
-    def save_to_db(self, component: str, scenario: str, pr_name: str, pr_uid: str,
-                   violations: Dict[str, Any], comp_info: Dict[str, Any]) -> bool:
+    def save_to_db(self, component, scenario, pr_name, pr_uid, violations, comp_info):
+        # type: (str, str, str, str, Dict[str, Any], Dict[str, Any]) -> bool
         """Save Conforma result to database."""
         try:
-            import psycopg2
-            from database import Database
-            from config import DatabaseConfig
-
-            db = Database(self.config.db)
-
-            with db.connection() as conn:
-                cursor = conn.cursor()
-
-                # Check if already exists
-                cursor.execute(
-                    "SELECT id FROM conforma_results WHERE pipelinerun_name = %s",
-                    (pr_name,)
-                )
-                exists = cursor.fetchone()
-
-                violation_details_json = json.dumps(violations.get('violation_details')) \
-                    if violations.get('violation_details') else None
-
-                if exists:
-                    cursor.execute(
-                        """
-                        UPDATE conforma_results SET
-                            violations_count = %s,
-                            warnings_count = %s,
-                            successes_count = %s,
-                            violation_summary = %s,
-                            violation_details = %s,
-                            repository_url = COALESCE(NULLIF(%s, ''), repository_url),
-                            commit_url = COALESCE(NULLIF(%s, ''), commit_url),
-                            last_updated_at = NOW()
-                        WHERE pipelinerun_name = %s
-                        """,
-                        (violations['violations_count'], violations['warnings_count'],
-                         violations['successes_count'], violations['violation_summary'],
-                         violation_details_json,
-                         comp_info.get('repository_url', ''),
-                         comp_info.get('commit_url', ''),
-                         pr_name)
-                    )
-                    print(f"    ✓ Updated in DB")
-                else:
-                    # Resolve older entries for this component before inserting
-                    cursor.execute(
-                        """
-                        UPDATE conforma_results
-                        SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
-                        WHERE component_name = %s AND application = %s AND is_resolved = FALSE
-                        """,
-                        (component, self.config.k8s.application_name)
-                    )
-                    superseded = cursor.rowcount
-
-                    cursor.execute(
-                        """
-                        INSERT INTO conforma_results (
-                            application, component_name, scenario,
-                            pipelinerun_name, pipelinerun_uid,
-                            status, violations_count, warnings_count, successes_count,
-                            violation_summary, violation_details,
-                            snapshot_name, container_image, repository_url, commit_sha, commit_url
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        )
-                        """,
-                        (self.config.k8s.application_name, component, scenario,
-                         pr_name, pr_uid, 'Failed',
-                         violations['violations_count'], violations['warnings_count'],
-                         violations['successes_count'], violations['violation_summary'],
-                         violation_details_json,
-                         comp_info.get('snapshot_name'), comp_info.get('container_image'),
-                         comp_info.get('repository_url'), comp_info.get('commit_sha'),
-                         comp_info.get('commit_url'))
-                    )
-                    if superseded:
-                        print(f"    ✓ Inserted into DB (superseded {superseded} older entries)")
-                    else:
-                        print(f"    ✓ Inserted into DB")
-
-                conn.commit()
-                return True
-
+            result = self.conforma_repo.upsert_violation(
+                application=self.config.k8s.application_name,
+                component=component, scenario=scenario,
+                pr_name=pr_name, pr_uid=pr_uid,
+                violations=violations, comp_info=comp_info
+            )
+            if result:
+                print("    ✓ Saved to DB")
+            return result
         except Exception as e:
-            print(f"    ✗ DB error: {e}")
+            print("    ✗ DB error: {}".format(e))
             return False
 
-    def resolve_fixed_components(self, currently_failing: Set[str]) -> int:
+    def resolve_fixed_components(self, currently_failing):
+        # type: (Set[str],) -> int
         """Mark components that are no longer failing as resolved."""
-        try:
-            from database import Database
-            db = Database(self.config.db)
-
-            resolved_count = 0
-            with db.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT DISTINCT component_name FROM conforma_results
-                    WHERE application = %s AND is_resolved = FALSE
-                    """,
-                    (self.config.k8s.application_name,)
-                )
-                db_components = {row[0] for row in cursor.fetchall()}
-
-                for comp in db_components - currently_failing:
-                    cursor.execute(
-                        """
-                        UPDATE conforma_results
-                        SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
-                        WHERE component_name = %s AND application = %s AND is_resolved = FALSE
-                        """,
-                        (comp, self.config.k8s.application_name)
-                    )
-                    resolved_count += cursor.rowcount
-
-                conn.commit()
-
-            return resolved_count
-        except Exception:
-            return 0
+        return self.conforma_repo.resolve_fixed_components(
+            self.config.k8s.application_name, currently_failing
+        )
 
     def run(self) -> Dict[str, Any]:
         start_time = time.time()

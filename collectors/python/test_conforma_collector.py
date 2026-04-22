@@ -18,7 +18,9 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collect_conforma.KubeArchiveClient'):
+    with patch('collect_conforma.DatabaseConnection'), \
+         patch('collect_conforma.ConformaRepository'), \
+         patch('collect_conforma.KubeArchiveClient'):
         return ConformaCollector(config)
 
 

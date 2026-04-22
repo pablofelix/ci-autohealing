@@ -1,23 +1,29 @@
-"""Tests for Database class with mocked connections."""
+"""Tests for DatabaseConnection and BuildFailureRepository with mocked connections."""
 
 import pytest
 from unittest.mock import patch, MagicMock
-from database import Database
+from repositories.connection import DatabaseConnection
+from repositories.build_failure_repository import BuildFailureRepository
 from config import DatabaseConfig
 from models import ScanResult
 
 
 @pytest.fixture
 def db():
-    return Database(DatabaseConfig(
+    return DatabaseConnection(DatabaseConfig(
         host="localhost", port=5432, user="test",
         password="test", database="testdb"
     ))
 
 
+@pytest.fixture
+def build_repo(db):
+    return BuildFailureRepository(db)
+
+
 # --- connection context manager ---
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_connection_commits_on_success(mock_connect, db):
     mock_conn = MagicMock()
     mock_connect.return_value = mock_conn
@@ -29,7 +35,7 @@ def test_connection_commits_on_success(mock_connect, db):
     mock_conn.close.assert_called_once()
 
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_connection_rolls_back_on_error(mock_connect, db):
     mock_conn = MagicMock()
     mock_connect.return_value = mock_conn
@@ -42,7 +48,7 @@ def test_connection_rolls_back_on_error(mock_connect, db):
     mock_conn.close.assert_called_once()
 
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_connection_string_passed(mock_connect, db):
     mock_conn = MagicMock()
     mock_connect.return_value = mock_conn
@@ -57,7 +63,7 @@ def test_connection_string_passed(mock_connect, db):
 
 # --- create_scan ---
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_create_scan_returns_uuid(mock_connect, db):
     mock_connect.return_value = MagicMock()
     scan_id = db.create_scan(scan_type='test', scan_mode='full')
@@ -65,7 +71,7 @@ def test_create_scan_returns_uuid(mock_connect, db):
     assert len(scan_id) == 36
 
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_create_scan_inserts_running(mock_connect, db):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -82,7 +88,7 @@ def test_create_scan_inserts_running(mock_connect, db):
 
 # --- complete_scan ---
 
-@patch('database.psycopg2.connect')
+@patch('repositories.connection.psycopg2.connect')
 def test_complete_scan_updates(mock_connect, db):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
@@ -102,40 +108,40 @@ def test_complete_scan_updates(mock_connect, db):
     assert params[5] == 'test-id'
 
 
-# --- pipelinerun_exists ---
+# --- BuildFailureRepository.pipelinerun_exists ---
 
-@patch('database.psycopg2.connect')
-def test_pipelinerun_exists_true(mock_connect, db):
+@patch('repositories.connection.psycopg2.connect')
+def test_pipelinerun_exists_true(mock_connect, build_repo):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = (1,)
     mock_conn.cursor.return_value = mock_cursor
     mock_connect.return_value = mock_conn
 
-    assert db.pipelinerun_exists('pr-123') is True
+    assert build_repo.pipelinerun_exists('pr-123') is True
 
 
-@patch('database.psycopg2.connect')
-def test_pipelinerun_exists_false(mock_connect, db):
+@patch('repositories.connection.psycopg2.connect')
+def test_pipelinerun_exists_false(mock_connect, build_repo):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = None
     mock_conn.cursor.return_value = mock_cursor
     mock_connect.return_value = mock_conn
 
-    assert db.pipelinerun_exists('pr-nonexistent') is False
+    assert build_repo.pipelinerun_exists('pr-nonexistent') is False
 
 
-# --- update_component_health ---
+# --- BuildFailureRepository.update_component_health ---
 
-@patch('database.psycopg2.connect')
-def test_update_component_health(mock_connect, db):
+@patch('repositories.connection.psycopg2.connect')
+def test_update_component_health(mock_connect, build_repo):
     mock_conn = MagicMock()
     mock_cursor = MagicMock()
     mock_conn.cursor.return_value = mock_cursor
     mock_connect.return_value = mock_conn
 
-    db.update_component_health('my-component')
+    build_repo.update_component_health('my-component')
     sql, params = mock_cursor.execute.call_args[0]
     assert 'update_component_health' in sql
     assert params == ('my-component',)

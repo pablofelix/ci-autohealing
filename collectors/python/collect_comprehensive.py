@@ -30,11 +30,8 @@ from dataclasses import replace
 from datetime import datetime
 
 from config import CollectorConfig
-from database import Database
-from kubearchive_client import KubeArchiveClient
-from kubernetes_client import KubernetesClient
-from tekton_results_client import TektonResultsClient
-from unified_collector import UnifiedCollector
+from repositories import DatabaseConnection, BuildFailureRepository
+from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
 from models import PipelineRun, BuildStatus, ScanResult, Component
 from tekton_parsers import (
     extract_error_from_logs,
@@ -55,7 +52,9 @@ class ComprehensiveCollector:
             config: Collector configuration.
         """
         self.config = config
-        self.db = Database(config.db)
+        db = DatabaseConnection(config.db)
+        self.db = db
+        self.build_repo = BuildFailureRepository(db)
 
         # Initialize all available API clients
         self.kubearchive = KubeArchiveClient(
@@ -69,8 +68,8 @@ class ComprehensiveCollector:
             namespace=config.k8s.namespace
         )
 
-        # Unified collector that tries all APIs
-        self.unified = UnifiedCollector(
+        # Unified client that tries all APIs
+        self.unified = UnifiedPipelineClient(
             namespace=config.k8s.namespace
         )
 
@@ -460,22 +459,9 @@ class ComprehensiveCollector:
 
         # Check if already in DB with complete data
         try:
-            with self.db.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT build_logs IS NOT NULL AND LENGTH(build_logs) > 100,
-                           commit_sha IS NOT NULL,
-                           konflux_url IS NOT NULL
-                    FROM build_failures
-                    WHERE pipelinerun_name = %s
-                    """,
-                    (pr_name,)
-                )
-                result = cursor.fetchone()
-                if result and all(result):
-                    print(f"  ✓ Already have complete data")
-                    return True, False, 0
+            if self.build_repo.is_pipelinerun_complete(pr_name):
+                print(f"  ✓ Already have complete data")
+                return True, False, 0
         except Exception:
             pass
 
@@ -513,89 +499,30 @@ class ComprehensiveCollector:
         # Insert or update in database
         inserted = False
         try:
-            with self.db.connection() as conn:
-                cursor = conn.cursor()
-
-                # Check if exists
-                cursor.execute(
-                    "SELECT id FROM build_failures WHERE pipelinerun_name = %s",
-                    (pr_name,)
-                )
-                exists = cursor.fetchone()
-
-                if exists:
-                    # Update with comprehensive data
-                    cursor.execute(
-                        """
-                        UPDATE build_failures SET
-                            build_logs = COALESCE(%s, build_logs),
-                            commit_sha = COALESCE(%s, commit_sha),
-                            commit_short_sha = COALESCE(%s, commit_short_sha),
-                            commit_url = COALESCE(%s, commit_url),
-                            commit_message = COALESCE(%s, commit_message),
-                            commit_author = COALESCE(%s, commit_author),
-                            konflux_url = COALESCE(%s, konflux_url),
-                            logs_full_url = COALESCE(%s, logs_full_url),
-                            pr_number = COALESCE(%s, pr_number),
-                            pr_url = COALESCE(%s, pr_url),
-                            error_message = COALESCE(%s, error_message),
-                            error_type = COALESCE(%s, error_type),
-                            failed_step_name = COALESCE(%s, failed_step_name),
-                            build_duration_seconds = COALESCE(%s, build_duration_seconds),
-                            repository_url = COALESCE(%s, repository_url),
-                            branch = COALESCE(%s, branch),
-                            last_updated_at = NOW()
-                        WHERE pipelinerun_name = %s
-                        """,
-                        (logs, details.get('commit_sha'), details.get('commit_short_sha'),
-                         details.get('commit_url'), details.get('commit_message'),
-                         details.get('commit_author'), details.get('konflux_url'),
-                         details.get('pipeline_url'), details.get('pr_number'),
-                         details.get('pr_url'), error_message, error_type,
-                         failed_step, duration, details.get('repository_url'),
-                         details.get('branch'), pr_name)
-                    )
-                    print(f"  ✓ Updated with {log_length} chars of logs")
-                else:
-                    # Insert new
-                    cursor.execute(
-                        """
-                        INSERT INTO build_failures (
-                            component_name, pipelinerun_name, pipelinerun_uid,
-                            application, namespace, repository, repository_url, branch,
-                            commit_sha, commit_short_sha, commit_url, commit_message, commit_author,
-                            pr_number, pr_url, status, error_message, error_type,
-                            failed_step_name, build_duration_seconds,
-                            konflux_url, logs_full_url, build_logs
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s
-                        )
-                        """,
-                        (component.name, pr_name, pr_info['uid'],
-                         self.config.k8s.application_name, self.config.k8s.namespace,
-                         component.repository_url.replace('https://github.com/', '').replace('.git', ''),
-                         component.repository_url, component.branch,
-                         details.get('commit_sha'), details.get('commit_short_sha'),
-                         details.get('commit_url'), details.get('commit_message'),
-                         details.get('commit_author'), details.get('pr_number'),
-                         details.get('pr_url'),
-                         pr_info['status'].value if isinstance(pr_info['status'], BuildStatus) else pr_info['status'],
-                         error_message, error_type,
-                         failed_step, duration, details.get('konflux_url'),
-                         details.get('pipeline_url'), logs)
-                    )
-                    inserted = True
-                    print(f"  ✓ Inserted with {log_length} chars of logs")
-
-                conn.commit()
+            status_value = pr_info['status'].value if isinstance(pr_info['status'], BuildStatus) else pr_info['status']
+            inserted = self.build_repo.upsert_failure(
+                pr_name=pr_name, pr_uid=pr_info['uid'],
+                component_name=component.name,
+                application=self.config.k8s.application_name,
+                namespace=self.config.k8s.namespace,
+                repo_url=component.repository_url,
+                branch=component.branch,
+                status=status_value,
+                logs=logs, details=details,
+                error_message=error_message, error_type=error_type,
+                failed_step=failed_step, duration=duration
+            )
+            if inserted:
+                print(f"  ✓ Inserted with {log_length} chars of logs")
+            else:
+                print(f"  ✓ Updated with {log_length} chars of logs")
 
         except Exception as e:
             print(f"  ✗ Database error: {e}")
             return True, False, log_length
 
         # Update component health
-        self.db.update_component_health(component.name)
+        self.build_repo.update_component_health(component.name)
 
         return True, inserted, log_length
 

@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Set
 import requests
 
 from config import CollectorConfig
-from database import Database
+from repositories import DatabaseConnection, ConformaRepository, SyncStatusRepository
 from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
 
 
@@ -136,55 +136,14 @@ def get_failing_conforma_components(config):
     return {'failing': failing, 'details': details, 'running': active_running}
 
 
-def get_conforma_components_from_db(db, application_name):
-    # type: (Database, str) -> Set[str]
-    """Get components with unresolved Conforma failures from DB."""
-    try:
-        with db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT DISTINCT component_name FROM conforma_results
-                WHERE application = %s
-                  AND is_resolved = FALSE
-                """,
-                (application_name,)
-            )
-            return {row[0] for row in cursor.fetchall()}
-    except Exception:
-        return set()
-
-
-def save_conforma_status(db, application_name, failing_components, running=None):
-    # type: (Database, str, Set[str], Optional[Dict[str, Any]]) -> None
-    """Save failing Conforma components and running tests to sync_status cache."""
-    try:
-        components_json = json.dumps(sorted(failing_components))
-        running_json = json.dumps([
-            {'component': comp, **info} for comp, info in sorted((running or {}).items())
-        ])
-
-        with db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE sync_status
-                SET conforma_components = %s,
-                    running_conforma = %s
-                WHERE application = %s
-                """,
-                (components_json, running_json, application_name)
-            )
-    except Exception:
-        pass
-
-
 def main():
     import time
     start_time = time.time()
 
     config = CollectorConfig.from_env()
-    db = Database(config.db)
+    db = DatabaseConnection(config.db)
+    conforma_repo = ConformaRepository(db)
+    sync_repo = SyncStatusRepository(db)
     application_name = config.k8s.application_name
 
     print("Checking Conforma test status for {}...".format(application_name))
@@ -194,12 +153,12 @@ def main():
     details = cluster_result['details']
     running = cluster_result.get('running', {})
 
-    db_components = get_conforma_components_from_db(db, application_name)
+    db_components = conforma_repo.find_unresolved_component_names(application_name)
 
     missing_in_db = failing - db_components
     extra_in_db = db_components - failing
 
-    save_conforma_status(db, application_name, failing, running)
+    sync_repo.save_conforma_sync_status(application_name, failing, running)
 
     duration = time.time() - start_time
 

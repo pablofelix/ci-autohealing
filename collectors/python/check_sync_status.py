@@ -10,13 +10,12 @@ retains a few recent ones, while KubeArchive has the full history).
 import sys
 import json
 import subprocess
-from collections import defaultdict
 from typing import Set, Dict, Any, Optional
 
 import requests
 
 from config import CollectorConfig
-from database import Database
+from repositories import DatabaseConnection, BuildFailureRepository, SyncStatusRepository
 from openshift_auth import is_logged_in, get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
 
 
@@ -28,10 +27,6 @@ def get_failing_components_from_cluster(config):
     Groups by component, tracks latest push build and latest incoming build
     separately. Returns components whose latest push build failed, and
     identifies which ones have a successful incoming re-trigger.
-
-    Returns:
-        Dict with 'failing' (set of component names with failed push builds)
-        and 'retriggered' (set of components with successful incoming after push failure).
     """
     token = get_openshift_token()
     if not token:
@@ -103,7 +98,7 @@ def get_failing_components_from_cluster(config):
     except Exception:
         pass
 
-    # Source 2: Live cluster PipelineRuns (may have very recent ones not yet in KubeArchive)
+    # Source 2: Live cluster PipelineRuns
     try:
         result = subprocess.run(
             ['oc', 'get', 'pipelinerun',
@@ -146,88 +141,15 @@ def get_failing_components_from_cluster(config):
     return {'failing': failing, 'retriggered': retriggered, 'running': active_running}
 
 
-def get_components_from_db(db, application_name):
-    # type: (Database, str) -> Optional[Set[str]]
-    """Get list of currently failing components from database."""
-    try:
-        with db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                WITH latest_builds AS (
-                    SELECT DISTINCT ON (component_name)
-                        component_name,
-                        status,
-                        is_resolved
-                    FROM build_failures
-                    WHERE application = %s
-                    ORDER BY component_name, first_detected_at DESC
-                )
-                SELECT component_name FROM latest_builds
-                WHERE status = 'Failed' AND is_resolved = FALSE
-                """,
-                (application_name,)
-            )
-            return {row[0] for row in cursor.fetchall()}
-    except Exception:
-        return None
-
-
-def save_sync_status(db, application_name, status, duration):
-    # type: (Database, str, Dict[str, Any], float) -> None
-    """Save sync status to database for caching."""
-    try:
-        running_builds_json = json.dumps(status.get('running_builds', []))
-
-        with db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO sync_status (
-                    application, last_checked_at, in_sync, cluster_connected,
-                    cluster_components, db_components, missing_in_db, extra_in_db,
-                    retriggered_components, running_builds, error, check_duration_seconds
-                ) VALUES (
-                    %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (application) DO UPDATE SET
-                    last_checked_at = NOW(),
-                    in_sync = EXCLUDED.in_sync,
-                    cluster_connected = EXCLUDED.cluster_connected,
-                    cluster_components = EXCLUDED.cluster_components,
-                    db_components = EXCLUDED.db_components,
-                    missing_in_db = EXCLUDED.missing_in_db,
-                    extra_in_db = EXCLUDED.extra_in_db,
-                    retriggered_components = EXCLUDED.retriggered_components,
-                    running_builds = EXCLUDED.running_builds,
-                    error = EXCLUDED.error,
-                    check_duration_seconds = EXCLUDED.check_duration_seconds
-                """,
-                (
-                    application_name,
-                    status['in_sync'],
-                    status['cluster_connected'],
-                    json.dumps(status['cluster_components']),
-                    json.dumps(status['db_components']),
-                    json.dumps(status['missing_in_db']),
-                    json.dumps(status['extra_in_db']),
-                    json.dumps(status.get('retriggered_components', [])),
-                    running_builds_json,
-                    status.get('error'),
-                    round(duration, 2)
-                )
-            )
-    except Exception:
-        pass
-
-
 def main():
     """Check sync status and return JSON."""
     import time
     start_time = time.time()
 
     config = CollectorConfig.from_env()
-    db = Database(config.db)
+    db = DatabaseConnection(config.db)
+    build_repo = BuildFailureRepository(db)
+    sync_repo = SyncStatusRepository(db)
     application_name = config.k8s.application_name
 
     status = {
@@ -244,16 +166,16 @@ def main():
 
     if not is_logged_in():
         status['error'] = 'Not logged into OpenShift cluster'
-        save_sync_status(db, application_name, status, time.time() - start_time)
+        sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
         print(json.dumps(status))
         sys.exit(0)
 
     status['cluster_connected'] = True
 
-    db_components = get_components_from_db(db, application_name)
+    db_components = build_repo.find_failing_component_names(application_name)
     if db_components is None:
         status['error'] = 'Database connection failed'
-        save_sync_status(db, application_name, status, time.time() - start_time)
+        sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
         print(json.dumps(status))
         sys.exit(0)
 
@@ -275,7 +197,7 @@ def main():
     ]
     status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
 
-    save_sync_status(db, application_name, status, time.time() - start_time)
+    sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
 
     print(json.dumps(status))
 

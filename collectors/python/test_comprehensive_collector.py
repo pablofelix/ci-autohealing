@@ -18,11 +18,12 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collect_comprehensive.Database'), \
+    with patch('collect_comprehensive.DatabaseConnection'), \
+         patch('collect_comprehensive.BuildFailureRepository'), \
          patch('collect_comprehensive.KubeArchiveClient'), \
          patch('collect_comprehensive.KubernetesClient'), \
          patch('collect_comprehensive.TektonResultsClient'), \
-         patch('collect_comprehensive.UnifiedCollector'):
+         patch('collect_comprehensive.UnifiedPipelineClient'):
         return ComprehensiveCollector(config)
 
 
