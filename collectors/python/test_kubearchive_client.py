@@ -4,24 +4,24 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 import subprocess
 import requests
-from kubearchive_client import KubeArchiveClient
+from clients.kubearchive import KubeArchiveClient
 
 
 class TestKubeArchiveClient(unittest.TestCase):
     """Test KubeArchiveClient."""
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://kubearchive.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://kubearchive.example.com')
     def test_discover_api_url_success(self, mock_url, mock_token, mock_session):
         """Test successful API URL discovery."""
         mock_session.return_value = MagicMock()
         client = KubeArchiveClient()
         self.assertEqual(client.api_url, "https://kubearchive.example.com")
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url')
     def test_discover_api_url_fallback(self, mock_url, mock_token, mock_session):
         """Test API URL fallback when discovery returns fallback."""
         mock_url.return_value = "https://kubearchive-api-server.kubearchive.svc.cluster.local"
@@ -48,9 +48,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         token = get_openshift_token()
         self.assertIsNone(token)
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_create_session(self, mock_url, mock_token, mock_session):
         """Test session creation with auth headers."""
         session = MagicMock()
@@ -62,9 +62,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         self.assertEqual(client.session.headers['Authorization'], 'Bearer test-token')
         self.assertEqual(client.session.headers['Accept'], 'application/json')
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_get_pipelinerun_success(self, mock_url, mock_token, mock_session):
         """Test successful PipelineRun fetch."""
         mock_session.return_value = MagicMock()
@@ -84,9 +84,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         call_args = client.session.get.call_args
         self.assertIn('/apis/tekton.dev/v1/namespaces/test-ns/pipelineruns/test-pr', call_args[0][0])
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_get_pipelinerun_not_found(self, mock_url, mock_token, mock_session):
         """Test PipelineRun not found."""
         mock_session.return_value = MagicMock()
@@ -96,9 +96,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         result = client.get_pipelinerun("non-existent-pr")
         self.assertIsNone(result)
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_get_taskrun_success(self, mock_url, mock_token, mock_session):
         """Test successful TaskRun fetch."""
         mock_session.return_value = MagicMock()
@@ -117,9 +117,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         call_args = client.session.get.call_args
         self.assertIn('/apis/tekton.dev/v1/namespaces/test-ns/taskruns/test-tr', call_args[0][0])
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_get_pod_logs(self, mock_url, mock_token, mock_session):
         """Test pod logs retrieval."""
         mock_session.return_value = MagicMock()
@@ -132,9 +132,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         logs = client.get_pod_logs("test-pod", container="build")
         self.assertEqual(logs, "Log line 1\nLog line 2\n")
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_extract_taskruns(self, mock_url, mock_token, mock_session):
         """Test extracting TaskRun names from PipelineRun."""
         mock_session.return_value = MagicMock()
@@ -156,9 +156,9 @@ class TestKubeArchiveClient(unittest.TestCase):
         self.assertIn('tr-2', taskruns)
         self.assertNotIn('run-1', taskruns)
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_extract_failed_steps(self, mock_url, mock_token, mock_session):
         """Test extracting failed step names from TaskRun."""
         mock_session.return_value = MagicMock()
@@ -180,9 +180,18 @@ class TestKubeArchiveClient(unittest.TestCase):
         self.assertIn('push', failed_steps)
         self.assertNotIn('init', failed_steps)
 
-    @patch('kubearchive_client.create_authenticated_session')
-    @patch('kubearchive_client.get_openshift_token', return_value='test-token')
-    @patch('kubearchive_client.discover_kubearchive_api_url', return_value='https://api.example.com')
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
+    def test_step_container_name_prefix(self, mock_url, mock_token, mock_session):
+        """Test KubeArchive uses step- prefix for container names."""
+        mock_session.return_value = MagicMock()
+        client = KubeArchiveClient()
+        self.assertEqual(client.step_container_name('build'), 'step-build')
+
+    @patch('clients.kubearchive.create_authenticated_session')
+    @patch('clients.kubearchive.get_openshift_token', return_value='test-token')
+    @patch('clients.kubearchive.discover_kubearchive_api_url', return_value='https://api.example.com')
     def test_get_pipelinerun_logs_integration(self, mock_url, mock_token, mock_session):
         """Test complete PipelineRun logs fetch (integration)."""
         mock_session.return_value = MagicMock()
