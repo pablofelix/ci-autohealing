@@ -13,8 +13,11 @@ from typing import Dict, Any, Optional, Set
 import requests
 
 from config import CollectorConfig
+from logger import setup_logger
 from repositories import DatabaseConnection, ConformaRepository, SyncStatusRepository
 from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
+
+logger = setup_logger(__name__)
 
 
 def get_failing_conforma_components(config):
@@ -93,7 +96,7 @@ def get_failing_conforma_components(config):
             else:
                 break
     except Exception as e:
-        print("  KubeArchive query error: {}".format(e), file=sys.stderr)
+        logger.error("KubeArchive query error: %s", e)
 
     # Source 2: Live cluster
     try:
@@ -146,7 +149,7 @@ def main():
     sync_repo = SyncStatusRepository(db)
     application_name = config.k8s.application_name
 
-    print("Checking Conforma test status for {}...".format(application_name))
+    logger.info("Checking Conforma test status for %s", application_name)
 
     cluster_result = get_failing_conforma_components(config)
     failing = cluster_result['failing']
@@ -162,15 +165,15 @@ def main():
 
     duration = time.time() - start_time
 
-    print("  Conforma failures in cluster: {}".format(len(failing)))
-    print("  Conforma failures in DB: {}".format(len(db_components)))
+    logger.info("Conforma failures in cluster: %d", len(failing))
+    logger.info("Conforma failures in DB: %d", len(db_components))
     if running:
-        print("  Conforma tests running: {} ({})".format(len(running), sorted(running.keys())))
+        logger.info("Conforma tests running: %d (%s)", len(running), sorted(running.keys()))
     if missing_in_db:
-        print("  Missing in DB: {}".format(sorted(missing_in_db)))
+        logger.warning("Missing in DB: %s", sorted(missing_in_db))
     if extra_in_db:
-        print("  Extra in DB (resolved?): {}".format(sorted(extra_in_db)))
-    print("  Duration: {:.1f}s".format(duration))
+        logger.info("Extra in DB (resolved?): %s", sorted(extra_in_db))
+    logger.info("Duration: %.1fs", duration)
 
     status = {
         'failing_components': sorted(failing),

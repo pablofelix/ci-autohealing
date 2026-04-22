@@ -19,10 +19,13 @@ from typing import Dict, Any, Optional, List, Set
 import requests
 
 from config import CollectorConfig
+from logger import setup_logger
 from repositories import DatabaseConnection, ConformaRepository
 from clients import KubeArchiveClient
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
+
+logger = setup_logger(__name__)
 
 APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
 NAMESPACE = os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
@@ -102,7 +105,7 @@ class ConformaCollector:
                 else:
                     break
         except Exception as e:
-            print(f"  KubeArchive error: {e}", file=sys.stderr)
+            logger.error("KubeArchive error: %s", e)
 
         # Source 2: Live cluster
         try:
@@ -153,18 +156,18 @@ class ConformaCollector:
         # Find verify TaskRun
         verify_tr_name = self.get_verify_taskrun(pr_data)
         if not verify_tr_name:
-            print(f"    ⚠ No 'verify' TaskRun found")
+            logger.warning("No 'verify' TaskRun found")
             return result
 
         # Get TaskRun to find pod name
         tr_data = self.kubearchive.get_taskrun(verify_tr_name)
         if not tr_data:
-            print(f"    ⚠ Cannot fetch TaskRun: {verify_tr_name}")
+            logger.warning("Cannot fetch TaskRun: %s", verify_tr_name)
             return result
 
         pod_name = tr_data.get('status', {}).get('podName')
         if not pod_name:
-            print(f"    ⚠ No pod name in TaskRun")
+            logger.warning("No pod name in TaskRun")
             return result
 
         # Step 1: summary step — compact JSON with counts
@@ -175,15 +178,16 @@ class ConformaCollector:
                 result['violations_count'] = summary.get('failures', 0)
                 result['warnings_count'] = summary.get('warnings', 0)
                 result['successes_count'] = summary.get('successes', 0)
-                print(f"    ✓ Summary: {result['violations_count']} violations, {result['warnings_count']} warnings, {result['successes_count']} successes")
+                logger.info("Summary: %d violations, %d warnings, %d successes",
+                            result['violations_count'], result['warnings_count'], result['successes_count'])
             except json.JSONDecodeError:
-                print(f"    ⚠ Could not parse summary step")
+                logger.warning("Could not parse summary step")
 
         # Step 2: detailed-report step — human-readable violations
         detailed_logs = self.get_step_logs(pod_name, 'detailed-report')
         if detailed_logs:
             result['violation_summary'] = detailed_logs[:10000]
-            print(f"    ✓ Detailed report: {len(detailed_logs)} chars")
+            logger.info("Detailed report: %d chars", len(detailed_logs))
 
         # Step 3: report-json step — full JSON
         report_logs = self.get_step_logs(pod_name, 'report-json')
@@ -191,9 +195,9 @@ class ConformaCollector:
             try:
                 report_json = json.loads(report_logs.strip())
                 result['violation_details'] = report_json
-                print(f"    ✓ Report JSON: {len(report_logs)} chars")
+                logger.info("Report JSON: %d chars", len(report_logs))
             except json.JSONDecodeError:
-                print(f"    ⚠ Could not parse report-json step")
+                logger.warning("Could not parse report-json step")
 
         return result
 
@@ -230,10 +234,10 @@ class ConformaCollector:
                 violations=violations, comp_info=comp_info
             )
             if result:
-                print("    ✓ Saved to DB")
+                logger.info("Saved to DB")
             return result
         except Exception as e:
-            print("    ✗ DB error: {}".format(e))
+            logger.error("DB error: %s", e)
             return False
 
     def resolve_fixed_components(self, currently_failing):
@@ -246,26 +250,26 @@ class ConformaCollector:
     def run(self) -> Dict[str, Any]:
         start_time = time.time()
 
-        print(f"\n{'='*70}")
-        print("Conforma Test Failure Collection")
-        print(f"Application: {self.config.k8s.application_name}")
-        print(f"{'='*70}\n")
+        logger.info("=" * 70)
+        logger.info("Conforma Test Failure Collection")
+        logger.info("Application: %s", self.config.k8s.application_name)
+        logger.info("=" * 70)
 
         # Get failing components
-        print("Discovering failing Conforma tests...")
+        logger.info("Discovering failing Conforma tests...")
         failing = self.get_failing_conforma_pipelineruns()
 
         if not failing:
-            print("  ✓ No failing Conforma tests found")
+            logger.info("No failing Conforma tests found")
             return {'collected': 0, 'resolved': 0, 'duration': time.time() - start_time}
 
-        print(f"  ✓ Found {len(failing)} components with failing Conforma tests\n")
+        logger.info("Found %d components with failing Conforma tests", len(failing))
 
         collected = 0
         for i, (component, info) in enumerate(sorted(failing.items()), 1):
-            print(f"[{i}/{len(failing)}] {component}")
-            print(f"  Scenario: {info['scenario']}")
-            print(f"  PipelineRun: {info['pr_name']}")
+            logger.info("[%d/%d] %s", i, len(failing), component)
+            logger.info("Scenario: %s", info['scenario'])
+            logger.info("PipelineRun: %s", info['pr_name'])
 
             # Extract violation details from logs
             violations = self.extract_violation_details(info['pr_name'], info['pr_data'])
@@ -278,20 +282,19 @@ class ConformaCollector:
                               info['pr_uid'], violations, comp_info):
                 collected += 1
 
-            print()
+            logger.info("")
 
         # Mark resolved components
         resolved = self.resolve_fixed_components(set(failing.keys()))
 
         duration = time.time() - start_time
 
-        print(f"{'='*70}")
-        print("Collection Complete")
-        print(f"{'='*70}")
-        print(f"Components collected: {collected}")
-        print(f"Components resolved: {resolved}")
-        print(f"Duration: {duration:.1f}s")
-        print()
+        logger.info("=" * 70)
+        logger.info("Collection Complete")
+        logger.info("=" * 70)
+        logger.info("Components collected: %d", collected)
+        logger.info("Components resolved: %d", resolved)
+        logger.info("Duration: %.1fs", duration)
 
         return {'collected': collected, 'resolved': resolved, 'duration': duration}
 

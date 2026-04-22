@@ -23,6 +23,9 @@ from config import CollectorConfig
 from repositories import DatabaseConnection, BuildFailureRepository
 from models import Component, BuildStatus
 from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
+from logger import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class StatusSynchronizer:
@@ -150,13 +153,13 @@ class StatusSynchronizer:
             if result['was_failing']:
                 if self.build_repo.mark_resolved(component.name, app, ns, 'archived'):
                     result['now_resolved'] = True
-                    print("  ✓ Marked as resolved (no PipelineRuns in cluster - likely archived)")
+                    logger.info("Marked as resolved (no PipelineRuns in cluster - likely archived)")
                     result['current_status'] = 'archived'
                     return result
 
             db_status = self.build_repo.get_last_status(component.name, app)
             result['current_status'] = db_status if db_status else 'unknown'
-            print("  → current status: {} (from DB, not in K8s)".format(result['current_status']))
+            logger.info("Current status: {} (from DB, not in K8s)".format(result['current_status']))
             return result
 
         result['current_status'] = current['status'].value
@@ -164,14 +167,14 @@ class StatusSynchronizer:
         if result['was_failing'] and current['status'] == BuildStatus.SUCCEEDED:
             if self.build_repo.mark_resolved(component.name, app, ns, current['name']):
                 result['now_resolved'] = True
-                print("  ✓ Marked as resolved (last build: {})".format(current['name']))
+                logger.info("Marked as resolved (last build: {})".format(current['name']))
 
             if self.build_repo.record_successful_build(
                 component.name, current['name'], current['uid'],
                 app, ns, component.repository_url, component.branch
             ):
                 result['success_recorded'] = True
-                print("  ✓ Recorded success build")
+                logger.info("Recorded success build")
 
         elif not result['was_failing'] and current['status'] == BuildStatus.SUCCEEDED:
             if self.build_repo.record_successful_build(
@@ -179,10 +182,10 @@ class StatusSynchronizer:
                 app, ns, component.repository_url, component.branch
             ):
                 result['success_recorded'] = True
-                print("  ✓ Recorded success build (no previous failures)")
+                logger.info("Recorded success build (no previous failures)")
 
         elif current['status'] == BuildStatus.FAILED:
-            print("  → current status: Failed (will be collected by comprehensive collector)")
+            logger.info("Current status: Failed (will be collected by comprehensive collector)")
 
         return result
 
@@ -192,17 +195,17 @@ class StatusSynchronizer:
         app = self.config.k8s.application_name
 
         if components is None:
-            print("Loading components with unresolved failures from database...")
+            logger.info("Loading components with unresolved failures from database...")
             unresolved_names = self.build_repo.find_unresolved_component_names(app)
 
             if not unresolved_names:
-                print("  ✓ No unresolved failures found")
+                logger.info("No unresolved failures found")
                 return {
                     'components_synced': 0, 'resolved': 0,
                     'successes': 0, 'duration': time.time() - start_time
                 }
 
-            print("  ✓ Found {} components with unresolved failures".format(len(unresolved_names)))
+            logger.info("Found {} components with unresolved failures".format(len(unresolved_names)))
 
             components = [
                 Component(name=name, namespace=self.config.k8s.namespace,
@@ -210,7 +213,7 @@ class StatusSynchronizer:
                 for name in unresolved_names
             ]
 
-        print("Enriching component metadata...")
+        logger.info("Enriching component metadata...")
         components = [
             comp if comp.repository_url else replace(
                 comp, **vars(self.get_component_metadata(comp.name) or comp)
@@ -218,19 +221,19 @@ class StatusSynchronizer:
             for comp in components
         ]
 
-        print("\n" + "=" * 70)
-        print("Component Status Synchronization")
-        print("=" * 70 + "\n")
+        logger.info("=" * 70)
+        logger.info("Component Status Synchronization")
+        logger.info("=" * 70)
 
         total_resolved = 0
         total_successes = 0
         components_synced = 0
 
         for i, component in enumerate(components, 1):
-            print("[{}/{}] {}".format(i, len(components), component.name))
+            logger.info("[{}/{}] {}".format(i, len(components), component.name))
 
             if not component.repository_url:
-                print("  ✗ Component not found in cluster")
+                logger.warning("Component not found in cluster")
                 continue
 
             result = self.sync_component(component)
@@ -244,18 +247,17 @@ class StatusSynchronizer:
             if not result['now_resolved'] and not result['success_recorded']:
                 status = result['current_status']
                 was_failing = "was failing, " if result['was_failing'] else ""
-                print("  → {}current status: {}".format(was_failing, status))
+                logger.info("{}current status: {}".format(was_failing, status))
 
         duration = time.time() - start_time
 
-        print("\n" + "=" * 70)
-        print("Synchronization Complete")
-        print("=" * 70)
-        print("Components synced: {}".format(components_synced))
-        print("Failures resolved: {}".format(total_resolved))
-        print("Successes recorded: {}".format(total_successes))
-        print("Duration: {:.1f}s".format(duration))
-        print()
+        logger.info("=" * 70)
+        logger.info("Synchronization Complete")
+        logger.info("=" * 70)
+        logger.info("Components synced: {}".format(components_synced))
+        logger.info("Failures resolved: {}".format(total_resolved))
+        logger.info("Successes recorded: {}".format(total_successes))
+        logger.info("Duration: {:.1f}s".format(duration))
 
         return {
             'components_synced': components_synced,

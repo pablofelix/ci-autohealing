@@ -29,6 +29,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import replace
 from datetime import datetime
 
+from logger import setup_logger
 from config import CollectorConfig
 from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
@@ -40,6 +41,8 @@ from tekton_parsers import (
     extract_pr_number_from_annotations,
     classify_pipelinerun_status,
 )
+
+logger = setup_logger(__name__)
 
 
 class ComprehensiveCollector:
@@ -106,7 +109,7 @@ class ComprehensiveCollector:
                     push_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
 
             # Source 1: KubeArchive (has the full PipelineRun history)
-            print(f"  → Querying KubeArchive for application {self.config.k8s.application_name}...")
+            logger.info("Querying KubeArchive for application {}...".format(self.config.k8s.application_name))
             try:
                 api_url = self.kubearchive.api_url
                 token = self.kubearchive.token
@@ -140,9 +143,9 @@ class ComprehensiveCollector:
                         break
 
                 if total_archive:
-                    print(f"  ✓ Found {total_archive} PipelineRuns in KubeArchive")
+                    logger.info("Found {} PipelineRuns in KubeArchive".format(total_archive))
             except Exception as e:
-                print(f"  ⚠ KubeArchive query failed: {e}")
+                logger.warning("KubeArchive query failed: {}".format(e))
 
             # Source 2: Live cluster (may have very recent PipelineRuns)
             try:
@@ -160,7 +163,7 @@ class ComprehensiveCollector:
                 if pr_result.returncode == 0:
                     data = json.loads(pr_result.stdout)
                     live_prs = data.get('items', [])
-                    print(f"  ✓ Found {len(live_prs)} PipelineRuns in live cluster")
+                    logger.info("Found {} PipelineRuns in live cluster".format(len(live_prs)))
                     for pr in live_prs:
                         process_pipelinerun(pr)
             except Exception:
@@ -173,10 +176,10 @@ class ComprehensiveCollector:
             ]
 
             if not failing_component_names:
-                print(f"  ✓ No failing components found")
+                logger.info("No failing components found")
                 return []
 
-            print(f"  ✓ Found {len(failing_component_names)} components with failed builds")
+            logger.info("Found {} components with failed builds".format(len(failing_component_names)))
 
             # Get metadata for failing components
             # Try oc get component first, fall back to PipelineRun annotations
@@ -216,7 +219,7 @@ class ComprehensiveCollector:
                         pr_annotations.get('pipelinesascode.tekton.dev/branch', '')
                     )
                     if repo_url:
-                        print(f"  → {component_name}: metadata from PipelineRun annotations (cluster unavailable)")
+                        logger.info("{}: metadata from PipelineRun annotations (cluster unavailable)".format(component_name))
 
                 failing_components.append(Component(
                     name=component_name,
@@ -225,12 +228,12 @@ class ComprehensiveCollector:
                     namespace=self.config.k8s.namespace
                 ))
 
-            print(f"  ✓ Retrieved metadata for {len(failing_components)} components")
+            logger.info("Retrieved metadata for {} components".format(len(failing_components)))
             return failing_components
 
         except Exception as e:
             import traceback
-            print(f"  ✗ Error discovering components: {e}")
+            logger.error("Error discovering components: {}".format(e))
             traceback.print_exc()
             return []
 
@@ -387,9 +390,9 @@ class ComprehensiveCollector:
         logs, source = self.unified.get_logs_complete(pr_name)
 
         if logs:
-            print(f"    ✓ Got logs from {source} ({len(logs)} chars)")
+            logger.info("Got logs from {} ({} chars)".format(source, len(logs)))
         else:
-            print(f"    ✗ No logs available from any source")
+            logger.error("No logs available from any source")
 
         return logs
 
@@ -455,32 +458,32 @@ class ComprehensiveCollector:
             return False, False, 0
 
         pr_name = pr_info['name']
-        print(f"  Latest failure: {pr_name}")
+        logger.info("Latest failure: {}".format(pr_name))
 
         # Check if already in DB with complete data
         try:
             if self.build_repo.is_pipelinerun_complete(pr_name):
-                print(f"  ✓ Already have complete data")
+                logger.info("Already have complete data")
                 return True, False, 0
         except Exception:
             pass
 
         # Fetch comprehensive logs
-        print(f"  → Fetching comprehensive logs...")
+        logger.info("Fetching comprehensive logs...")
         logs = self.get_comprehensive_logs(pr_name)
         log_length = len(logs) if logs else 0
 
         # Get full PipelineRun details using UnifiedCollector
-        print(f"  → Fetching PipelineRun metadata...")
+        logger.info("Fetching PipelineRun metadata...")
 
         pr_data, data_source = self.unified.get_pipelinerun_complete(pr_name)
 
         details = {}
         if pr_data:
             details = self.extract_all_details(pr_data, source=data_source)
-            print(f"  ✓ Metadata from {data_source}")
+            logger.info("Metadata from {}".format(data_source))
         else:
-            print(f"  ⚠ Could not fetch metadata from any source, using partial data")
+            logger.warning("Could not fetch metadata from any source, using partial data")
 
         # Extract error information from logs
         error_message, error_type = self.extract_error_messages(logs) if logs else (None, None)
@@ -513,12 +516,12 @@ class ComprehensiveCollector:
                 failed_step=failed_step, duration=duration
             )
             if inserted:
-                print(f"  ✓ Inserted with {log_length} chars of logs")
+                logger.info("Inserted with {} chars of logs".format(log_length))
             else:
-                print(f"  ✓ Updated with {log_length} chars of logs")
+                logger.info("Updated with {} chars of logs".format(log_length))
 
         except Exception as e:
-            print(f"  ✗ Database error: {e}")
+            logger.error("Database error: {}".format(e))
             return True, False, log_length
 
         # Update component health
@@ -545,12 +548,12 @@ class ComprehensiveCollector:
         # Load components
         if components is None:
             # Try automatic discovery from cluster first
-            print(f"Discovering failing components from cluster...")
+            logger.info("Discovering failing components from cluster...")
             components = self.discover_components_from_cluster()
 
             # Fallback to file if discovery fails and file is configured
             if not components and self.config.components_file:
-                print(f"Falling back to components file: {self.config.components_file}")
+                logger.info("Falling back to components file: {}".format(self.config.components_file))
                 components = Component.from_file(
                     str(self.config.components_file),
                     self.config.k8s.namespace
@@ -564,7 +567,7 @@ class ComprehensiveCollector:
             components = components[:limit]
 
         # Enrich components with metadata if needed
-        print(f"Enriching component metadata...")
+        logger.info("Enriching component metadata...")
         components = [
             comp if comp.repository_url else replace(
                 comp,
@@ -581,15 +584,15 @@ class ComprehensiveCollector:
         total_new = 0
         total_log_chars = 0
 
-        print(f"\n{'='*70}")
-        print("Comprehensive CI Failure Collection")
-        print(f"{'='*70}\n")
+        logger.info("=" * 70)
+        logger.info("Comprehensive CI Failure Collection")
+        logger.info("=" * 70)
 
         for i, component in enumerate(components, 1):
-            print(f"[{i}/{len(components)}] {component.name}")
+            logger.info("[{}/{}] {}".format(i, len(components), component.name))
 
             if not component.repository_url:
-                print(f"  ✗ Component not found in cluster")
+                logger.error("Component not found in cluster")
                 continue
 
             found, inserted, log_chars = self.collect_comprehensive_failure(component)
@@ -644,15 +647,14 @@ def main():
     result = collector.run(limit=args.limit)
 
     # Print summary
-    print(f"\n{'='*70}")
-    print("Collection Complete")
-    print(f"{'='*70}")
-    print(f"Components scanned: {result.components_scanned}")
-    print(f"Failures found: {result.failures_found}")
-    print(f"New failures inserted: {result.new_failures}")
-    print(f"Logs collected: {result.logs_fetched}")
-    print(f"Duration: {result.duration_seconds:.1f}s")
-    print()
+    logger.info("=" * 70)
+    logger.info("Collection Complete")
+    logger.info("=" * 70)
+    logger.info("Components scanned: {}".format(result.components_scanned))
+    logger.info("Failures found: {}".format(result.failures_found))
+    logger.info("New failures inserted: {}".format(result.new_failures))
+    logger.info("Logs collected: {}".format(result.logs_fetched))
+    logger.info("Duration: {:.1f}s".format(result.duration_seconds))
 
     return 0
 
