@@ -23,6 +23,7 @@ from datetime import datetime
 from config import CollectorConfig
 from database import Database
 from models import Component, BuildStatus
+from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
 
 
 class StatusSynchronizer:
@@ -123,15 +124,13 @@ class StatusSynchronizer:
 
         # Source 2: KubeArchive (archived PipelineRuns)
         try:
-            kubearchive_url = self._get_kubearchive_url()
-            token = self._get_oc_token()
+            kubearchive_url = discover_kubearchive_api_url()
+            token = get_openshift_token()
             if kubearchive_url and token:
-                session = requests.Session()
-                session.headers.update({
-                    'Authorization': f'Bearer {token}',
-                    'Accept': 'application/json'
-                })
-                url = f"{kubearchive_url}/apis/tekton.dev/v1/namespaces/{self.config.k8s.namespace}/pipelineruns"
+                session = create_authenticated_session(token)
+                url = "{}/apis/tekton.dev/v1/namespaces/{}/pipelineruns".format(
+                    kubearchive_url, self.config.k8s.namespace
+                )
                 params = {
                     'labelSelector': f'appstudio.openshift.io/component={component_name},pipelines.appstudio.openshift.io/type=build',
                     'limit': 50
@@ -166,41 +165,6 @@ class StatusSynchronizer:
             'uid': uid,
             'status': status
         }
-
-    @staticmethod
-    def _get_kubearchive_url() -> Optional[str]:
-        """Get KubeArchive API URL."""
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
-                 '-o', 'jsonpath={.data.URL}'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=10
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
-
-    @staticmethod
-    def _get_oc_token() -> Optional[str]:
-        """Get OpenShift authentication token."""
-        try:
-            result = subprocess.run(
-                ['oc', 'whoami', '-t'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
 
     def get_unresolved_components(self) -> Set[str]:
         """Get list of components with unresolved failures.

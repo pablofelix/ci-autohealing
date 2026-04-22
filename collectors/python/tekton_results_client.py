@@ -10,6 +10,8 @@ import requests
 from typing import Optional, List, Dict, Any
 from functools import lru_cache
 
+from openshift_auth import get_openshift_token, discover_openshift_api_url, create_authenticated_session
+
 
 class TektonResultsClient:
     """Client for interacting with Tekton Results API.
@@ -26,64 +28,12 @@ class TektonResultsClient:
             api_url: Tekton Results API base URL. If None, auto-discovered.
         """
         self.namespace = namespace
-        self.api_url = api_url or self._discover_api_url()
-        self.token = self._get_auth_token()
-        self.session = self._create_session()
-
-    @staticmethod
-    def _discover_api_url() -> str:
-        """Discover Tekton Results API URL.
-
-        Returns:
-            API base URL (typically the Kubernetes API server).
-        """
-        try:
-            # Get current server from kubeconfig
-            result = subprocess.run(
-                ['oc', 'whoami', '--show-server'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            # Fallback to default
-            return "https://api.CLUSTER_DOMAIN:6443"
-
-    @staticmethod
-    def _get_auth_token() -> str:
-        """Get authentication token.
-
-        Returns:
-            Bearer token for API authentication.
-        """
-        try:
-            result = subprocess.run(
-                ['oc', 'whoami', '-t'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to get token: {e}")
-
-    def _create_session(self) -> requests.Session:
-        """Create requests session with authentication.
-
-        Returns:
-            Configured requests.Session.
-        """
-        session = requests.Session()
-        session.headers.update({
-            'Authorization': f'Bearer {self.token}',
-            'Accept': 'application/json'
-        })
-        # Disable SSL verification for OpenShift internal certs
-        session.verify = False
-        return session
+        self.api_url = api_url or discover_openshift_api_url()
+        self.token = get_openshift_token()
+        if not self.token:
+            raise RuntimeError("Failed to get OpenShift token")
+        self.session = create_authenticated_session(self.token)
+        self.session.verify = False
 
     def get_pipelinerun_result_id(self, pipelinerun_name: str) -> Optional[str]:
         """Get Tekton Results ID from PipelineRun annotations.

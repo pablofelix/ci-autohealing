@@ -7,6 +7,7 @@ import requests
 
 from models import PipelineRun, TaskRun, BuildStatus
 from tekton_parsers import extract_taskrun_names, extract_failed_step_names, build_taskrun_detail
+from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
 
 
 class KubeArchiveClient:
@@ -30,68 +31,11 @@ class KubeArchiveClient:
             namespace: Default Kubernetes namespace.
         """
         self.namespace = namespace
-        self.api_url = api_url or self._discover_api_url()
-        self.token = self._get_auth_token()
-        self.session = self._create_session()
-
-    @staticmethod
-    def _discover_api_url() -> str:
-        """Discover KubeArchive API URL from cluster ConfigMap.
-
-        Returns:
-            KubeArchive API base URL.
-
-        Raises:
-            RuntimeError: If URL cannot be discovered.
-        """
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
-                 '-o', 'jsonpath={.data.URL}'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            # Fallback to known URL
-            return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
-
-    @staticmethod
-    def _get_auth_token() -> str:
-        """Get OpenShift authentication token.
-
-        Returns:
-            Bearer token for API authentication.
-
-        Raises:
-            RuntimeError: If token cannot be retrieved.
-        """
-        try:
-            result = subprocess.run(
-                ['oc', 'whoami', '-t'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to get OpenShift token: {e}")
-
-    def _create_session(self) -> requests.Session:
-        """Create requests session with authentication.
-
-        Returns:
-            Configured requests.Session with auth headers.
-        """
-        session = requests.Session()
-        session.headers.update({
-            'Authorization': f'Bearer {self.token}',
-            'Accept': 'application/json'
-        })
-        return session
+        self.api_url = api_url or discover_kubearchive_api_url()
+        self.token = get_openshift_token()
+        if not self.token:
+            raise RuntimeError("Failed to get OpenShift token")
+        self.session = create_authenticated_session(self.token)
 
     def get_pipelinerun(self, name: str, namespace: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch PipelineRun details from KubeArchive.

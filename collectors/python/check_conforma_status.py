@@ -13,37 +13,10 @@ from typing import Dict, Any, Optional, Set
 
 import requests
 
+from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
+
 APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
 NAMESPACE = os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
-
-
-def get_oc_token() -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ['oc', 'whoami', '-t'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
-
-
-def get_kubearchive_url() -> str:
-    try:
-        result = subprocess.run(
-            ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
-             '-o', 'jsonpath={.data.URL}'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
 
 
 def get_failing_conforma_components() -> Dict[str, Any]:
@@ -53,14 +26,12 @@ def get_failing_conforma_components() -> Dict[str, Any]:
       - failing: set of component names with latest conforma test failed
       - details: dict of component -> {scenario, violations, warnings, successes, pr_name, pr_uid, timestamp}
     """
-    token = get_oc_token()
+    token = get_openshift_token()
     if not token:
         return {'failing': set(), 'details': {}}
 
-    # Track latest conforma test per component
-    # component -> (timestamp, pr_name, pr_uid, status, scenario)
     latest_per_component = {}
-    running_conforma = {}  # component -> (timestamp, pr_name, scenario)
+    running_conforma = {}
 
     def process_pipelinerun(pr):
         labels = pr.get('metadata', {}).get('labels', {})
@@ -97,12 +68,8 @@ def get_failing_conforma_components() -> Dict[str, Any]:
 
     # Source 1: KubeArchive
     try:
-        api_url = get_kubearchive_url()
-        session = requests.Session()
-        session.headers.update({
-            'Authorization': f'Bearer {token}',
-            'Accept': 'application/json'
-        })
+        api_url = discover_kubearchive_api_url()
+        session = create_authenticated_session(token)
 
         url = f"{api_url}/apis/tekton.dev/v1/namespaces/{NAMESPACE}/pipelineruns"
         params = {

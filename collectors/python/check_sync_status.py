@@ -16,57 +16,10 @@ from typing import Set, Dict, Any, Optional
 
 import requests
 
+from openshift_auth import is_logged_in, get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
+
 APPLICATION_NAME = os.getenv('APPLICATION_NAME', 'acme-v2-0')
 NAMESPACE = os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
-
-
-def check_oc_login() -> bool:
-    """Check if user is logged into OpenShift."""
-    try:
-        result = subprocess.run(
-            ['oc', 'whoami'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def get_kubearchive_url() -> str:
-    """Get KubeArchive API URL."""
-    try:
-        result = subprocess.run(
-            ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
-             '-o', 'jsonpath={.data.URL}'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return "https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN"
-
-
-def get_oc_token() -> Optional[str]:
-    """Get OpenShift authentication token."""
-    try:
-        result = subprocess.run(
-            ['oc', 'whoami', '-t'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
 
 
 def get_failing_components_from_cluster() -> Dict[str, Any]:
@@ -81,7 +34,7 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
         Dict with 'failing' (set of component names with failed push builds)
         and 'retriggered' (set of components with successful incoming after push failure).
     """
-    token = get_oc_token()
+    token = get_openshift_token()
     if not token:
         return {'failing': set(), 'retriggered': set()}
 
@@ -128,12 +81,8 @@ def get_failing_components_from_cluster() -> Dict[str, Any]:
 
     # Source 1: KubeArchive (has archived PipelineRuns)
     try:
-        api_url = get_kubearchive_url()
-        session = requests.Session()
-        session.headers.update({
-            'Authorization': f'Bearer {token}',
-            'Accept': 'application/json'
-        })
+        api_url = discover_kubearchive_api_url()
+        session = create_authenticated_session(token)
 
         url = f"{api_url}/apis/tekton.dev/v1/namespaces/{NAMESPACE}/pipelineruns"
         params = {
@@ -311,7 +260,7 @@ def main():
     }
 
     # Check cluster connection
-    if not check_oc_login():
+    if not is_logged_in():
         status['error'] = 'Not logged into OpenShift cluster'
         save_sync_status(status, time.time() - start_time)
         print(json.dumps(status))
