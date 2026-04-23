@@ -23,6 +23,7 @@ from logger import setup_logger
 from config import CollectorConfig
 from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
+from clients.pipelinerun_query import query_pipelineruns
 from models import PipelineRun, BuildStatus, ScanResult, Component
 from tekton_parsers import (
     extract_error_from_logs,
@@ -56,97 +57,38 @@ class BuildFailureCollector:
 
     def discover_components_from_cluster(self):
         # type: () -> List[Component]
-        """Discover components with failed latest push builds.
-
-        Queries KubeArchive for archived PipelineRuns and live cluster.
-        """
-        import requests
-
+        """Discover components with failed latest push builds."""
         try:
-            push_latest = {}
+            label_selector = (
+                'appstudio.openshift.io/application={},'
+                'pipelines.appstudio.openshift.io/type=build'
+            ).format(self.config.k8s.application_name)
 
-            def process_pipelinerun(pr):
+            logger.info("Querying for application %s...", self.config.k8s.application_name)
+            pipelineruns = query_pipelineruns(
+                self.config.k8s.namespace, label_selector,
+                kubearchive_url=self.kubearchive.api_url,
+                session=self.kubearchive.session,
+            )
+            logger.info("Found %d PipelineRuns", len(pipelineruns))
+
+            push_latest = {}
+            for pr in pipelineruns:
                 labels = pr.get('metadata', {}).get('labels', {})
                 comp = labels.get('appstudio.openshift.io/component')
                 if not comp:
-                    return
+                    continue
                 event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
                 if event_type != 'push':
-                    return
+                    continue
                 ts = pr.get('metadata', {}).get('creationTimestamp', '')
                 conditions = pr.get('status', {}).get('conditions', [])
                 if not conditions:
-                    return
+                    continue
                 c = conditions[-1]
                 if comp not in push_latest or ts > push_latest[comp][0]:
                     annotations = pr.get('metadata', {}).get('annotations', {})
                     push_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
-
-            # Source 1: KubeArchive
-            logger.info("Querying KubeArchive for application %s...", self.config.k8s.application_name)
-            try:
-                api_url = self.kubearchive.api_url
-                token = self.kubearchive.token
-                session = requests.Session()
-                session.headers.update({
-                    'Authorization': 'Bearer {}'.format(token),
-                    'Accept': 'application/json'
-                })
-
-                url = "{}/apis/tekton.dev/v1/namespaces/{}/pipelineruns".format(
-                    api_url, self.config.k8s.namespace
-                )
-                params = {
-                    'labelSelector': 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=build'.format(
-                        self.config.k8s.application_name
-                    ),
-                    'limit': 500
-                }
-
-                total_archive = 0
-                for _ in range(3):
-                    resp = session.get(url, params=params, timeout=30)
-                    if resp.status_code != 200:
-                        break
-                    data = resp.json()
-                    items = data.get('items', [])
-                    total_archive += len(items)
-                    for pr in items:
-                        process_pipelinerun(pr)
-                    cont = data.get('metadata', {}).get('continue')
-                    if cont:
-                        params['continue'] = cont
-                    else:
-                        break
-
-                if total_archive:
-                    logger.info("Found %d PipelineRuns in KubeArchive", total_archive)
-            except Exception as e:
-                logger.warning("KubeArchive query failed: %s", e)
-
-            # Source 2: Live cluster
-            try:
-                pr_result = subprocess.run(
-                    ['oc', 'get', 'pipelinerun',
-                     '-n', self.config.k8s.namespace,
-                     '-l', 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=build'.format(
-                         self.config.k8s.application_name
-                     ),
-                     '-o', 'json'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    timeout=15
-                )
-
-                if pr_result.returncode == 0:
-                    data = json.loads(pr_result.stdout)
-                    live_prs = data.get('items', [])
-                    logger.info("Found %d PipelineRuns in live cluster", len(live_prs))
-                    for pr in live_prs:
-                        process_pipelinerun(pr)
-            except Exception:
-                pass
 
             failing_component_names = [
                 comp for comp, (ts, status, reason, _) in push_latest.items()
@@ -214,99 +156,54 @@ class BuildFailureCollector:
     def get_component_metadata(self, component_name):
         # type: (str) -> Optional[Component]
         """Fetch component metadata from Kubernetes."""
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'component', component_name,
-                 '-n', self.config.k8s.namespace, '-o', 'json'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True,
-                timeout=15
-            )
-            data = json.loads(result.stdout)
-
-            repo_url = data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
-            branch = data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
-
-            return Component(
-                name=component_name,
-                repository_url=repo_url,
-                branch=branch,
-                namespace=self.config.k8s.namespace
-            )
-        except (subprocess.CalledProcessError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        meta = self.k8s.get_component_metadata(component_name)
+        if not meta:
             return None
+        return Component(
+            name=component_name,
+            repository_url=meta['repository_url'],
+            branch=meta['branch'],
+            namespace=self.config.k8s.namespace
+        )
 
     def get_last_failed_pipelinerun(self, component_name):
         # type: (str) -> Optional[Dict[str, Any]]
         """Get the most recent failed push PipelineRun for a component."""
+        label_selector = (
+            'appstudio.openshift.io/component={},'
+            'pipelines.appstudio.openshift.io/type=build'
+        ).format(component_name)
+
+        pipelineruns = query_pipelineruns(
+            self.config.k8s.namespace, label_selector,
+            kubearchive_url=self.kubearchive.api_url,
+            session=self.kubearchive.session,
+            max_pages=1, page_size=50,
+        )
+
         latest_failed = None
-
-        def check_pr(pr):
-            nonlocal latest_failed
+        for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
-            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
-            if event_type != 'push':
-                return
+            if labels.get('pipelinesascode.tekton.dev/event-type', '') != 'push':
+                continue
             conditions = pr.get('status', {}).get('conditions', [])
-            if conditions and conditions[-1].get('status') == 'False':
-                ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                name = pr.get('metadata', {}).get('name')
-                uid = pr.get('metadata', {}).get('uid')
-                reason = conditions[-1].get('reason', '')
-                build_status = classify_build_status(reason)
-                if not latest_failed or ts > latest_failed[0]:
-                    latest_failed = (ts, name, uid, build_status)
-
-        # Source 1: Live cluster
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'pipelinerun',
-                 '-n', self.config.k8s.namespace,
-                 '-l', 'appstudio.openshift.io/component={},pipelines.appstudio.openshift.io/type=build'.format(
-                     component_name
-                 ),
-                 '-o', 'json'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=15
-            )
-
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                for pr in data.get('items', []):
-                    check_pr(pr)
-        except Exception:
-            pass
-
-        # Source 2: KubeArchive
-        try:
-            url = "{}/apis/tekton.dev/v1/namespaces/{}/pipelineruns".format(
-                self.kubearchive.api_url, self.config.k8s.namespace
-            )
-            params = {
-                'labelSelector': 'appstudio.openshift.io/component={},pipelines.appstudio.openshift.io/type=build'.format(
-                    component_name
-                ),
-                'limit': 50
-            }
-            resp = self.kubearchive.session.get(url, params=params, timeout=30)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                for pr in data.get('items', []):
-                    check_pr(pr)
-        except Exception:
-            pass
+            if not conditions or conditions[-1].get('status') != 'False':
+                continue
+            ts = pr.get('metadata', {}).get('creationTimestamp', '')
+            if not latest_failed or ts > latest_failed[0]:
+                latest_failed = (
+                    ts,
+                    pr.get('metadata', {}).get('name'),
+                    pr.get('metadata', {}).get('uid'),
+                    classify_build_status(conditions[-1].get('reason', '')),
+                )
 
         if latest_failed:
             return {
                 'name': latest_failed[1],
                 'uid': latest_failed[2],
                 'status': latest_failed[3],
-                'started': latest_failed[0]
+                'started': latest_failed[0],
             }
 
         return None

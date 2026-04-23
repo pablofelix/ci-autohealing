@@ -14,12 +14,11 @@ import subprocess
 import time
 from typing import Dict, Any, Optional, List, Set
 
-import requests
-
 from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, ConformaRepository
 from clients import KubeArchiveClient, KubernetesClient
+from clients.pipelinerun_query import query_pipelineruns
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
 logger = setup_logger(__name__)
@@ -43,28 +42,38 @@ class ConformaViolationCollector:
     def get_failing_conforma_pipelineruns(self):
         # type: () -> Dict[str, Dict[str, Any]]
         """Get components whose latest Conforma PipelineRun failed."""
-        latest_per_component = {}
+        label_selector = (
+            'appstudio.openshift.io/application={},'
+            'pipelines.appstudio.openshift.io/type=test'
+        ).format(self.config.k8s.application_name)
 
-        def process_pr(pr):
+        pipelineruns = query_pipelineruns(
+            self.config.k8s.namespace, label_selector,
+            kubearchive_url=self.kubearchive.api_url,
+            session=self.kubearchive.session,
+        )
+
+        latest_per_component = {}
+        for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
             comp = labels.get('appstudio.openshift.io/component')
             if not comp:
-                return
+                continue
             scenario = labels.get('test.appstudio.openshift.io/scenario', '')
             if not scenario.startswith('conforma-'):
-                return
+                continue
             pipeline_type = labels.get('pipelines.appstudio.openshift.io/type', '')
             if pipeline_type != 'test':
-                return
+                continue
 
             ts = pr.get('metadata', {}).get('creationTimestamp', '')
             conditions = pr.get('status', {}).get('conditions', [])
             if not conditions:
-                return
+                continue
 
             status = conditions[-1].get('status')
             if status == 'Unknown':
-                return
+                continue
 
             if comp not in latest_per_component or ts > latest_per_component[comp]['timestamp']:
                 latest_per_component[comp] = {
@@ -75,51 +84,6 @@ class ConformaViolationCollector:
                     'status': status,
                     'pr_data': pr
                 }
-
-        # Source 1: KubeArchive
-        try:
-            url = "{}/apis/tekton.dev/v1/namespaces/{}/pipelineruns".format(
-                self.kubearchive.api_url, self.config.k8s.namespace
-            )
-            params = {
-                'labelSelector': 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=test'.format(
-                    self.config.k8s.application_name
-                ),
-                'limit': 500
-            }
-
-            for _ in range(3):
-                resp = self.kubearchive.session.get(url, params=params, timeout=30)
-                if resp.status_code != 200:
-                    break
-                data = resp.json()
-                for pr in data.get('items', []):
-                    process_pr(pr)
-                cont = data.get('metadata', {}).get('continue')
-                if cont:
-                    params['continue'] = cont
-                else:
-                    break
-        except Exception as e:
-            logger.error("KubeArchive error: %s", e)
-
-        # Source 2: Live cluster
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'pipelinerun', '-n', self.config.k8s.namespace,
-                 '-l', 'appstudio.openshift.io/application={},pipelines.appstudio.openshift.io/type=test'.format(
-                     self.config.k8s.application_name
-                 ),
-                 '-o', 'json'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, timeout=15
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                for pr in data.get('items', []):
-                    process_pr(pr)
-        except Exception:
-            pass
 
         return {
             comp: info for comp, info in latest_per_component.items()
@@ -191,19 +155,8 @@ class ConformaViolationCollector:
 
     def get_component_repo_url(self, component_name):
         # type: (str) -> str
-        try:
-            result = subprocess.run(
-                ['oc', 'get', 'component', component_name,
-                 '-n', self.config.k8s.namespace,
-                 '-o', 'jsonpath={.spec.source.git.url}'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, timeout=10
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return ''
+        meta = self.k8s.get_component_metadata(component_name)
+        return meta['repository_url'] if meta else ''
 
     def extract_component_info(self, pr_data, component_name):
         # type: (Dict[str, Any], str) -> Dict[str, Any]

@@ -5,6 +5,7 @@ from clients.kubearchive import KubeArchiveClient
 from clients.kubernetes import KubernetesClient
 from clients.tekton_results import TektonResultsClient
 from clients.unified import UnifiedPipelineClient
+from clients.pipelinerun_query import query_pipelineruns
 
 __all__ = [
     'PipelineRunSource',
@@ -12,4 +13,5 @@ __all__ = [
     'KubernetesClient',
     'TektonResultsClient',
     'UnifiedPipelineClient',
+    'query_pipelineruns',
 ]

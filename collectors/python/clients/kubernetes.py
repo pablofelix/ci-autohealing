@@ -64,3 +64,21 @@ class KubernetesClient(PipelineRunSource):
             return None
         except subprocess.TimeoutExpired:
             return None
+
+    def get_component_metadata(self, component_name, namespace=None):
+        # type: (str, Optional[str]) -> Optional[Dict[str, str]]
+        """Fetch component repository URL and branch from cluster."""
+        ns = namespace or self.namespace
+        try:
+            result = subprocess.run(
+                ['oc', 'get', 'component', component_name, '-n', ns, '-o', 'json'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, check=True, timeout=15
+            )
+            data = json.loads(result.stdout)
+            return {
+                'repository_url': data.get('spec', {}).get('source', {}).get('git', {}).get('url', ''),
+                'branch': data.get('spec', {}).get('source', {}).get('git', {}).get('revision', ''),
+            }
+        except (subprocess.CalledProcessError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return None
