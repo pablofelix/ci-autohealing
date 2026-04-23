@@ -257,33 +257,6 @@ class BuildFailureRepository:
         except Exception:
             raise
 
-    def get_pipelineruns_without_logs(self, limit=10):
-        # type: (int,) -> List[tuple]
-        with self.db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT pipelinerun_name, pipelinerun_uid
-                FROM build_failures
-                WHERE build_logs IS NULL
-                  AND pipelinerun_uid IS NOT NULL
-                ORDER BY first_detected_at DESC
-                LIMIT %s
-                """,
-                (limit,)
-            )
-            return cursor.fetchall()
-
-    def update_logs(self, pr_name, logs):
-        # type: (str, str) -> bool
-        with self.db.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE build_failures SET build_logs = %s WHERE pipelinerun_name = %s",
-                (logs, pr_name)
-            )
-            return cursor.rowcount > 0
-
     def update_component_health(self, component_name):
         # type: (str,) -> None
         with self.db.connection() as conn:
@@ -293,25 +266,3 @@ class BuildFailureRepository:
                 (component_name,)
             )
 
-    def insert_pipelinerun(self, pr, application_name):
-        # type: (Any, str) -> bool
-        """Insert a PipelineRun failure record (legacy interface)."""
-        konflux_url = pr.konflux_logs_url.format(app=application_name)
-        with self.db.connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO build_failures (
-                        component_name, pipelinerun_name, pipelinerun_uid,
-                        namespace, repository, repository_url, branch,
-                        status, build_logs, konflux_logs_url, first_detected_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    """,
-                    (pr.component, pr.name, pr.uid, pr.namespace,
-                     pr.repository, pr.repository_url, pr.branch,
-                     pr.status.value, pr.build_logs, konflux_url)
-                )
-                return True
-            except psycopg2.IntegrityError:
-                return False
