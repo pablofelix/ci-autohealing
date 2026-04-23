@@ -29,7 +29,7 @@ from tekton_parsers import (
     extract_failed_step_from_logs,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
-    classify_pipelinerun_status,
+    classify_build_status,
 )
 
 logger = setup_logger(__name__)
@@ -255,11 +255,9 @@ class BuildFailureCollector:
                 name = pr.get('metadata', {}).get('name')
                 uid = pr.get('metadata', {}).get('uid')
                 reason = conditions[-1].get('reason', '')
-                status = classify_pipelinerun_status(reason)
-                if status not in ('Cancelled', 'Timeout'):
-                    status = BuildStatus.FAILED
+                build_status = classify_build_status(reason)
                 if not latest_failed or ts > latest_failed[0]:
-                    latest_failed = (ts, name, uid, status)
+                    latest_failed = (ts, name, uid, build_status)
 
         # Source 1: Live cluster
         try:
@@ -304,11 +302,10 @@ class BuildFailureCollector:
             pass
 
         if latest_failed:
-            status = latest_failed[3] if len(latest_failed) > 3 else BuildStatus.FAILED
             return {
                 'name': latest_failed[1],
                 'uid': latest_failed[2],
-                'status': status,
+                'status': latest_failed[3],
                 'started': latest_failed[0]
             }
 
@@ -433,7 +430,7 @@ class BuildFailureCollector:
 
         inserted = False
         try:
-            status_value = pr_info['status'].value if isinstance(pr_info['status'], BuildStatus) else pr_info['status']
+            status_value = pr_info['status'].value
             inserted = self.build_repo.upsert_failure(
                 pr_name=pr_name, pr_uid=pr_info['uid'],
                 component_name=component.name,

@@ -10,9 +10,11 @@ from tekton_parsers import (
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
     classify_pipelinerun_status,
+    classify_build_status,
     extract_conforma_component_info,
     extract_verify_taskrun_name,
 )
+from models import BuildStatus
 
 
 # -- extract_taskrun_names --
@@ -211,6 +213,33 @@ def test_classify_running():
 
 def test_classify_unknown():
     assert classify_pipelinerun_status('SomeNewReason') == 'Pending'
+
+
+# -- classify_build_status --
+
+def test_build_status_failed():
+    assert classify_build_status('Failed') == BuildStatus.FAILED
+
+
+def test_build_status_cancelled_maps_to_failed():
+    assert classify_build_status('PipelineRunCancelled') == BuildStatus.FAILED
+
+
+def test_build_status_timeout_maps_to_failed():
+    assert classify_build_status('PipelineRunTimeout') == BuildStatus.FAILED
+
+
+def test_build_status_succeeded():
+    assert classify_build_status('Succeeded') == BuildStatus.SUCCEEDED
+    assert classify_build_status('Completed') == BuildStatus.SUCCEEDED
+
+
+def test_build_status_running():
+    assert classify_build_status('Running') == BuildStatus.RUNNING
+
+
+def test_build_status_unknown_maps_to_pending():
+    assert classify_build_status('SomeNewReason') == BuildStatus.PENDING
 
 
 # -- extract_conforma_component_info --

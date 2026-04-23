@@ -17,6 +17,7 @@ from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, BuildFailureRepository, ConformaRepository, SyncStatusRepository
 from models import Component, BuildStatus
+from tekton_parsers import classify_build_status
 from openshift_auth import (
     is_logged_in,
     get_openshift_token,
@@ -367,18 +368,7 @@ class StatusSynchronizer:
             return None
 
         ts, name, uid, reason = latest
-
-        if reason in ('Succeeded', 'Completed'):
-            status = BuildStatus.SUCCEEDED
-        elif reason == 'Failed':
-            status = BuildStatus.FAILED
-        elif reason in ('PipelineRunTimeout',):
-            status = BuildStatus.FAILED
-        elif reason == 'Running':
-            status = BuildStatus.RUNNING
-        else:
-            status = BuildStatus.PENDING
-
+        status = classify_build_status(reason)
         return {'name': name, 'uid': uid, 'status': status}
 
     def sync_component(self, component):

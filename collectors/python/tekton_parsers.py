@@ -210,6 +210,27 @@ def classify_pipelinerun_status(reason):
     return 'Pending'
 
 
+def classify_build_status(reason):
+    # type: (str) -> 'BuildStatus'
+    """Map a PipelineRun condition reason to a BuildStatus enum value.
+
+    Wraps classify_pipelinerun_status and maps to the BuildStatus enum.
+    Cancelled and Timeout are treated as FAILED (not infrastructure issues
+    that should be ignored, but failures that need attention).
+    """
+    from models import BuildStatus
+    status_str = classify_pipelinerun_status(reason)
+    _MAP = {
+        'Failed': BuildStatus.FAILED,
+        'Cancelled': BuildStatus.FAILED,
+        'Timeout': BuildStatus.FAILED,
+        'Succeeded': BuildStatus.SUCCEEDED,
+        'Running': BuildStatus.RUNNING,
+        'Pending': BuildStatus.PENDING,
+    }
+    return _MAP.get(status_str, BuildStatus.PENDING)
+
+
 # -- Conforma-specific parsing --
 
 def extract_conforma_component_info(pr_data, component_name, repo_url_fallback=''):
