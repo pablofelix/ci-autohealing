@@ -56,6 +56,15 @@ factory methods:  from_*                 (from_env, from_file, from_pipelinerun)
 
 Name things after what they *are*, not where they *go*. `tekton_parsers.py` not `utils.py`. `build_failure_repository.py` not `helpers.py`.
 
+**Descriptive names over abbreviations.** Names should read as natural English for humans and be greppable for machines:
+- `extract_taskrun_names` not `extract_trs` or `get_trs`
+- `build_failure_repository.py` not `bf_repo.py`
+- `discover_kubearchive_api_url` not `get_url`
+- `is_pipelinerun_failed` not `check_pr`
+- `conforma_violation_collector` not `conforma_coll`
+
+A reader should understand what a function does from its name alone, without reading the docstring. A `grep` for any domain term should find all related code.
+
 ## Module Structure
 
 ```
@@ -67,24 +76,29 @@ collectors/python/
     tekton_parsers.py          # Pure functions: parse PipelineRun/TaskRun dicts
     
     clients/                   # I/O adapters, one per data source
-        protocol.py            # PipelineRunSource protocol definition
+        pipeline_source.py     # PipelineRunSource ABC
         kubearchive.py         # KubeArchive REST API adapter
         kubernetes.py          # Live cluster via oc/subprocess adapter
         tekton_results.py      # Tekton Results API adapter
         unified.py             # Chain of Responsibility over sources
     
     repositories/              # Database access, parameterized queries only
-        build_failures.py      # BuildFailureRepository
-        conforma.py            # ConformaRepository
-        sync_status.py         # SyncStatusRepository
-        connection.py          # Connection manager (context manager)
+        build_failure_repository.py   # BuildFailureRepository
+        conforma_repository.py        # ConformaRepository
+        sync_status_repository.py     # SyncStatusRepository
+        connection.py                 # Connection manager (context manager)
 
     collectors/                # Orchestration: compose pure functions + I/O
-        build.py               # Build failure collection
-        conforma.py            # Conforma violation collection
-        sync.py                # Status synchronization
+        build_failure_collector.py       # BuildFailureCollector
+        conforma_violation_collector.py  # ConformaViolationCollector
+        status_synchronizer.py           # StatusSynchronizer + cluster queries
 
-    cli.py                     # Entry points and argument parsing
+    # Entry-point shims (called by cron and ic tool)
+    collect_comprehensive.py   # -> collectors.build_failure_collector
+    collect_conforma.py        # -> collectors.conforma_violation_collector
+    sync_component_status.py   # -> collectors.status_synchronizer
+    check_sync_status.py       # -> collectors.status_synchronizer
+    check_conforma_status.py   # -> collectors.status_synchronizer
 ```
 
 No `utils/`, `helpers/`, `common/`, `misc/`. If something doesn't have a domain name, it doesn't belong.
