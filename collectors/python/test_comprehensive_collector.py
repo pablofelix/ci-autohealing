@@ -1,8 +1,8 @@
-"""Tests for ComprehensiveCollector pure functions."""
+"""Tests for BuildFailureCollector pure functions."""
 
 import pytest
 from unittest.mock import patch
-from collect_comprehensive import ComprehensiveCollector
+from collectors.build_failure_collector import BuildFailureCollector
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 
 
@@ -18,13 +18,13 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collect_comprehensive.DatabaseConnection'), \
-         patch('collect_comprehensive.BuildFailureRepository'), \
-         patch('collect_comprehensive.KubeArchiveClient'), \
-         patch('collect_comprehensive.KubernetesClient'), \
-         patch('collect_comprehensive.TektonResultsClient'), \
-         patch('collect_comprehensive.UnifiedPipelineClient'):
-        return ComprehensiveCollector(config)
+    with patch('collectors.build_failure_collector.DatabaseConnection'), \
+         patch('collectors.build_failure_collector.BuildFailureRepository'), \
+         patch('collectors.build_failure_collector.KubeArchiveClient'), \
+         patch('collectors.build_failure_collector.KubernetesClient'), \
+         patch('collectors.build_failure_collector.TektonResultsClient'), \
+         patch('collectors.build_failure_collector.UnifiedPipelineClient'):
+        return BuildFailureCollector(config)
 
 
 # --- extract_error_messages ---

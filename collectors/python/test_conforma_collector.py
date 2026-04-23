@@ -1,8 +1,8 @@
-"""Tests for ConformaCollector parsing functions."""
+"""Tests for ConformaViolationCollector parsing functions."""
 
 import pytest
 from unittest.mock import MagicMock, patch
-from collect_conforma import ConformaCollector
+from collectors.conforma_violation_collector import ConformaViolationCollector
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 
 
@@ -18,10 +18,10 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collect_conforma.DatabaseConnection'), \
-         patch('collect_conforma.ConformaRepository'), \
-         patch('collect_conforma.KubeArchiveClient'):
-        return ConformaCollector(config)
+    with patch('collectors.conforma_violation_collector.DatabaseConnection'), \
+         patch('collectors.conforma_violation_collector.ConformaRepository'), \
+         patch('collectors.conforma_violation_collector.KubeArchiveClient'):
+        return ConformaViolationCollector(config)
 
 
 # --- get_verify_taskrun ---
