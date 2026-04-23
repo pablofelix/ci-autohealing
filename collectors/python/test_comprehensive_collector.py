@@ -1,7 +1,7 @@
 """Tests for BuildFailureCollector pure functions."""
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock
 from collectors.build_failure_collector import BuildFailureCollector
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 
@@ -18,13 +18,15 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collectors.build_failure_collector.DatabaseConnection'), \
-         patch('collectors.build_failure_collector.BuildFailureRepository'), \
-         patch('collectors.build_failure_collector.KubeArchiveClient'), \
-         patch('collectors.build_failure_collector.KubernetesClient'), \
-         patch('collectors.build_failure_collector.TektonResultsClient'), \
-         patch('collectors.build_failure_collector.UnifiedPipelineClient'):
-        return BuildFailureCollector(config)
+    return BuildFailureCollector(
+        config,
+        db=MagicMock(),
+        build_repo=MagicMock(),
+        kubearchive=MagicMock(),
+        k8s=MagicMock(),
+        tekton_results=MagicMock(),
+        unified=MagicMock(),
+    )
 
 
 # --- extract_error_messages ---

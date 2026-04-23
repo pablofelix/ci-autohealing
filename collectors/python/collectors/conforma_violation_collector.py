@@ -19,7 +19,7 @@ import requests
 from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, ConformaRepository
-from clients import KubeArchiveClient
+from clients import KubeArchiveClient, KubernetesClient
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
 logger = setup_logger(__name__)
@@ -28,15 +28,17 @@ logger = setup_logger(__name__)
 class ConformaViolationCollector:
     """Collects Conforma test violation details."""
 
-    def __init__(self, config):
-        # type: (CollectorConfig) -> None
+    def __init__(self, config, db=None, conforma_repo=None, kubearchive=None, k8s=None):
+        # type: (CollectorConfig, ...) -> None
         self.config = config
-        db = DatabaseConnection(config.db)
-        self.conforma_repo = ConformaRepository(db)
-        self.kubearchive = KubeArchiveClient(
+        if db is None:
+            db = DatabaseConnection(config.db)
+        self.conforma_repo = conforma_repo or ConformaRepository(db)
+        self.kubearchive = kubearchive or KubeArchiveClient(
             api_url=config.k8s.kubearchive_api_url,
             namespace=config.k8s.namespace
         )
+        self.k8s = k8s or KubernetesClient(namespace=config.k8s.namespace)
 
     def get_failing_conforma_pipelineruns(self):
         # type: () -> Dict[str, Dict[str, Any]]

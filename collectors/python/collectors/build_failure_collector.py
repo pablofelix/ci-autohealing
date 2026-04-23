@@ -38,26 +38,21 @@ logger = setup_logger(__name__)
 class BuildFailureCollector:
     """Collects comprehensive failure data for troubleshooting and AI analysis."""
 
-    def __init__(self, config):
-        # type: (CollectorConfig) -> None
+    def __init__(self, config, db=None, build_repo=None,
+                 kubearchive=None, k8s=None, tekton_results=None, unified=None):
+        # type: (CollectorConfig, ...) -> None
         self.config = config
-        db = DatabaseConnection(config.db)
+        if db is None:
+            db = DatabaseConnection(config.db)
         self.db = db
-        self.build_repo = BuildFailureRepository(db)
-
-        self.kubearchive = KubeArchiveClient(
+        self.build_repo = build_repo or BuildFailureRepository(db)
+        self.kubearchive = kubearchive or KubeArchiveClient(
             api_url=config.k8s.kubearchive_api_url,
             namespace=config.k8s.namespace
         )
-        self.k8s = KubernetesClient(
-            namespace=config.k8s.namespace
-        )
-        self.tekton_results = TektonResultsClient(
-            namespace=config.k8s.namespace
-        )
-        self.unified = UnifiedPipelineClient(
-            namespace=config.k8s.namespace
-        )
+        self.k8s = k8s or KubernetesClient(namespace=config.k8s.namespace)
+        self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
+        self.unified = unified or UnifiedPipelineClient(namespace=config.k8s.namespace)
 
     def discover_components_from_cluster(self):
         # type: () -> List[Component]

@@ -18,10 +18,13 @@ def collector():
             kubearchive_api_url="https://kubearchive.example.com"
         )
     )
-    with patch('collectors.conforma_violation_collector.DatabaseConnection'), \
-         patch('collectors.conforma_violation_collector.ConformaRepository'), \
-         patch('collectors.conforma_violation_collector.KubeArchiveClient'):
-        return ConformaViolationCollector(config)
+    return ConformaViolationCollector(
+        config,
+        db=MagicMock(),
+        conforma_repo=MagicMock(),
+        kubearchive=MagicMock(),
+        k8s=MagicMock(),
+    )
 
 
 # --- get_verify_taskrun ---

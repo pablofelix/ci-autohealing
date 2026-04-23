@@ -278,11 +278,12 @@ def get_failing_conforma_components(config):
 class StatusSynchronizer:
     """Synchronizes component status between Kubernetes and database."""
 
-    def __init__(self, config):
-        # type: (CollectorConfig,) -> None
+    def __init__(self, config, db=None, build_repo=None):
+        # type: (CollectorConfig, ...) -> None
         self.config = config
-        db = DatabaseConnection(config.db)
-        self.build_repo = BuildFailureRepository(db)
+        if db is None:
+            db = DatabaseConnection(config.db)
+        self.build_repo = build_repo or BuildFailureRepository(db)
 
     def get_component_metadata(self, component_name):
         # type: (str,) -> Optional[Component]
