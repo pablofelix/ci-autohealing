@@ -21,15 +21,15 @@ ADR-001 established that collectors should be Python, but noted the `ic` CLI "re
 
 Refactor the `ic` CLI incrementally, following these principles:
 
-1. **Extract Python into standalone scripts** — Move all `python3 -c "..."` blocks into `lib/*.py` files. Each script reads stdin/args, writes stdout. Bash calls `python3 "$SCRIPT_DIR/lib/some_helper.py"`.
+1. **Extract Python into standalone scripts** — Move all `python3 -c "..."` blocks into `parsers/*.py` files. Each script reads stdin/args, writes stdout. Bash calls `python3 "$SCRIPT_DIR/parsers/some_parser.py"`.
 
-2. **Consolidate SQL into named query functions** — Create `lib/queries.sh` with functions like `sql_latest_failing_builds()`, `sql_count_unresolved()`. Each CTE is defined once. All bash files source this.
+2. **Consolidate SQL into named query functions** — Create `ic-queries.sh` with functions like `sql_latest_failing_builds()`, `sql_count_unresolved()`. Each CTE is defined once. All bash files source this.
 
-3. **Extract formatting helpers** — Create `lib/format.sh` with `section_header()`, `trim()`, `color()`. Source from `ic`.
+3. **Extract formatting helpers** — Create `ic-format.sh` with `section_header()`, `trim()`, `clipboard_or_print()`. Source from `ic`.
 
 4. **Decompose god functions** — Break functions >80 lines into fetch/display/logic sub-functions. The three alert variants (`cmd_get_alerts`, `cmd_get_alerts_on_date`, `cmd_get_alerts_range`) share a common implementation parameterized by date filter.
 
-5. **Centralize configuration** — Move all hard-coded values to `lib/config.sh` with `${VAR:=default}` pattern. Credentials load from `.env` only.
+5. **Centralize configuration** — Move all hard-coded values to `ic-config.sh` with `${VAR:=default}` pattern. Credentials load from `.env` only. No generic `lib/` directory — files are named with `ic-` prefix alongside the main script, following the STYLE.md rule against generic container names.
 
 6. **Fix error handling** — Add `set -o pipefail`. Replace blanket `2>/dev/null` with proper error checks. Use `return 1` (not `exit 1`) in functions.
 

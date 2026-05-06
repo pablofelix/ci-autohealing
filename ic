@@ -14,10 +14,9 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-NAMESPACE="${NAMESPACE:-NAMESPACE_PLACEHOLDER}"
-APPLICATION_NAME="${APPLICATION_NAME:-acme-v2-0}"
-KUBEARCHIVE_URL="${KUBEARCHIVE_URL:-https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN}"
-export PGPASSWORD="admin"
+source "$SCRIPT_DIR/ic-config.sh"
+source "$SCRIPT_DIR/ic-format.sh"
+source "$SCRIPT_DIR/ic-queries.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -30,11 +29,11 @@ NC='\033[0m'
 
 # Helper functions
 sql() {
-    docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -tAc "$1" 2>/dev/null
+    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "$1" 2>/dev/null
 }
 
 sql_table() {
-    docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -c "$1" 2>/dev/null | grep -v "Emulate Docker"
+    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "$1" 2>/dev/null | grep -v "Emulate Docker"
 }
 
 # Convert APPLICATION_NAME to conforma-reporter branch name
@@ -121,13 +120,8 @@ fetch_gitlab_policy_yaml() {
         return
     fi
 
-    local gitlab_api="https://GITLAB_INTERNAL_HOST/api/v4/projects/releng%2Fkonflux-release-data/repository/files"
-    local policy_files=(
-        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Fregistry-acme-prod.yaml"
-        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Ffbc-acme-prod.yaml"
-        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Fregistry-acme-stage.yaml"
-        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Ffbc-acme-stage.yaml"
-    )
+    local gitlab_api="$GITLAB_API_BASE"
+    local policy_files=("${GITLAB_POLICY_FILES[@]}")
 
     local all_yaml=""
     for pf in "${policy_files[@]}"; do
@@ -390,12 +384,15 @@ find_component_expiry() {
 
 # Part 1: Display AI analysis in describe commands
 display_ai_analysis() {
-    local component=$1
-    local failure_id=$2
-    local commit_author=$3
+    local component="$1"
+    local record_id="$2"
+    local type="${3:-build}"
+    local commit_author="${4:-}"
 
-    # Query for analysis of THIS specific failure (not just any failure of this component)
-    # Use REPLACE to escape | in text fields (psql uses | as field separator)
+    local fk_column="build_failure_id"
+    local type_label="component"
+    [ "$type" = "conforma" ] && fk_column="conforma_result_id" && type_label="conforma"
+
     local query="
         SELECT a.failure_category, ROUND(a.confidence_score * 100),
                REPLACE(a.root_cause, '|', '¦'),
@@ -406,7 +403,7 @@ display_ai_analysis() {
                COALESCE(a.langfuse_trace_url, ''),
                COALESCE(EXTRACT(DAY FROM (NOW() - a.analyzed_at))::int::text, '0')
         FROM ai_analysis a
-        WHERE a.build_failure_id = '$failure_id'
+        WHERE a.${fk_column} = '$record_id'
         ORDER BY a.analyzed_at DESC
         LIMIT 1
     "
@@ -414,32 +411,23 @@ display_ai_analysis() {
     local analysis=$(sql "$query" 2>/dev/null)
 
     if [ -n "$analysis" ]; then
-        # Parse multi-line SQL output: preserve paragraph breaks, collapse other newlines
-        # Step 1: awk paragraph mode — joins lines within paragraphs with spaces, marks paragraph breaks with ¶
-        # Step 2: IFS='|' splits fields
-        # Step 3: sed restores ¶ → actual blank lines in text fields
         local analysis_temp=$(echo "$analysis" | awk 'BEGIN{RS=""; ORS="¶"} {gsub(/\n/," "); print}' | sed 's/¶$//')
         IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
             can_auto_fix requires_review analyzed_at trace_url days_old <<< "$analysis_temp"
-        # Restore paragraph breaks in text fields
         root_cause=$(echo "$root_cause" | sed $'s/¶/\\\n\\\n/g')
         recommended_fix=$(echo "$recommended_fix" | sed $'s/¶/\\\n\\\n/g')
 
-        # Trim whitespace
-        category=$(echo "$category" | xargs 2>/dev/null || echo "")
-        confidence=$(echo "$confidence" | xargs 2>/dev/null || echo "")
-        can_auto_fix=$(echo "$can_auto_fix" | xargs 2>/dev/null || echo "")
-        requires_review=$(echo "$requires_review" | xargs 2>/dev/null || echo "")
-        days_old=$(echo "$days_old" | xargs 2>/dev/null || echo "0")
+        category=$(trim "$category")
+        confidence=$(trim "$confidence")
+        can_auto_fix=$(trim "$can_auto_fix")
+        requires_review=$(trim "$requires_review")
+        days_old=$(trim "$days_old"); [ -z "$days_old" ] && days_old="0"
 
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}AI Analysis${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "AI Analysis"
         echo ""
         printf "Category:       %s\n" "$category"
         printf "Confidence:     %s%%\n" "$confidence"
 
-        # Show commit author if available (for asking questions when confidence is low)
         if [ -n "$commit_author" ] && [ "$commit_author" != "" ]; then
             printf "Commit Author:  %s\n" "$commit_author"
         fi
@@ -462,7 +450,6 @@ display_ai_analysis() {
         printf "Requires Review: %s\n" "$([ "$requires_review" = "t" ] && echo "YES" || echo "NO")"
         printf "Analyzed:       %s\n" "$analyzed_at"
 
-        # Suggest contacting commit author if confidence is low
         if [ "${confidence:-0}" -lt 60 ] 2>/dev/null && [ -n "$commit_author" ]; then
             echo ""
             echo -e "${YELLOW}⚠ Low confidence (${confidence}%) - consider asking ${commit_author} about their changes${NC}"
@@ -471,7 +458,7 @@ display_ai_analysis() {
         if [ "${days_old:-0}" -gt 7 ] 2>/dev/null; then
             echo ""
             echo -e "${YELLOW}[!] Analysis is $days_old days old (may be outdated)${NC}"
-            echo -e "${YELLOW}[!] Re-analyze: ic ai analyze component $component${NC}"
+            echo -e "${YELLOW}[!] Re-analyze: ic ai analyze $type_label $component${NC}"
         fi
 
         if [ -n "$trace_url" ] && [ "$trace_url" != "" ]; then
@@ -480,99 +467,11 @@ display_ai_analysis() {
         fi
 
         echo ""
-        echo -e "${CYAN}[!] Export to Jira: ic export component $component jira${NC}"
+        echo -e "${CYAN}[!] Export to Jira: ic export $type_label $component jira${NC}"
         echo ""
     else
         echo -e "${YELLOW}[!] AI analysis not available${NC}"
-        echo -e "${CYAN}[!] Run: ic ai analyze component $component${NC}"
-        echo ""
-    fi
-}
-
-display_conforma_ai_analysis() {
-    local component=$1
-    local conforma_id=$2
-
-    # Query for analysis of THIS specific Conforma violation
-    # Use REPLACE to escape | in text fields (psql uses | as field separator)
-    local query="
-        SELECT a.failure_category, ROUND(a.confidence_score * 100),
-               REPLACE(a.root_cause, '|', '¦'),
-               REPLACE(a.recommended_fix, '|', '¦'),
-               REPLACE(COALESCE(array_to_string(a.recommended_files, ', '), ''), '|', '¦'),
-               a.can_auto_fix, a.requires_human_review,
-               TO_CHAR(a.analyzed_at, 'YYYY-MM-DD HH24:MI:SS'),
-               COALESCE(a.langfuse_trace_url, ''),
-               COALESCE(EXTRACT(DAY FROM (NOW() - a.analyzed_at))::int::text, '0')
-        FROM ai_analysis a
-        WHERE a.conforma_result_id = '$conforma_id'
-        ORDER BY a.analyzed_at DESC
-        LIMIT 1
-    "
-
-    local analysis=$(sql "$query" 2>/dev/null)
-
-    if [ -n "$analysis" ]; then
-        # Parse multi-line SQL output: preserve paragraph breaks, collapse other newlines
-        # Step 1: awk paragraph mode — joins lines within paragraphs with spaces, marks paragraph breaks with ¶
-        # Step 2: IFS='|' splits fields
-        # Step 3: sed restores ¶ → actual blank lines in text fields
-        local analysis_temp=$(echo "$analysis" | awk 'BEGIN{RS=""; ORS="¶"} {gsub(/\n/," "); print}' | sed 's/¶$//')
-        IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
-            can_auto_fix requires_review analyzed_at trace_url days_old <<< "$analysis_temp"
-        # Restore paragraph breaks in text fields
-        root_cause=$(echo "$root_cause" | sed $'s/¶/\\\n\\\n/g')
-        recommended_fix=$(echo "$recommended_fix" | sed $'s/¶/\\\n\\\n/g')
-
-        # Trim whitespace
-        category=$(echo "$category" | xargs 2>/dev/null || echo "")
-        confidence=$(echo "$confidence" | xargs 2>/dev/null || echo "")
-        can_auto_fix=$(echo "$can_auto_fix" | xargs 2>/dev/null || echo "")
-        requires_review=$(echo "$requires_review" | xargs 2>/dev/null || echo "")
-        days_old=$(echo "$days_old" | xargs 2>/dev/null || echo "0")
-
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}AI Analysis${NC}"
-        echo -e "${BOLD}========================================${NC}"
-        echo ""
-        printf "Category:       %s\n" "$category"
-        printf "Confidence:     %s%%\n" "$confidence"
-
-        echo ""
-        echo "Root Cause:"
-        echo "$root_cause" | sed 's/^/  /'
-        echo ""
-        echo "Recommended Fix:"
-        echo "$recommended_fix" | sed 's/^/  /'
-
-        if [ -n "$recommended_files" ] && [ "$recommended_files" != "" ]; then
-            echo ""
-            echo "Files to modify:"
-            echo "$recommended_files" | sed 's/^/  /'
-        fi
-
-        echo ""
-        printf "Can Auto-Fix:   %s\n" "$([ "$can_auto_fix" = "t" ] && echo "YES" || echo "NO")"
-        printf "Requires Review: %s\n" "$([ "$requires_review" = "t" ] && echo "YES" || echo "NO")"
-        printf "Analyzed:       %s\n" "$analyzed_at"
-
-        if [ "${days_old:-0}" -gt 7 ] 2>/dev/null; then
-            echo ""
-            echo -e "${YELLOW}[!] Analysis is $days_old days old (may be outdated)${NC}"
-            echo -e "${YELLOW}[!] Re-analyze: ic ai analyze conforma $component${NC}"
-        fi
-
-        if [ -n "$trace_url" ] && [ "$trace_url" != "" ]; then
-            echo ""
-            echo -e "Trace: ${CYAN}$trace_url${NC}"
-        fi
-
-        echo ""
-        echo -e "${CYAN}[!] Export to Jira: ic export conforma $component jira${NC}"
-        echo ""
-    else
-        echo -e "${YELLOW}[!] AI analysis not available${NC}"
-        echo -e "${CYAN}[!] Run: ic ai analyze conforma $component${NC}"
+        echo -e "${CYAN}[!] Run: ic ai analyze $type_label $component${NC}"
         echo ""
     fi
 }
@@ -787,7 +686,7 @@ ${BOLD}BACKWARD COMPATIBILITY:${NC}
     ic build logs        → ic describe pipelinerun
 
 EOF
-    exit 0
+    return 0
 }
 
 SYNC_PID_FILE="$SCRIPT_DIR/.sync_status.pid"
@@ -823,10 +722,8 @@ cmd_get_components() {
     local refresh=false
     [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Currently Failing Components${NC}"
+    section_header "Currently Failing Components"
     echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
     echo ""
 
     # Read cached sync status from DB (instant)
@@ -855,8 +752,8 @@ cmd_get_components() {
     age_seconds=$(echo "$age_seconds" | tr -d ' ')
     in_sync=$(echo "$in_sync" | tr -d ' ')
     cluster_connected=$(echo "$cluster_connected" | tr -d ' ')
-    error=$(echo "$error" | xargs 2>/dev/null || echo "")
-    sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
+    error=$(trim "$error")
+    sync_date=$(trim "$sync_date")
 
     # Force refresh if requested
     if [ "$refresh" = true ]; then
@@ -878,8 +775,8 @@ cmd_get_components() {
         age_seconds=$(echo "$age_seconds" | tr -d ' ')
         in_sync=$(echo "$in_sync" | tr -d ' ')
         cluster_connected=$(echo "$cluster_connected" | tr -d ' ')
-        error=$(echo "$error" | xargs 2>/dev/null || echo "")
-        sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
+        error=$(trim "$error")
+        sync_date=$(trim "$sync_date")
     fi
 
     # Calculate staleness
@@ -950,18 +847,7 @@ cmd_get_components() {
         retriggered_filter="AND component_name IN ($in_clause)"
     fi
 
-    # Count currently failing (push failed, not re-triggered)
-    local push_failing=$(sql "
-        WITH latest_builds AS (
-            SELECT DISTINCT ON (component_name)
-                component_name, status, is_resolved
-            FROM build_failures
-            WHERE application = '$APPLICATION_NAME'
-            ORDER BY component_name, first_detected_at DESC
-        )
-        SELECT COUNT(*) FROM latest_builds
-        WHERE status = 'Failed' AND is_resolved = FALSE;
-    ")
+    local push_failing=$(sql_count_failing_builds)
 
     local retriggered_count=0
     [ -n "$retriggered_json" ] && retriggered_count=$(echo "$retriggered_json" | jq 'length' 2>/dev/null || echo "0")
@@ -1036,13 +922,13 @@ cmd_get_component() {
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic get component <name>"
-        exit 1
+        return 1
     fi
 
     local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
     if [ "$total" = "0" ]; then
         echo -e "${RED}Error: Component not found: $component${NC}"
-        exit 1
+        return 1
     fi
 
     echo -e "${BOLD}Component: ${CYAN}$component${NC}"
@@ -1060,9 +946,7 @@ cmd_get_component() {
 cmd_get_pipelineruns() {
     local limit="${1:-20}"
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Recent PipelineRun Failures${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Recent PipelineRun Failures"
     echo ""
 
     sql_table "
@@ -1084,14 +968,14 @@ cmd_get_pipelinerun() {
     if [ -z "$pr_name" ]; then
         echo -e "${RED}Error: PipelineRun name required${NC}"
         echo "Usage: ic get pipelinerun <name>"
-        exit 1
+        return 1
     fi
 
     local data=$(sql "SELECT component_name, status, CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
 
     if [ -z "$data" ]; then
         echo -e "${RED}Error: PipelineRun not found: $pr_name${NC}"
-        exit 1
+        return 1
     fi
 
     IFS='|' read -r component status has_logs <<< "$data"
@@ -1107,9 +991,7 @@ cmd_get_pipelinerun() {
 }
 
 cmd_get_apps() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Available RHOAI Applications${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Available RHOAI Applications"
     echo ""
 
     local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "rhoai" | sort -V)
@@ -1122,7 +1004,7 @@ cmd_get_apps() {
 
     if [ -z "$apps" ]; then
         echo -e "${YELLOW}No applications found${NC}"
-        exit 1
+        return 1
     fi
 
     local current="$APPLICATION_NAME"
@@ -1165,18 +1047,16 @@ cmd_describe_component() {
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic describe component <name> [--log]"
-        exit 1
+        return 1
     fi
 
     local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
     if [ "$total" = "0" ]; then
         echo -e "${RED}Error: Component not found: $component${NC}"
-        exit 1
+        return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Component: $component${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Component: $component"
     echo ""
 
     # Summary
@@ -1215,9 +1095,7 @@ cmd_describe_component() {
             commit_sha commit_url commit_author commit_message \
             failed_step error_type error_message build_duration bf_jira_key <<< "$pr_data"
 
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Latest PipelineRun${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Latest PipelineRun"
         echo ""
         echo -e "${BOLD}PipelineRun:${NC} $pr_name"
         case "$status" in
@@ -1228,21 +1106,21 @@ cmd_describe_component() {
         echo -e "${BOLD}Repository:${NC} $repo_url"
         echo -e "${BOLD}Branch:${NC} $branch"
 
-        bf_jira_key=$(echo "${bf_jira_key:-}" | xargs 2>/dev/null || echo "")
+        bf_jira_key=$(trim "$bf_jira_key")
         if [ -n "$bf_jira_key" ]; then
             echo -e "${BOLD}JIRA:${NC}        ${CYAN}${bf_jira_key}${NC} (${JIRA_URL}/browse/${bf_jira_key})"
         else
             echo -e "${BOLD}JIRA:${NC}        -"
         fi
 
-        commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
-        commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
-        commit_author=$(echo "$commit_author" | xargs 2>/dev/null || echo "")
-        commit_message=$(echo "$commit_message" | xargs 2>/dev/null || echo "")
-        failed_step=$(echo "$failed_step" | xargs 2>/dev/null || echo "")
-        error_type=$(echo "$error_type" | xargs 2>/dev/null || echo "")
-        error_message=$(echo "$error_message" | xargs 2>/dev/null || echo "")
-        build_duration=$(echo "$build_duration" | xargs 2>/dev/null || echo "")
+        commit_sha=$(trim "$commit_sha")
+        commit_url=$(trim "$commit_url")
+        commit_author=$(trim "$commit_author")
+        commit_message=$(trim "$commit_message")
+        failed_step=$(trim "$failed_step")
+        error_type=$(trim "$error_type")
+        error_message=$(trim "$error_message")
+        build_duration=$(trim "$build_duration")
 
         [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
         [ -n "$commit_author" ] && echo -e "${BOLD}Author:${NC}      $commit_author"
@@ -1260,7 +1138,7 @@ cmd_describe_component() {
             # If CONTEXT parameter error, extract Tekton config details
             if [[ "$error_message" =~ "CONTEXT parameter" ]]; then
                 # Extract path-context using Python for proper YAML parsing
-                local context_value=$(docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -tAc "
+                local context_value=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "
                     SELECT commit_context->'tekton_configs'->'${component}-push.yaml'
                     FROM build_failures
                     WHERE component_name = '$component' AND is_resolved = FALSE
@@ -1306,13 +1184,11 @@ except: pass
             local log_size=$(echo "$logs" | wc -c)
 
             if [ "$log_size" -gt 10 ]; then
-                echo -e "${BOLD}========================================${NC}"
                 if [ "$show_full_log" = true ]; then
-                    echo -e "${BOLD}Build Logs (Full)${NC}"
+                    section_header "Build Logs (Full)"
                 else
-                    echo -e "${BOLD}Build Logs${NC}"
+                    section_header "Build Logs"
                 fi
-                echo -e "${BOLD}========================================${NC}"
                 echo ""
 
                 if [ "$show_full_log" = true ]; then
@@ -1344,7 +1220,7 @@ except: pass
         fi
 
         # Display AI analysis if available (matching this specific failure)
-        display_ai_analysis "$component" "$failure_id" "$commit_author"
+        display_ai_analysis "$component" "$failure_id" "build" "$commit_author"
     fi
 }
 
@@ -1353,7 +1229,7 @@ cmd_describe_pipelinerun() {
     if [ -z "$pr_name" ]; then
         echo -e "${RED}Error: PipelineRun name required${NC}"
         echo "Usage: ic describe pipelinerun <name>"
-        exit 1
+        return 1
     fi
 
     local data=$(sql "
@@ -1367,14 +1243,12 @@ cmd_describe_pipelinerun() {
 
     if [ -z "$data" ]; then
         echo -e "${RED}Error: PipelineRun not found: $pr_name${NC}"
-        exit 1
+        return 1
     fi
 
     IFS='|' read -r component uid status repo_url branch has_logs konflux_url logs <<< "$data"
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}PipelineRun: $pr_name${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "PipelineRun: $pr_name"
     echo ""
     echo -e "${BOLD}Component:${NC} $component"
     echo -e "${BOLD}UID:${NC} $uid"
@@ -1387,9 +1261,7 @@ cmd_describe_pipelinerun() {
     echo ""
 
     if [ "$has_logs" = "Yes" ]; then
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Build Logs${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Build Logs"
         echo ""
         echo "$logs"
         echo ""
@@ -1402,8 +1274,7 @@ cmd_describe_by_number() {
     shift
     local extra_args="$@"
 
-    # Read retriggered components from sync cache
-    local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
+    local retriggered_json=$(sql_get_retriggered_json)
 
     # Count build failures first
     local build_count=$(sql "
@@ -1430,33 +1301,12 @@ cmd_describe_by_number() {
     if [ "$number" -gt "$total" ] || [ "$number" -lt 1 ]; then
         echo -e "${RED}Error: Alert #$number does not exist${NC}"
         echo "There are $build_count build failures and $conforma_count Conforma failures ($total total)."
-        exit 1
+        return 1
     fi
 
     # If number falls in build failures range
     if [ "$number" -le "$build_count" ]; then
-        local component=$(sql "
-            WITH latest_builds AS (
-                SELECT DISTINCT ON (component_name)
-                    component_name, status, is_resolved, first_detected_at,
-                    (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
-                FROM build_failures
-                WHERE application = '$APPLICATION_NAME'
-                ORDER BY component_name, first_detected_at DESC
-            ),
-            failing AS (
-                SELECT component_name, total_failures,
-                    CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
-                        THEN 2 ELSE 1
-                    END as sort_group
-                FROM latest_builds
-                WHERE status = 'Failed' AND is_resolved = FALSE
-            )
-            SELECT component_name FROM failing
-            ORDER BY sort_group, total_failures DESC
-            OFFSET $((number - 1))
-            LIMIT 1;
-        ")
+        local component=$(sql_resolve_build_number "$number" "${retriggered_json:-[]}")
 
         # Check if it's re-triggered
         local is_retriggered=""
@@ -1470,24 +1320,11 @@ cmd_describe_by_number() {
     else
         # Falls in conforma range
         local conforma_offset=$((number - build_count - 1))
-        local component=$(sql "
-            WITH latest_conforma AS (
-                SELECT DISTINCT ON (component_name)
-                    component_name, violations_count
-                FROM conforma_results
-                WHERE application = '$APPLICATION_NAME'
-                  AND is_resolved = FALSE
-                ORDER BY component_name, last_updated_at DESC
-            )
-            SELECT component_name FROM latest_conforma
-            ORDER BY violations_count DESC
-            OFFSET $conforma_offset
-            LIMIT 1;
-        ")
+        local component=$(sql_resolve_conforma_number "$conforma_offset")
 
         if [ -z "$component" ]; then
             echo -e "${RED}Error: Alert #$number does not exist${NC}"
-            exit 1
+            return 1
         fi
 
         echo -e "${CYAN}Conforma failure #$number of $total alerts${NC}"
@@ -1498,9 +1335,7 @@ cmd_describe_by_number() {
 
 # Config commands
 cmd_config_show() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Current Configuration${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Current Configuration"
     echo ""
     echo -e "${BOLD}Environment:${NC}"
     echo "  Namespace: ${CYAN}${NAMESPACE}${NC}"
@@ -1527,7 +1362,7 @@ cmd_config_set_app() {
         echo "Usage: ic config set-app <app-name>"
         echo ""
         cmd_get_apps
-        exit 1
+        return 1
     fi
 
     # Validate against cluster if reachable
@@ -1536,7 +1371,7 @@ cmd_config_set_app() {
             echo -e "${RED}Error: Application '$new_app' not found in namespace $NAMESPACE${NC}"
             echo ""
             cmd_get_apps
-            exit 1
+            return 1
         fi
     else
         # Cluster unreachable — validate against DB
@@ -1548,7 +1383,7 @@ cmd_config_set_app() {
             cmd_get_apps
             echo -e "${CYAN}Use --force to set anyway:${NC} ic config set-app $new_app --force"
             echo ""
-            exit 1
+            return 1
         elif [ "${in_db:-0}" = "0" ]; then
             echo -e "${YELLOW}⚠ Cluster unreachable, application not in database — setting anyway${NC}"
         fi
@@ -1578,9 +1413,7 @@ cmd_config_set_app() {
 
 # Stats commands
 cmd_stats() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Statistics${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Statistics"
     echo ""
 
     sql_table "
@@ -1594,9 +1427,7 @@ cmd_stats() {
 }
 
 cmd_stats_daily() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Failures by Day${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Failures by Day"
     echo ""
 
     sql_table "
@@ -1612,9 +1443,7 @@ cmd_stats_daily() {
 }
 
 cmd_stats_resolved() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Resolved Failures Statistics${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Resolved Failures Statistics"
     echo ""
 
     sql_table "
@@ -1631,9 +1460,7 @@ cmd_stats_resolved() {
 
 # Resolved components commands
 cmd_resolved() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Resolved Components${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Resolved Components"
     echo ""
 
     sql_table "
@@ -1660,12 +1487,10 @@ cmd_history() {
     if [ -z "$component_name" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic history <component-name>"
-        exit 1
+        return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}History: $component_name${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "History: $component_name"
     echo ""
 
     # Summary
@@ -1722,9 +1547,7 @@ cmd_history() {
 
 # Currently working components
 cmd_working() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Currently Working Components${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Currently Working Components"
     echo ""
 
     echo -e "${BOLD}${GREEN}Components with last build = Succeeded:${NC}"
@@ -1764,13 +1587,13 @@ cmd_working() {
 cmd_db_status() {
     echo -e "${BOLD}Database Status${NC}"
     echo ""
-    if docker ps | grep -q ci-autohealing-db; then
+    if docker ps | grep -q "$DB_CONTAINER"; then
         echo -e "${GREEN}✓ PostgreSQL container running${NC}"
         echo ""
         sql_table "SELECT version();"
     else
         echo -e "${RED}✗ PostgreSQL container not running${NC}"
-        exit 1
+        return 1
     fi
 }
 
@@ -1778,7 +1601,7 @@ cmd_db_query() {
     local query="$1"
     if [ -z "$query" ]; then
         echo -e "${RED}Error: SQL query required${NC}"
-        exit 1
+        return 1
     fi
     sql_table "$query"
 }
@@ -1786,9 +1609,7 @@ cmd_db_query() {
 # TRIAGE commands - focused on understanding failures
 
 cmd_triage() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Triage Dashboard${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Triage Dashboard"
     echo ""
 
     # Get current failing components (last build = failed)
@@ -1796,29 +1617,8 @@ cmd_triage() {
 
     # Total records vs currently failing
     local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
-    local currently_failing=$(sql "
-        WITH latest_builds AS (
-            SELECT DISTINCT ON (component_name)
-                component_name,
-                status,
-                is_resolved
-            FROM build_failures
-            WHERE application = '$APPLICATION_NAME'
-            ORDER BY component_name, first_detected_at DESC
-        )
-        SELECT COUNT(*) FROM latest_builds WHERE status = 'Failed' AND is_resolved = FALSE;
-    ")
-    local currently_working=$(sql "
-        WITH latest_builds AS (
-            SELECT DISTINCT ON (component_name)
-                component_name,
-                status
-            FROM build_failures
-            WHERE application = '$APPLICATION_NAME'
-            ORDER BY component_name, first_detected_at DESC
-        )
-        SELECT COUNT(*) FROM latest_builds WHERE status = 'Succeeded';
-    ")
+    local currently_failing=$(sql_count_failing_builds)
+    local currently_working=$(sql_count_working_builds)
 
     echo "  Total build records: $total_records"
     echo "  Currently failing: ${RED}$currently_failing${NC}"
@@ -1865,7 +1665,7 @@ cmd_why() {
         echo ""
         echo "Example:"
         echo "  ic why odh-spark-operator-v3-4"
-        exit 1
+        return 1
     fi
 
     # Check if component exists
@@ -1875,12 +1675,10 @@ cmd_why() {
         echo ""
         echo "Available components:"
         sql "SELECT DISTINCT component_name FROM build_failures ORDER BY component_name;" | head -10
-        exit 1
+        return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Why is $component failing?${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Why is $component failing?"
     echo ""
 
     # Get latest PipelineRun
@@ -1894,7 +1692,7 @@ cmd_why() {
 
     if [ -z "$pr_data" ]; then
         echo -e "${RED}No build failures found${NC}"
-        exit 1
+        return 1
     fi
 
     IFS='|' read -r pr_name repo_url branch detected_at <<< "$pr_data"
@@ -1917,9 +1715,7 @@ cmd_why() {
     if [ -n "$commit_data" ]; then
         IFS='|' read -r commit_sha commit_url log_url build_logs <<< "$commit_data"
 
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Commit Information${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Commit Information"
         echo ""
         if [ -n "$commit_sha" ] && [ "$commit_sha" != "" ]; then
             echo "  Commit SHA: ${CYAN}${commit_sha:0:8}${NC}"
@@ -1934,9 +1730,7 @@ cmd_why() {
 
         # Show log excerpt if available
         if [ -n "$build_logs" ] && [ ${#build_logs} -gt 500 ]; then
-            echo -e "${BOLD}========================================${NC}"
-            echo -e "${BOLD}Log Excerpt${NC}"
-            echo -e "${BOLD}========================================${NC}"
+            section_header "Log Excerpt"
             echo ""
             extract_error_context "$build_logs"
             echo ""
@@ -1958,18 +1752,16 @@ cmd_analyze() {
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic analyze <component-name>"
-        exit 1
+        return 1
     fi
 
     local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
     if [ "$total" = "0" ]; then
         echo -e "${RED}Error: Component not found: $component${NC}"
-        exit 1
+        return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Deep Analysis: $component${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Deep Analysis: $component"
     echo ""
 
     # Failure timeline
@@ -2072,12 +1864,10 @@ cmd_errors() {
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic errors <component-name>"
-        exit 1
+        return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Error Extraction: $component${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Error Extraction: $component"
     echo ""
 
     # Get all logs for this component
@@ -2091,7 +1881,7 @@ cmd_errors() {
 
     if [ -z "$logs" ]; then
         echo -e "${YELLOW}No logs available for this component${NC}"
-        exit 0
+        return 0
     fi
 
     # Extract unique error patterns
@@ -2133,7 +1923,7 @@ cmd_ai() {
             echo "  ic ai analyze component acme-automl-v3-4 # Analyze specific component"
             echo "  ic ai analyze --all                     # Analyze all pending"
             echo "  ic ai status                            # Show summary"
-            exit 1
+            return 1
             ;;
     esac
 }
@@ -2150,7 +1940,7 @@ cmd_ai_analyze() {
         echo "Usage: ic ai analyze <num|component> [--force]"
         echo "       ic ai analyze conforma <component> [--force]"
         echo "       ic ai analyze --all"
-        exit 1
+        return 1
     fi
 
     # Parse first argument
@@ -2199,10 +1989,10 @@ cmd_ai_analyze() {
         echo "Or for direct Anthropic API:"
         echo "  export LLM_PROVIDER=anthropic"
         echo "  export ANTHROPIC_API_KEY=sk-ant-..."
-        exit 1
+        return 1
     fi
 
-    cd "$SCRIPT_DIR/collectors/python" || exit 1
+    cd "$SCRIPT_DIR/collectors/python" || return 1
 
     if [ "$target" = "all" ]; then
         echo -e "${CYAN}Analyzing all pending failures and violations...${NC}"
@@ -2244,50 +2034,19 @@ cmd_ai_analyze() {
         # If number falls in build failures range
         if [ "$target" -le "$build_count" ]; then
             analysis_type="build"
-            local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
-            component=$(sql "
-                WITH latest_builds AS (
-                    SELECT DISTINCT ON (component_name)
-                        component_name, status, is_resolved, first_detected_at,
-                        (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
-                    FROM build_failures
-                    WHERE application = '$APPLICATION_NAME'
-                    ORDER BY component_name, first_detected_at DESC
-                ),
-                failing AS (
-                    SELECT component_name, total_failures,
-                        CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
-                            THEN 2 ELSE 1
-                        END as sort_group
-                    FROM latest_builds
-                    WHERE status = 'Failed' AND is_resolved = FALSE
-                )
-                SELECT component_name FROM failing
-                ORDER BY sort_group, total_failures DESC
-                OFFSET $((target - 1))
-                LIMIT 1;
-            ")
+            local retriggered_json=$(sql_get_retriggered_json)
+            component=$(sql_resolve_build_number "$target" "${retriggered_json:-[]}")
         else
             # Falls in Conforma range
             analysis_type="conforma"
             local conforma_offset=$((target - build_count - 1))
-            component=$(sql "
-                SELECT component_name FROM (
-                    SELECT DISTINCT ON (component_name) component_name
-                    FROM conforma_results
-                    WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
-                    ORDER BY component_name, last_updated_at DESC
-                ) sub
-                ORDER BY component_name
-                OFFSET $conforma_offset
-                LIMIT 1;
-            " 2>/dev/null)
+            component=$(sql_resolve_conforma_number "$conforma_offset")
         fi
     fi
 
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component not found${NC}"
-        exit 1
+        return 1
     fi
 
     # Auto-detect type if not already set
@@ -2301,7 +2060,7 @@ cmd_ai_analyze() {
             analysis_type="conforma"
         else
             echo -e "${RED}Error: No unresolved failures found for component: $component${NC}"
-            exit 1
+            return 1
         fi
     fi
 
@@ -2330,7 +2089,7 @@ cmd_ai_analyze() {
             else
                 echo "  ic describe conforma $component"
             fi
-            exit 0
+            return 0
         fi
     fi
 
@@ -2347,9 +2106,7 @@ cmd_ai_analyze() {
 }
 
 cmd_ai_status() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}AI Analysis Status${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "AI Analysis Status"
     echo ""
 
     # Build failures stats
@@ -2441,9 +2198,7 @@ cmd_ai_status() {
 }
 
 cmd_ai_stats() {
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}AI Analysis Statistics${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "AI Analysis Statistics"
     echo ""
 
     # By category and type
@@ -2605,7 +2360,7 @@ cmd_export() {
             echo "  ic export 1 jira --clipboard            # Copy to clipboard"
             echo "  ic export component acme-automl-v3-4 markdown"
             echo "  ic export conforma acme-autorag-v3-4 jira"
-            exit 1
+            return 1
             ;;
     esac
 }
@@ -2637,47 +2392,13 @@ export_jira() {
         # If number falls in build failures range
         if [ "$target" -le "$build_count" ]; then
             export_type="build"
-            local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
-            component=$(sql "
-                WITH latest_builds AS (
-                    SELECT DISTINCT ON (component_name)
-                        component_name, status, is_resolved, first_detected_at,
-                        (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
-                    FROM build_failures
-                    WHERE application = '$APPLICATION_NAME'
-                    ORDER BY component_name, first_detected_at DESC
-                ),
-                failing AS (
-                    SELECT component_name, total_failures,
-                        CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
-                            THEN 2 ELSE 1
-                        END as sort_group
-                    FROM latest_builds
-                    WHERE status = 'Failed' AND is_resolved = FALSE
-                )
-                SELECT component_name FROM failing
-                ORDER BY sort_group, total_failures DESC
-                OFFSET $((target - 1))
-                LIMIT 1;
-            ")
+            local retriggered_json=$(sql_get_retriggered_json)
+            component=$(sql_resolve_build_number "$target" "${retriggered_json:-[]}")
         else
             # Falls in Conforma range
             export_type="conforma"
             local conforma_offset=$((target - build_count - 1))
-            component=$(sql "
-                WITH latest_conforma AS (
-                    SELECT DISTINCT ON (component_name)
-                        component_name, violations_count
-                    FROM conforma_results
-                    WHERE application = '$APPLICATION_NAME'
-                      AND is_resolved = FALSE
-                    ORDER BY component_name, last_updated_at DESC
-                )
-                SELECT component_name FROM latest_conforma
-                ORDER BY violations_count DESC
-                OFFSET $conforma_offset
-                LIMIT 1;
-            " 2>/dev/null)
+            component=$(sql_resolve_conforma_number "$conforma_offset")
         fi
     else
         component="$target"
@@ -2685,7 +2406,7 @@ export_jira() {
 
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component not found${NC}"
-        exit 1
+        return 1
     fi
 
     # Auto-detect type if not already set
@@ -2699,7 +2420,7 @@ export_jira() {
             export_type="conforma"
         else
             echo -e "${RED}Error: No unresolved failures found for component: $component${NC}"
-            exit 1
+            return 1
         fi
     fi
 
@@ -2730,7 +2451,7 @@ export_jira() {
 
     if [ -z "$data" ]; then
         echo -e "${RED}Error: No failure data found for component: $component${NC}"
-        exit 1
+        return 1
     fi
 
     # Collapse newlines within fields (SQL returns multi-line text in commit messages, error messages)
@@ -2883,21 +2604,7 @@ export_jira() {
         output+="_Confidence: ${confidence}% | Category: ${category}_\n"
     fi
 
-    # Output or copy to clipboard
-    if [ "$clipboard" = true ]; then
-        if command -v pbcopy &> /dev/null; then
-            echo -e "$output" | pbcopy
-            echo -e "${GREEN}✓ Jira ticket copied to clipboard (macOS)${NC}"
-        elif command -v xclip &> /dev/null; then
-            echo -e "$output" | xclip -selection clipboard
-            echo -e "${GREEN}✓ Jira ticket copied to clipboard (Linux)${NC}"
-        else
-            echo -e "${YELLOW}Clipboard command not found (install pbcopy or xclip)${NC}"
-            echo -e "$output"
-        fi
-    else
-        echo -e "$output"
-    fi
+    clipboard_or_print "$output" "$clipboard"
 }
 
 export_conforma_jira() {
@@ -2924,7 +2631,7 @@ export_conforma_jira() {
 
     if [ -z "$data" ]; then
         echo -e "${RED}Error: No Conforma violation found for component: $component${NC}"
-        exit 1
+        return 1
     fi
 
     # Collapse newlines within fields
@@ -2957,7 +2664,7 @@ export_conforma_jira() {
     fi
 
     # Konflux UI URL
-    local konflux_url="https://konflux-ui.apps.CLUSTER_DOMAIN/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
+    local konflux_url="${KONFLUX_UI_BASE}/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
 
     # Generate Jira template for Conforma
     local output=""
@@ -3056,21 +2763,7 @@ export_conforma_jira() {
         output+="_Confidence: ${confidence}% | Category: ${category}_\n"
     fi
 
-    # Output or copy to clipboard
-    if [ "$clipboard" = true ]; then
-        if command -v pbcopy &> /dev/null; then
-            echo -e "$output" | pbcopy
-            echo -e "${GREEN}✓ Jira ticket copied to clipboard (macOS)${NC}"
-        elif command -v xclip &> /dev/null; then
-            echo -e "$output" | xclip -selection clipboard
-            echo -e "${GREEN}✓ Jira ticket copied to clipboard (Linux)${NC}"
-        else
-            echo -e "${YELLOW}Clipboard command not found (install pbcopy or xclip)${NC}"
-            echo -e "$output"
-        fi
-    else
-        echo -e "$output"
-    fi
+    clipboard_or_print "$output" "$clipboard"
 }
 
 export_markdown() {
@@ -3096,10 +2789,8 @@ cmd_get_conforma() {
     local refresh=false
     [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Conforma Test Failures${NC}"
+    section_header "Conforma Test Failures"
     echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
     echo ""
 
     if [ "$refresh" = true ]; then
@@ -3147,113 +2838,9 @@ cmd_get_conforma() {
     echo ""
 }
 
-# GET ALERTS - unified view of build failures + conforma
-cmd_get_alerts() {
-    local refresh=false
-    local target_date=""
-    local from_date=""
-    local to_date=""
-
-    # Parse arguments
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --refresh|-r) refresh=true; shift ;;
-            --date)
-                shift
-                target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
-                if [ -z "$target_date" ]; then
-                    echo -e "${RED}Error: Invalid date: $1${NC}"
-                    echo "Examples: --date 2026-04-20, --date yesterday, --date '3 days ago'"
-                    exit 1
-                fi
-                shift ;;
-            --from)
-                shift
-                from_date=$(date -d "${1:?--from requires a value}" '+%Y-%m-%d' 2>/dev/null)
-                if [ -z "$from_date" ]; then
-                    echo -e "${RED}Error: Invalid date: $1${NC}"
-                    exit 1
-                fi
-                shift ;;
-            --to)
-                shift
-                to_date=$(date -d "${1:?--to requires a value}" '+%Y-%m-%d' 2>/dev/null)
-                if [ -z "$to_date" ]; then
-                    echo -e "${RED}Error: Invalid date: $1${NC}"
-                    exit 1
-                fi
-                shift ;;
-            *) shift ;;
-        esac
-    done
-
-    # Dispatch to historical view if date flags are used
-    if [ -n "$target_date" ]; then
-        cmd_get_alerts_on_date "$target_date"
-        return
-    fi
-
-    if [ -n "$from_date" ]; then
-        [ -z "$to_date" ] && to_date=$(date '+%Y-%m-%d')
-        cmd_get_alerts_range "$from_date" "$to_date"
-        return
-    fi
-
-    # --- Current alerts (original behavior) ---
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Alerts — ${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
-    echo ""
-
-    if [ "$refresh" = true ]; then
-        echo -e "${CYAN}Refreshing (querying KubeArchive)...${NC}"
-        cd "$SCRIPT_DIR/collectors/python"
-        python3 check_sync_status.py > /dev/null 2>&1
-        python3 check_conforma_status.py > /dev/null 2>&1
-        python3 collect_conforma.py > /dev/null 2>&1
-        cd "$SCRIPT_DIR"
-        echo ""
-    fi
-
-    # Read sync cache for sync date and retriggered
-    local sync_row=$(sql "
-        SELECT
-            TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS'),
-            EXTRACT(EPOCH FROM (NOW() - last_checked_at))::int,
-            COALESCE(retriggered_components::text, '[]'),
-            COALESCE(conforma_components::text, '[]')
-        FROM sync_status WHERE application = '$APPLICATION_NAME';
-    " 2>/dev/null)
-
-    local sync_date age_seconds retriggered_json conforma_json
-    IFS='|' read -r sync_date age_seconds retriggered_json conforma_json <<< "$sync_row"
-    sync_date=$(echo "$sync_date" | xargs 2>/dev/null || echo "")
-    age_seconds=$(echo "$age_seconds" | tr -d ' ')
-    local age_minutes=0
-    [ -n "$age_seconds" ] && age_minutes=$((age_seconds / 60))
-
-    if [ -n "$sync_date" ]; then
-        echo -e "${CYAN}Last sync: ${sync_date}, ${age_minutes}m ago${NC}"
-        echo ""
-    fi
-
-    # --- Section 1: Build Failures ---
-    local retriggered_list=""
-    if [ -n "$retriggered_json" ] && [ "$retriggered_json" != "[]" ]; then
-        retriggered_list=$(echo "$retriggered_json" | jq -r '.[]' 2>/dev/null | paste -sd',' -)
-    fi
-
-    local build_count=$(sql "
-        WITH latest_builds AS (
-            SELECT DISTINCT ON (component_name)
-                component_name, status, is_resolved
-            FROM build_failures
-            WHERE application = '$APPLICATION_NAME'
-            ORDER BY component_name, first_detected_at DESC
-        )
-        SELECT COUNT(*) FROM latest_builds
-        WHERE status = 'Failed' AND is_resolved = FALSE;
-    ")
+display_alerts_build_failures() {
+    local retriggered_json="${1:-[]}"
+    local build_count=$(sql_count_failing_builds)
 
     echo -e "${BOLD}Build Failures (${build_count:-0}):${NC}"
 
@@ -3294,8 +2881,10 @@ cmd_get_alerts() {
         "
     fi
     echo ""
+}
 
-    # --- Section 2: Conforma Failures ---
+display_alerts_conforma_failures() {
+    local offset="${1:-0}"
     local conforma_count=$(sql "
         SELECT COUNT(*) FROM (
             SELECT DISTINCT ON (component_name) component_name
@@ -3310,7 +2899,6 @@ cmd_get_alerts() {
     if [ "${conforma_count:-0}" = "0" ]; then
         echo -e "  ${GREEN}✓ No Conforma failures${NC}"
     else
-        local offset=${build_count:-0}
         local exceptions=""
         exceptions=$(fetch_conforma_exceptions "$APPLICATION_NAME" 2>/dev/null)
         local gl_exc=""
@@ -3340,12 +2928,12 @@ cmd_get_alerts() {
 
         local row_num=0
         echo "$comp_rows" | while IFS='|' read -r c_name c_scenario c_viol c_warn c_since c_jira; do
-            c_name=$(echo "$c_name" | xargs)
-            c_scenario=$(echo "$c_scenario" | xargs)
-            c_viol=$(echo "$c_viol" | xargs)
-            c_warn=$(echo "$c_warn" | xargs)
-            c_since=$(echo "$c_since" | xargs)
-            c_jira=$(echo "${c_jira:-}" | xargs)
+            c_name=$(trim "$c_name")
+            c_scenario=$(trim "$c_scenario")
+            c_viol=$(trim "$c_viol")
+            c_warn=$(trim "$c_warn")
+            c_since=$(trim "$c_since")
+            c_jira=$(trim "$c_jira")
             [ -z "$c_name" ] && continue
 
             row_num=$((row_num + 1))
@@ -3360,7 +2948,6 @@ cmd_get_alerts() {
                 exc_status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exc")
             fi
 
-            # Append expiry date to exception status
             local exc_display="$exc_status"
             if [ -n "$expiring_data" ] && [ "$exc_status" != "NO" ] && [ "$exc_status" != "-" ] && [ "$exc_status" != "UNKNOWN" ]; then
                 local expiry_info
@@ -3384,31 +2971,25 @@ cmd_get_alerts() {
         done
     fi
     echo ""
+}
 
-    # --- Section 3: In Progress ---
+display_alerts_in_progress() {
     local running_builds_json running_conforma_json
     running_builds_json=$(sql "SELECT COALESCE(running_builds::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
     running_conforma_json=$(sql "SELECT COALESCE(running_conforma::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
 
-    # Combine both into a single list
     local running_count=0
     local running_items=""
 
     if [ -n "$running_builds_json" ] && [ "$running_builds_json" != "[]" ]; then
         local build_items=$(echo "$running_builds_json" | jq -r '.[] | "\(.component)|\(.timestamp)|\(.pipelinerun_name)|Build"' 2>/dev/null)
-        if [ -n "$build_items" ]; then
-            running_items="$build_items"
-        fi
+        [ -n "$build_items" ] && running_items="$build_items"
     fi
 
     if [ -n "$running_conforma_json" ] && [ "$running_conforma_json" != "[]" ]; then
         local conforma_items=$(echo "$running_conforma_json" | jq -r '.[] | "\(.component)|\(.timestamp)|\(.pipelinerun_name)|Conforma"' 2>/dev/null)
         if [ -n "$conforma_items" ]; then
-            if [ -n "$running_items" ]; then
-                running_items="$running_items"$'\n'"$conforma_items"
-            else
-                running_items="$conforma_items"
-            fi
+            [ -n "$running_items" ] && running_items="$running_items"$'\n'"$conforma_items" || running_items="$conforma_items"
         fi
     fi
 
@@ -3436,21 +3017,48 @@ cmd_get_alerts() {
         done
         echo ""
     fi
+}
 
-    # --- Section 4: Expiring Exceptions (within 10 days) ---
+display_alerts_exception_row() {
+    local days_left="$1" eff_until="$2" value="$3" image_url="$4" reference="$5" source="$6" gl_link="$7"
+    local max_value_len="${8:-45}" max_comp_len="${9:-30}"
+
+    local src_label="${source:-?}"
+    src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+
+    local comp_name=""
+    if [ -n "$image_url" ]; then
+        comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
+        local app_suffix="${APPLICATION_NAME#rhoai-}"
+        comp_name="${comp_name}-${app_suffix}"
+    else
+        comp_name="(global rule)"
+    fi
+
+    local jira_key="-"
+    if [ -n "$reference" ]; then
+        jira_key=$(echo "$reference" | grep -oP '[A-Z]+-[0-9]+' 2>/dev/null | tail -1 || true)
+        [ -z "$jira_key" ] && jira_key="$reference"
+    fi
+
+    local comp_short="${comp_name:0:$max_comp_len}"
+    echo "${src_label}|${comp_short}|${jira_key}|${gl_link}"
+}
+
+display_alerts_expiring_exceptions() {
     local all_exceptions
     all_exceptions=$(fetch_expiring_exceptions 10 2>/dev/null || true)
+
     local expiring_soon
     expiring_soon=$(echo "$all_exceptions" | awk -F'|' '$1 >= -1 && $1 <= 10' || true)
     local expired_count
     expired_count=$(echo "$all_exceptions" | awk -F'|' '$1 < -1 && $1 != ""' | wc -l)
+
     if [ -n "$expiring_soon" ]; then
         local exp_count
         exp_count=$(echo "$expiring_soon" | wc -l)
         local expired_msg=""
-        if [ "$expired_count" -gt 0 ]; then
-            expired_msg=" ${RED}(${expired_count} already expired)${NC}"
-        fi
+        [ "$expired_count" -gt 0 ] && expired_msg=" ${RED}(${expired_count} already expired)${NC}"
         echo -e "${BOLD}${YELLOW}⚠ Expiring Exceptions — next 10 days (${exp_count}):${NC}${expired_msg}"
         printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "Days" "Expires" "Source" "Rule" "Component" "JIRA"
         printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "------" "------------" "--------" "$(printf '%0.s-' {1..45})" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..16})"
@@ -3459,42 +3067,22 @@ cmd_get_alerts() {
             local day_color="$NC"
             local day_label="${days_left}d"
             if [ "$days_left" -lt 0 ]; then
-                day_color="$RED"
-                day_label="TODAY"
+                day_color="$RED"; day_label="TODAY"
             elif [ "$days_left" -le 3 ]; then
                 day_color="$RED"
             elif [ "$days_left" -le 7 ]; then
                 day_color="$YELLOW"
             fi
-            # Short source label: registry-acme-prod -> reg-prod, fbc-acme-stage -> fbc-stg
-            local src_label="${source:-?}"
-            src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
-            # Derive component from image URL, fall back to rule value
-            local comp_name=""
-            if [ -n "$image_url" ]; then
-                comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
-                local app_suffix="${APPLICATION_NAME#rhoai-}"
-                comp_name="${comp_name}-${app_suffix}"
-            else
-                comp_name="(global rule)"
-            fi
-            # Use reference field from GitLab YAML as JIRA source
-            local jira_key="-"
-            if [ -n "$reference" ]; then
-                jira_key=$(echo "$reference" | grep -oP '[A-Z]+-[0-9]+' 2>/dev/null | tail -1 || true)
-                [ -z "$jira_key" ] && jira_key="$reference"
-            fi
-            local comp_short="${comp_name:0:30}"
+            local parsed
+            parsed=$(display_alerts_exception_row "$days_left" "$eff_until" "$value" "$image_url" "$reference" "$source" "$gl_link")
+            IFS='|' read -r src_label comp_short jira_key row_gl_link <<< "$parsed"
             echo -ne "  ${day_color}$(printf '%-6s' "$day_label")${NC} "
             printf "%-12s %-8s %-45s %-30s %s\n" "$eff_until" "$src_label" "${value:0:45}" "$comp_short" "$jira_key"
-            if [ -n "$gl_link" ]; then
-                echo -e "         ${CYAN}↳ ${gl_link}${NC}"
-            fi
+            [ -n "$row_gl_link" ] && echo -e "         ${CYAN}↳ ${row_gl_link}${NC}"
         done
         echo ""
     fi
 
-    # --- Section 5: Already Expired Exceptions ---
     local already_expired
     already_expired=$(echo "$all_exceptions" | awk -F'|' '$1 < -1 && $1 != ""' || true)
     if [ -n "$already_expired" ]; then
@@ -3506,36 +3094,110 @@ cmd_get_alerts() {
         echo "$already_expired" | while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
             [ -z "$days_left" ] && continue
             local ago=$(( -1 * days_left ))
-            local src_label="${source:-?}"
-            src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
-            local comp_name=""
-            if [ -n "$image_url" ]; then
-                comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
-                local app_suffix="${APPLICATION_NAME#rhoai-}"
-                comp_name="${comp_name}-${app_suffix}"
-            else
-                comp_name="(global rule)"
-            fi
-            local jira_key="-"
-            if [ -n "$reference" ]; then
-                jira_key=$(echo "$reference" | grep -oP '[A-Z]+-[0-9]+' 2>/dev/null | tail -1 || true)
-                [ -z "$jira_key" ] && jira_key="$reference"
-            fi
-            local comp_short="${comp_name:0:30}"
+            local parsed
+            parsed=$(display_alerts_exception_row "$days_left" "$eff_until" "$value" "$image_url" "$reference" "$source" "$gl_link" 40)
+            IFS='|' read -r src_label comp_short jira_key row_gl_link <<< "$parsed"
             echo -ne "  ${RED}$(printf '%-8s' "${ago}d ago")${NC} "
             printf "%-12s %-8s %-40s %-30s %s\n" "$eff_until" "$src_label" "${value:0:40}" "$comp_short" "$jira_key"
-            if [ -n "$gl_link" ]; then
-                echo -e "            ${CYAN}↳ ${gl_link}${NC}"
-            fi
+            [ -n "$row_gl_link" ] && echo -e "            ${CYAN}↳ ${row_gl_link}${NC}"
         done
         echo ""
     fi
+}
+
+# GET ALERTS - unified view of build failures + conforma
+cmd_get_alerts() {
+    local refresh=false
+    local target_date=""
+    local from_date=""
+    local to_date=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --refresh|-r) refresh=true; shift ;;
+            --date)
+                shift
+                target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                if [ -z "$target_date" ]; then
+                    echo -e "${RED}Error: Invalid date: $1${NC}"
+                    echo "Examples: --date 2026-04-20, --date yesterday, --date '3 days ago'"
+                    return 1
+                fi
+                shift ;;
+            --from)
+                shift
+                from_date=$(date -d "${1:?--from requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                [ -z "$from_date" ] && { echo -e "${RED}Error: Invalid date: $1${NC}"; return 1; }
+                shift ;;
+            --to)
+                shift
+                to_date=$(date -d "${1:?--to requires a value}" '+%Y-%m-%d' 2>/dev/null)
+                [ -z "$to_date" ] && { echo -e "${RED}Error: Invalid date: $1${NC}"; return 1; }
+                shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [ -n "$target_date" ]; then
+        cmd_get_alerts_on_date "$target_date"
+        return
+    fi
+    if [ -n "$from_date" ]; then
+        [ -z "$to_date" ] && to_date=$(date '+%Y-%m-%d')
+        cmd_get_alerts_range "$from_date" "$to_date"
+        return
+    fi
+
+    section_header "Alerts — ${APPLICATION_NAME}"
+    echo ""
+
+    if [ "$refresh" = true ]; then
+        echo -e "${CYAN}Refreshing (querying KubeArchive)...${NC}"
+        cd "$SCRIPT_DIR/collectors/python"
+        python3 check_sync_status.py > /dev/null 2>&1
+        python3 check_conforma_status.py > /dev/null 2>&1
+        python3 collect_conforma.py > /dev/null 2>&1
+        cd "$SCRIPT_DIR"
+        echo ""
+    fi
+
+    local sync_row=$(sql "
+        SELECT
+            TO_CHAR(last_checked_at, 'YYYY-MM-DD HH24:MI:SS'),
+            EXTRACT(EPOCH FROM (NOW() - last_checked_at))::int,
+            COALESCE(retriggered_components::text, '[]')
+        FROM sync_status WHERE application = '$APPLICATION_NAME';
+    " 2>/dev/null)
+
+    local sync_date age_seconds retriggered_json
+    IFS='|' read -r sync_date age_seconds retriggered_json <<< "$sync_row"
+    sync_date=$(trim "$sync_date")
+    age_seconds=$(echo "$age_seconds" | tr -d ' ')
+    local age_minutes=0
+    [ -n "$age_seconds" ] && age_minutes=$((age_seconds / 60))
+    [ -n "$sync_date" ] && echo -e "${CYAN}Last sync: ${sync_date}, ${age_minutes}m ago${NC}" && echo ""
+
+    local build_count=$(sql_count_failing_builds)
+    display_alerts_build_failures "$retriggered_json"
+
+    local conforma_count=$(sql "
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY component_name, last_updated_at DESC
+        ) sub;
+    " 2>/dev/null)
+    display_alerts_conforma_failures "${build_count:-0}"
+
+    local running_count=0
+    display_alerts_in_progress
+
+    display_alerts_expiring_exceptions
 
     local total=$((${build_count:-0} + ${conforma_count:-0}))
     echo -e "${BOLD}Total alerts: ${RED}${total}${NC} (${build_count:-0} builds, ${conforma_count:-0} conforma)"
-    if [ "$running_count" -gt 0 ]; then
-        echo -e "${BOLD}In progress: ${YELLOW}${running_count}${NC}"
-    fi
+    [ "${running_count:-0}" -gt 0 ] && echo -e "${BOLD}In progress: ${YELLOW}${running_count}${NC}"
     echo ""
     echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
@@ -3549,9 +3211,7 @@ cmd_get_alerts_on_date() {
     local target_end="${target_date} 23:59:59"
     local display_date=$(date -d "$target_date" '+%a %d %b %Y')
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Alerts on ${display_date} — ${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Alerts on ${display_date} — ${APPLICATION_NAME}"
     echo ""
 
     # Build failures that were active on that date
@@ -3646,9 +3306,7 @@ cmd_get_alerts_range() {
     local display_from=$(date -d "$from_date" '+%a %d %b')
     local display_to=$(date -d "$to_date" '+%a %d %b %Y')
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Alerts ${display_from} → ${display_to} — ${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Alerts ${display_from} → ${display_to} — ${APPLICATION_NAME}"
     echo ""
 
     # --- New failures in this range ---
@@ -4002,9 +3660,7 @@ cmd_conforma_snapshot() {
         esac
     done
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Snapshot Coverage — ${CYAN}${APPLICATION_NAME}${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Snapshot Coverage — ${CYAN}${APPLICATION_NAME}"
     echo ""
 
     local cache_dir="/tmp/ic-conforma-cache"
@@ -4291,9 +3947,7 @@ cmd_conforma_report() {
 
     [ "$no_cache" = true ] && export CONFORMA_NO_CACHE=true
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Conforma Daily Report — $(date +%Y-%m-%d)${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Conforma Daily Report — $(date +%Y-%m-%d)"
     echo ""
 
     # Discover all active applications with conforma violations
@@ -4513,7 +4167,7 @@ cmd_conforma_report() {
                 [ -z "$comp_name" ] && continue
                 idx=$((idx + 1))
 
-                c_scenario=$(echo "$c_scenario" | xargs)
+                c_scenario=$(trim "$c_scenario")
                 local c_type
                 c_type=$(conforma_scenario_label "$c_scenario")
 
@@ -4596,7 +4250,7 @@ cmd_describe_conforma() {
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic describe conforma <component> [--history]"
-        exit 1
+        return 1
     fi
 
     # Get metadata (without violation_summary to avoid pipe conflicts)
@@ -4625,32 +4279,30 @@ cmd_describe_conforma() {
         echo -e "${RED}Error: No Conforma results found for: $component${NC}"
         echo -e "${CYAN}Tip:${NC} Use 'ic get conforma' to list components with failures"
         echo -e "${CYAN}Tip:${NC} Use '--history' to see PipelineRun timeline even for resolved components"
-        exit 1
+        return 1
     fi
 
     IFS='|' read -r conforma_id comp_name scenario pr_name status violations warnings successes \
         detected_at repo_url commit_sha snapshot commit_url jira_key <<< "$data"
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Conforma Results: $comp_name${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Conforma Results: $comp_name"
     echo ""
     echo -e "${BOLD}Scenario:${NC}    $scenario"
     echo -e "${BOLD}Result:${NC}      ${RED}FAILURE${NC} (${violations} violations, ${warnings} warnings, ${successes} successes)"
     echo -e "${BOLD}PipelineRun:${NC} $pr_name"
     echo -e "${BOLD}Detected:${NC}    $detected_at"
 
-    repo_url=$(echo "$repo_url" | xargs 2>/dev/null || echo "")
-    commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
-    snapshot=$(echo "$snapshot" | xargs 2>/dev/null || echo "")
-    commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
+    repo_url=$(trim "$repo_url")
+    commit_sha=$(trim "$commit_sha")
+    snapshot=$(trim "$snapshot")
+    commit_url=$(trim "$commit_url")
 
     [ -n "$repo_url" ] && echo -e "${BOLD}Repository:${NC}  $repo_url"
     [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
     [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
     [ -n "$snapshot" ] && echo -e "${BOLD}Snapshot:${NC}    $snapshot"
 
-    jira_key=$(echo "${jira_key:-}" | xargs 2>/dev/null || echo "")
+    jira_key=$(trim "$jira_key")
     if [ -n "$jira_key" ]; then
         echo -e "${BOLD}JIRA:${NC}        ${CYAN}${jira_key}${NC} (${JIRA_URL}/browse/${jira_key})"
     else
@@ -4671,14 +4323,12 @@ cmd_describe_conforma() {
     fi
 
     # Konflux UI link
-    local konflux_url="https://konflux-ui.apps.CLUSTER_DOMAIN/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
+    local konflux_url="${KONFLUX_UI_BASE}/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
     echo ""
     echo -e "${BOLD}Konflux UI:${NC} ${CYAN}$konflux_url${NC}"
 
     echo ""
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}Violations${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "Violations"
     echo ""
 
     # Fetch violation_summary separately (contains pipes and newlines)
@@ -4696,7 +4346,7 @@ cmd_describe_conforma() {
     echo ""
 
     # Display AI analysis if available (matching this specific Conforma violation)
-    display_conforma_ai_analysis "$component" "$conforma_id"
+    display_ai_analysis "$component" "$conforma_id" "conforma"
 
     if [ "$history" = true ]; then
         echo ""
@@ -4716,9 +4366,7 @@ cmd_conforma_history() {
         return 1
     fi
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}PipelineRun History: ${CYAN}$component${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "PipelineRun History: ${CYAN}$component"
     echo ""
 
     local base="${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${NAMESPACE}/pipelineruns"
@@ -4918,9 +4566,9 @@ cmd_get_jira() {
     printf "  %-18s %-15s %-22s %-32s %-10s %-10s %s\n" "----" "------" "--------" "---------" "------" "-------" "--------"
 
     echo "$tickets" | while IFS='|' read -r jira_key comp_name source; do
-        jira_key=$(echo "$jira_key" | xargs)
-        comp_name=$(echo "$comp_name" | xargs)
-        source=$(echo "$source" | xargs)
+        jira_key=$(trim "$jira_key")
+        comp_name=$(trim "$comp_name")
+        source=$(trim "$source")
 
         [ -n "$filter_key" ] && [ "$jira_key" != "$filter_key" ] && continue
 
@@ -5036,9 +4684,7 @@ print(f'DESCRIPTION_BODY={description}')
     local description_body
     description_body=$(echo "$parsed" | grep '^DESCRIPTION_BODY=' | cut -d= -f2-)
 
-    echo -e "${BOLD}========================================${NC}"
-    echo -e "${BOLD}$jira_key${NC}"
-    echo -e "${BOLD}========================================${NC}"
+    section_header "$jira_key"
     echo ""
     echo -e "${BOLD}Summary:${NC}     $summary"
     echo -e "${BOLD}Status:${NC}      $status"
@@ -5052,9 +4698,7 @@ print(f'DESCRIPTION_BODY={description}')
 
     if [ -n "$description_body" ]; then
         echo ""
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Description${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Description"
         echo ""
         if $full_mode; then
             echo "$description_body"
@@ -5077,15 +4721,13 @@ print(f'DESCRIPTION_BODY={description}')
 
     if [ -n "$db_data" ]; then
         echo ""
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Linked in ic${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Linked in ic"
         echo ""
         echo "$db_data" | while IFS='|' read -r comp src vcount scen; do
-            comp=$(echo "$comp" | xargs)
-            src=$(echo "$src" | xargs)
-            vcount=$(echo "$vcount" | xargs)
-            scen=$(echo "$scen" | xargs)
+            comp=$(trim "$comp")
+            src=$(trim "$src")
+            vcount=$(trim "$vcount")
+            scen=$(trim "$scen")
             echo -e "${BOLD}Component:${NC}   $comp"
             echo -e "${BOLD}Source:${NC}       $src"
             [ "$src" = "conforma" ] && echo -e "${BOLD}Violations:${NC}  $vcount"
@@ -5096,9 +4738,7 @@ print(f'DESCRIPTION_BODY={description}')
     # Comments
     if [ "${comment_count:-0}" != "0" ]; then
         echo ""
-        echo -e "${BOLD}========================================${NC}"
-        echo -e "${BOLD}Comments ($comment_count)${NC}"
-        echo -e "${BOLD}========================================${NC}"
+        section_header "Comments ($comment_count)"
 
         local in_comment=false
         local c_author="" c_date="" c_body=""
