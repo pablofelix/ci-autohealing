@@ -66,11 +66,17 @@ CREATE TABLE IF NOT EXISTS build_failures (
     konflux_logs_url TEXT,  -- Direct link to logs in Konflux UI
     raw_pipelinerun_yaml JSONB,  -- Full PR YAML for reference
 
+    -- Commit Context (fetched from GitHub API)
+    commit_context JSONB,  -- Commit diff, Dockerfile, .tekton/ configs, PR info
+
     -- AI Processing
     ai_analyzed BOOLEAN DEFAULT FALSE,
     ai_analysis_id INTEGER,  -- FK to ai_analysis
     ai_fix_attempted BOOLEAN DEFAULT FALSE,
     ai_fix_successful BOOLEAN,
+
+    -- Jira
+    jira_key VARCHAR(50),
 
     -- Metadata
     created_at TIMESTAMP DEFAULT NOW(),
@@ -86,6 +92,7 @@ CREATE INDEX IF NOT EXISTS idx_bf_completion_time ON build_failures(build_comple
 CREATE INDEX IF NOT EXISTS idx_bf_error_type ON build_failures(error_type);
 CREATE INDEX IF NOT EXISTS idx_bf_ai_pending ON build_failures(ai_analyzed, is_resolved)
     WHERE NOT ai_analyzed AND NOT is_resolved;
+CREATE INDEX IF NOT EXISTS idx_bf_jira ON build_failures(jira_key) WHERE jira_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_bf_created_at ON build_failures(created_at DESC);
 
 -- ============================================================================
@@ -595,11 +602,13 @@ CREATE TABLE IF NOT EXISTS conforma_results (
     last_updated_at TIMESTAMP DEFAULT NOW(),
     is_resolved BOOLEAN DEFAULT FALSE,
     resolved_at TIMESTAMP,
+    jira_key VARCHAR(50),
     UNIQUE(pipelinerun_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_conforma_app_component ON conforma_results(application, component_name);
 CREATE INDEX IF NOT EXISTS idx_conforma_unresolved ON conforma_results(application) WHERE is_resolved = FALSE;
+CREATE INDEX IF NOT EXISTS idx_conforma_jira ON conforma_results(jira_key) WHERE jira_key IS NOT NULL;
 
 -- ============================================================================
 -- GRANTS - Permissions

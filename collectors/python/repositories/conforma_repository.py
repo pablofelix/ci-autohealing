@@ -1,7 +1,7 @@
 """Repository for conforma_results table operations."""
 
 import json
-from typing import Optional, Set, Dict, Any
+from typing import Optional, Set, Dict, Any, Tuple
 
 from repositories.connection import DatabaseConnection
 
@@ -70,11 +70,24 @@ class ConformaRepository:
                 else:
                     cursor.execute(
                         """
+                        SELECT jira_key FROM conforma_results
+                        WHERE component_name = %s AND application = %s AND scenario = %s
+                          AND is_resolved = FALSE AND jira_key IS NOT NULL
+                        LIMIT 1
+                        """,
+                        (component, application, scenario)
+                    )
+                    prev = cursor.fetchone()
+                    prev_jira_key = prev[0] if prev else None
+
+                    cursor.execute(
+                        """
                         UPDATE conforma_results
                         SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
-                        WHERE component_name = %s AND application = %s AND is_resolved = FALSE
+                        WHERE component_name = %s AND application = %s AND scenario = %s
+                          AND is_resolved = FALSE
                         """,
-                        (component, application)
+                        (component, application, scenario)
                     )
 
                     cursor.execute(
@@ -84,8 +97,9 @@ class ConformaRepository:
                             pipelinerun_name, pipelinerun_uid,
                             status, violations_count, warnings_count, successes_count,
                             violation_summary, violation_details,
-                            snapshot_name, container_image, repository_url, commit_sha, commit_url
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            snapshot_name, container_image, repository_url, commit_sha, commit_url,
+                            jira_key
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (application, component, scenario,
                          pr_name, pr_uid, 'Failed',
@@ -94,36 +108,45 @@ class ConformaRepository:
                          violation_details_json,
                          comp_info.get('snapshot_name'), comp_info.get('container_image'),
                          comp_info.get('repository_url'), comp_info.get('commit_sha'),
-                         comp_info.get('commit_url'))
+                         comp_info.get('commit_url'),
+                         prev_jira_key)
                     )
                     return True
         except Exception:
             return False
 
-    def resolve_fixed_components(self, application, currently_failing):
-        # type: (str, Set[str]) -> int
-        """Mark components not in currently_failing as resolved."""
+    def resolve_fixed_components(self, application, currently_failing, all_seen):
+        # type: (str, Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int
+        """Mark (component, scenario) pairs as resolved when we observe them passing.
+
+        Only resolves pairs that were seen in the current scan AND whose latest
+        run passed. Pairs not seen at all (aged out of the KubeArchive window)
+        are left untouched — absence is not evidence of fixing.
+        """
         try:
             resolved_count = 0
             with self.db.connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT DISTINCT component_name FROM conforma_results
+                    SELECT DISTINCT component_name, scenario FROM conforma_results
                     WHERE application = %s AND is_resolved = FALSE
                     """,
                     (application,)
                 )
-                db_components = {row[0] for row in cursor.fetchall()}
+                db_pairs = {(row[0], row[1]) for row in cursor.fetchall()}
 
-                for comp in db_components - currently_failing:
+                resolvable = (db_pairs & all_seen) - currently_failing
+
+                for comp, scenario in resolvable:
                     cursor.execute(
                         """
                         UPDATE conforma_results
                         SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
-                        WHERE component_name = %s AND application = %s AND is_resolved = FALSE
+                        WHERE component_name = %s AND application = %s AND scenario = %s
+                          AND is_resolved = FALSE
                         """,
-                        (comp, application)
+                        (comp, application, scenario)
                     )
                     resolved_count += cursor.rowcount
 

@@ -12,7 +12,7 @@ import sys
 import json
 import subprocess
 import time
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 from config import CollectorConfig
 from logger import setup_logger
@@ -39,9 +39,9 @@ class ConformaViolationCollector:
         )
         self.k8s = k8s or KubernetesClient(namespace=config.k8s.namespace)
 
-    def get_failing_conforma_pipelineruns(self):
-        # type: () -> Dict[str, Dict[str, Any]]
-        """Get components whose latest Conforma PipelineRun failed."""
+    def get_conforma_pipelineruns(self):
+        # type: () -> Dict[Tuple[str, str], Dict[str, Any]]
+        """Get latest Conforma PipelineRun status per (component, scenario)."""
         label_selector = (
             'appstudio.openshift.io/application={},'
             'pipelines.appstudio.openshift.io/type=test'
@@ -53,7 +53,7 @@ class ConformaViolationCollector:
             session=self.kubearchive.session,
         )
 
-        latest_per_component = {}
+        latest_per_key = {}  # type: Dict[Tuple[str, str], Dict[str, Any]]
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
             comp = labels.get('appstudio.openshift.io/component')
@@ -75,20 +75,19 @@ class ConformaViolationCollector:
             if status == 'Unknown':
                 continue
 
-            if comp not in latest_per_component or ts > latest_per_component[comp]['timestamp']:
-                latest_per_component[comp] = {
+            key = (comp, scenario)
+            if key not in latest_per_key or ts > latest_per_key[key]['timestamp']:
+                latest_per_key[key] = {
                     'pr_name': pr.get('metadata', {}).get('name', ''),
                     'pr_uid': pr.get('metadata', {}).get('uid', ''),
+                    'component': comp,
                     'scenario': scenario,
                     'timestamp': ts,
                     'status': status,
                     'pr_data': pr
                 }
 
-        return {
-            comp: info for comp, info in latest_per_component.items()
-            if info.get('status') == 'False'
-        }
+        return latest_per_key
 
     def get_verify_taskrun(self, pr_data):
         # type: (Dict[str, Any]) -> Optional[str]
@@ -179,10 +178,10 @@ class ConformaViolationCollector:
             logger.error("DB error: %s", e)
             return False
 
-    def resolve_fixed_components(self, currently_failing):
-        # type: (Set[str],) -> int
+    def resolve_fixed_components(self, currently_failing, all_seen):
+        # type: (Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int
         return self.conforma_repo.resolve_fixed_components(
-            self.config.k8s.application_name, currently_failing
+            self.config.k8s.application_name, currently_failing, all_seen
         )
 
     def run(self):
@@ -195,16 +194,23 @@ class ConformaViolationCollector:
         logger.info("=" * 70)
 
         logger.info("Discovering failing Conforma tests...")
-        failing = self.get_failing_conforma_pipelineruns()
+        all_results = self.get_conforma_pipelineruns()
+        failing = {
+            key: info for key, info in all_results.items()
+            if info.get('status') == 'False'
+        }
+        all_seen = set(all_results.keys())
 
         if not failing:
             logger.info("No failing Conforma tests found")
-            return {'collected': 0, 'resolved': 0, 'duration': time.time() - start_time}
+            resolved = self.resolve_fixed_components(set(), all_seen) if all_seen else 0
+            return {'collected': 0, 'resolved': resolved, 'duration': time.time() - start_time}
 
-        logger.info("Found %d components with failing Conforma tests", len(failing))
+        logger.info("Found %d component/scenario pairs with failing Conforma tests", len(failing))
 
         collected = 0
-        for i, (component, info) in enumerate(sorted(failing.items()), 1):
+        for i, (key, info) in enumerate(sorted(failing.items()), 1):
+            component = info['component']
             logger.info("[%d/%d] %s", i, len(failing), component)
             logger.info("Scenario: %s", info['scenario'])
             logger.info("PipelineRun: %s", info['pr_name'])
@@ -218,7 +224,7 @@ class ConformaViolationCollector:
 
             logger.info("")
 
-        resolved = self.resolve_fixed_components(set(failing.keys()))
+        resolved = self.resolve_fixed_components(set(failing.keys()), all_seen)
         duration = time.time() - start_time
 
         logger.info("=" * 70)

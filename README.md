@@ -102,10 +102,13 @@ Old versions and deprecated files:
 ### Key Features
 
 ✅ **Multi-API Collection**: Uses 3 different APIs for maximum data coverage  
+✅ **AI Analysis**: Claude-powered root cause analysis and fix recommendations  
+✅ **Conforma Support**: Policy compliance violation tracking and analysis  
+✅ **MCP Server**: Expose data to external AI agents (Claude Desktop, GitHub Copilot, etc.)  
 ✅ **Automatic Sync**: Runs every 15 minutes via cron  
 ✅ **Status Tracking**: Distinguishes "currently failing" vs "historical failures"  
 ✅ **Comprehensive Metadata**: Commit SHA, URLs, error summaries, TaskRun details  
-✅ **API-style CLI**: Field selectors, output formats, filters  
+✅ **API-style CLI**: Field selectors, output formats, filters, AI commands  
 ✅ **100% Metadata Coverage**: Even without logs, provides diagnostic info
 │                  │    │  - Track in Langfuse         │
 └──────────────────┘    └──────────────────────────────┘

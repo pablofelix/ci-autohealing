@@ -58,6 +58,12 @@ def main():
     missing_in_db = cluster_components - db_components
     extra_in_db = db_components - cluster_components
 
+    for comp in extra_in_db:
+        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, 'sync-resolved')
+
+    for comp in retriggered:
+        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, 'retrigger-resolved')
+
     status['cluster_components'] = sorted(cluster_components)
     status['db_components'] = sorted(db_components)
     status['missing_in_db'] = sorted(missing_in_db)

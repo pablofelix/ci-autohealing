@@ -76,7 +76,8 @@ class PipelineRunSource(ABC):
 
             for step in steps_to_fetch[:5]:
                 container = self.step_container_name(step)
-                logs = self.get_pod_logs(pod_name, container=container, namespace=ns)
+                # Get complete logs (no tail limit) for AI analysis
+                logs = self.get_pod_logs(pod_name, container=container, namespace=ns, tail_lines=None)
                 if logs:
                     all_logs.append("===== TaskRun: {} / Step: {} =====\n{}".format(tr_name, step, logs))
 

@@ -84,9 +84,10 @@ class UnifiedPipelineClient:
             all_logs = []
             for pod in pods[:10]:
                 try:
+                    # Get complete logs (no --tail limit) for AI analysis
                     logs_result = subprocess.run(
                         ['oc', 'logs', pod, '-n', self.namespace,
-                         '--all-containers', '--tail=5000'],
+                         '--all-containers'],
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         universal_newlines=True, timeout=30
                     )

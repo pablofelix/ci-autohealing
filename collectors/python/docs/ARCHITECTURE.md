@@ -20,27 +20,50 @@ This Python package collects and stores CI/CD build failure data from Red Hat's 
 
 ## Architecture Layers
 
-The codebase follows a clean 4-layer architecture with clear separation of concerns:
+The codebase follows a clean 6-layer architecture with clear separation of concerns:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Entry Points (5 scripts)                           │
-│  collect_comprehensive.py, sync_component_status.py │
-│  collect_conforma.py, check_*.py                    │
-└────────────────┬────────────────────────────────────┘
-                 │
-┌────────────────▼────────────────────────────────────┐
-│  Collectors (orchestration)                         │
-│  BuildFailureCollector, ConformaViolationCollector  │
-│  StatusSynchronizer                                 │
-└────────┬───────────────────────────────┬────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  External Agents (Claude Desktop, GitHub Copilot, etc.)         │
+│  Access via MCP Protocol                                         │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ MCP (stdio)
+┌────────────────────────────▼─────────────────────────────────────┐
+│  MCP Server (FastMCP - Python 3.11+)                             │
+│  - 7 read-only tools (list_applications, get_failure, etc.)     │
+│  - Application-agnostic (each tool accepts application param)   │
+│  - Pydantic response models (validated outputs)                 │
+│  - Reuses existing repositories (no duplication)                │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────┐
+│  Entry Points (7 scripts)                                        │
+│  collect_comprehensive.py, sync_component_status.py              │
+│  collect_conforma.py, check_*.py                                 │
+│  analyze_failures.py, analyze_conforma.py                        │
+└───────────┬─────────────────────────┬────────────────────────────┘
+            │                         │
+            │                ┌────────▼────────────────┐
+            │                │  Analyzers (AI)         │
+            │                │  BuildFailureAnalyzer   │
+            │                │  ConformaAnalyzer       │
+            │                └────────┬────────────────┘
+            │                         │
+┌───────────▼─────────────────────────▼─────────────────────────────┐
+│  Collectors (orchestration)                                       │
+│  BuildFailureCollector, ConformaViolationCollector                │
+│  StatusSynchronizer                                               │
+└────────┬───────────────────────────────┬──────────────────────────┘
          │                               │
 ┌────────▼────────────┐         ┌────────▼────────────┐
 │  Clients (I/O)      │         │  Repositories (SQL) │
-│  KubeArchive        │         │  BuildFailure       │
-│  Kubernetes         │         │  Conforma           │
-│  TektonResults      │         │  SyncStatus         │
-│  UnifiedPipeline    │         └─────────────────────┘
+│  LLMProvider ABC    │         │  BuildFailure       │
+│  VertexAIProvider   │         │  AIAnalysis         │
+│  KubeArchive        │         │  Conforma           │
+│  Kubernetes         │         │  SyncStatus         │
+│  TektonResults      │         └─────────────────────┘
+│  UnifiedPipeline    │
+│  LangfuseTracker    │
 └────────┬────────────┘
          │
 ┌────────▼────────────┐
@@ -121,6 +144,137 @@ High-level workflows that coordinate clients + repositories to accomplish tasks.
 - **StatusSynchronizer** - Mark resolved failures, record successes, maintain status cache
 
 **Pattern:** Thin orchestration. Collectors delegate to clients for I/O and repositories for persistence. Business logic stays in parsers.
+
+### Layer 5: Analyzers (AI Orchestration)
+
+**Directory:** `analyzers/`
+
+AI-powered analysis workflows that use LLM providers to diagnose failures and recommend fixes. Follows the same orchestration pattern as collectors.
+
+**Analyzers:**
+- **BuildFailureAnalyzer** - Analyze build failures (code bugs, dependency issues, config errors)
+- **ConformaAnalyzer** - Analyze Conforma violations (policy compliance issues)
+
+**Pattern:** Thin orchestration delegating to:
+- **LLM Clients** (`LLMProvider` ABC) - Provider-independent interface to Claude/Gemini/etc.
+- **Repositories** (`AIAnalysisRepository`) - Store analysis results in unified `ai_analysis` table
+- **Langfuse** (`LangfuseTracker`) - Track LLM calls for observability
+
+**LLMProvider ABC:**
+```python
+class LLMProvider(ABC):
+    @abstractmethod
+    def create_message(self, system, user_content, tools=None, max_tokens=4096):
+        # type: (...) -> LLMResponse
+        # Returns LLMResponse (provider-independent dataclass)
+
+    @abstractmethod
+    def model_name(self):
+        # type: () -> str
+        # Returns model identifier for tracking
+```
+
+**Implementations:**
+- **VertexAIProvider** - Claude on Google Cloud Vertex AI (current default)
+- **AnthropicDirectProvider** - Direct Anthropic API (future)
+
+**Provider independence:** Swap providers by changing `LLM_PROVIDER` env var. Analyzers never import SDK-specific code.
+
+**Output Validation:** Uses Pydantic models (Python 3.7+) to validate LLM outputs:
+```python
+class AnalysisResult(BaseModel):
+    root_cause: str = Field(..., min_length=10)
+    failure_category: Literal['dependency_issue', 'build_error', ...]
+    confidence_score: float = Field(..., ge=0.0, le=1.0)
+    recommended_fix: str
+    recommended_files: List[str]
+    can_auto_fix: bool
+    requires_human_review: bool
+```
+
+**Example:**
+```python
+# Build failure analysis
+analyzer = BuildFailureAnalyzer(config)
+result = analyzer.run(limit=5)  # Analyze up to 5 pending failures
+# Internally: fetch failures -> build prompts -> call LLM -> validate with Pydantic -> store
+
+# Conforma violation analysis
+analyzer = ConformaAnalyzer(config)
+result = analyzer.run(limit=5, component_filter="acme-autorag-v3-4")
+# Different categories: policy_hermetic_build, policy_package_source, etc.
+```
+
+### Layer 6: MCP Server (External Agent Interface)
+
+**Directory:** `konflux-mcp-server/` (separate Python 3.11+ package)
+
+FastMCP server that exposes Konflux collectors as MCP tools for external AI agents (Claude Desktop, GitHub Copilot, Cursor, etc.). Read-only interface - no orchestration, no writes.
+
+**Architecture:** Application-agnostic, stateless tools
+- Each tool accepts `application` parameter (enables multi-version queries)
+- No `CollectorConfig` dependency (reads DB config from env vars)
+- Reuses existing repositories (no code duplication)
+- Pydantic response models (validated outputs)
+
+**7 MCP Tools:**
+1. `list_applications()` → Discover available RHOAI versions
+2. `list_alerts(application)` → Get all alerts (build + Conforma)
+3. `get_failure(component, application)` → Full build failure details
+4. `get_violation(component, application)` → Full Conforma violation details
+5. `get_analysis(component, application, type)` → AI analysis if exists
+6. `search_failures(application, category, ...)` → Search/filter failures
+7. `get_stats(application)` → Summary stats (pending, analyzed, costs)
+
+**Usage Patterns (documented in tool descriptions):**
+
+**Parallel Comparison (Read-Only - Gathering Intelligence):**
+```python
+# Compare stats across versions to prioritize work
+stats_v34 = get_stats("acme-v2-0")
+stats_v35 = get_stats("acme-v2-1-ea-1")
+# Decision: v3-4 has 6 failures, v3-5 has 22 → fix v3-4 first
+
+# Regression detection
+v34 = get_failure("odh-vllm-cpu-v3-4", "acme-v2-0")
+v35 = get_failure("odh-vllm-cpu-v3-5", "acme-v2-1-ea-1")
+# Is this a NEW failure in v3-5?
+```
+
+**Sequential Fixing (Write Operations - Taking Action):**
+```python
+# Work on ONE version at a time when creating PRs
+failures = search_failures("acme-v2-0", resolved=False)
+for failure in failures:
+    details = get_failure(failure.component, "acme-v2-0")
+    # Create PR for v3-4
+    # Complete ALL v3-4 PRs before moving to v3-5
+```
+
+**Hybrid Check (Smart Reuse):**
+```python
+# While fixing v3-4, check if v3-5 has same issue
+v35_failure = get_failure(component, "acme-v2-1-ea-1")
+if v35_failure and same_root_cause:
+    # Note: Apply same fix to v3-5 after v3-4 PR merges
+    # Don't create v3-5 PR yet (sequential fixing)
+```
+
+**Response Models (Pydantic):**
+- `ApplicationInfo` - Version metadata (name, component_count, failure_count)
+- `FailureSummary` - Brief failure info for lists
+- `BuildFailureDetails` - Full context (logs, commit diff, Dockerfile, Tekton configs)
+- `ConformaViolationDetails` - Full context (SBOM, policy rules, violation terms)
+- `AnalysisDetails` - AI analysis result with category, confidence, fix recommendation
+- `AlertsSummary` - Unified view (build failures + Conforma violations)
+- `StatsResponse` - Summary statistics (pending, analyzed, autofixable, cost)
+
+**Contrast with Python CLI:**
+- **CLI (`ic` commands):** Context-aware (set `APPLICATION_NAME` in `.env`, work in that version)
+- **MCP Server:** Context-flexible (specify `application` per query, can switch versions)
+- **Both:** Support hybrid pattern (parallel for analysis, sequential for fixing)
+
+**See:** `konflux-mcp-server/README.md` for installation, configuration, and usage examples.
 
 ---
 

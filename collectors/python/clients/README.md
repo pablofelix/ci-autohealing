@@ -380,6 +380,222 @@ def test_collector_with_mock_source():
 
 ---
 
+## LLM Provider Clients (AI Analysis)
+
+### Pattern: Provider-Independent LLM Interface
+
+Similar to how `PipelineRunSource` abstracts Tekton data sources, `LLMProvider` abstracts LLM providers (Vertex AI, Anthropic API, Gemini, etc.).
+
+**Why provider independence:**
+- Swap providers by changing config (no code changes)
+- Test analyzers with mock LLM responses
+- Future-proof against provider changes
+- Support multiple providers in same codebase
+
+### LLMProvider ABC
+
+```python
+from abc import ABC, abstractmethod
+
+class LLMProvider(ABC):
+    @abstractmethod
+    def create_message(self, system, user_content, tools=None, max_tokens=4096):
+        # type: (str, str, Optional[List[Dict]], int) -> LLMResponse
+        """Send a message to the LLM and return a structured response."""
+
+    @abstractmethod
+    def model_name(self):
+        # type: () -> str
+        """Return the model identifier for logging/tracking."""
+```
+
+**LLMResponse dataclass:**
+```python
+@dataclass(frozen=True)
+class LLMResponse:
+    content: str                  # Text response
+    tool_calls: List[Dict]        # Structured output (for tool_use)
+    model: str                    # Model identifier
+    input_tokens: int             # Token count (input)
+    output_tokens: int            # Token count (output)
+    stop_reason: str              # Why generation stopped
+```
+
+### Current Providers
+
+#### VertexAIProvider (Default)
+
+**Transport:** Claude on Vertex AI via `anthropic` SDK's `AnthropicVertex` client  
+**Strengths:**
+- Same SDK as direct Anthropic API (same tool_use, same prompts)
+- GCP Application Default Credentials (no API keys to manage)
+- Integrated with GCP billing and IAM
+
+**Authentication:**
+```bash
+gcloud auth application-default login
+```
+
+**Configuration:**
+```bash
+LLM_PROVIDER=vertex_ai
+VERTEX_PROJECT_ID=your-gcp-project-id
+VERTEX_REGION=us-east5
+LLM_MODEL=claude-sonnet-4-5-20250929
+```
+
+**Available regions:** us-east5, europe-west1, asia-southeast1
+
+**When to use:**
+- You have GCP access
+- You want to avoid managing API keys
+- You need GCP integration (billing, IAM, logging)
+
+**Limitations:**
+- Requires Claude models enabled in Vertex AI Model Garden
+- GCP account and project required
+- Regional availability may vary
+
+#### AnthropicDirectProvider (Future)
+
+**Transport:** Direct Anthropic API via `anthropic` SDK  
+**Strengths:**
+- No GCP dependency
+- All Claude models available
+- Direct access to latest features
+
+**Configuration:**
+```bash
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+LLM_MODEL=claude-sonnet-4-5-20250929
+```
+
+**When to use:**
+- You have an Anthropic API key
+- You don't use GCP
+- You need models not yet on Vertex AI
+
+### Adding a New Provider
+
+To add a new LLM provider (e.g., Gemini, Azure OpenAI):
+
+1. **Create adapter class** (`clients/gemini_provider.py`):
+   ```python
+   from clients.llm_provider import LLMProvider, LLMResponse
+   
+   class GeminiProvider(LLMProvider):
+       def create_message(self, system, user_content, tools=None, max_tokens=4096):
+           # Call Gemini SDK, map response to LLMResponse
+       
+       def model_name(self):
+           return self._model
+   ```
+
+2. **Update factory** in `clients/llm_provider.py`:
+   ```python
+   def create_llm_provider(config):
+       if config.provider == 'gemini':
+           from clients.gemini_provider import GeminiProvider
+           return GeminiProvider(...)
+   ```
+
+3. **Update config** (`config.py`):
+   Add Gemini-specific fields to `LLMConfig` if needed.
+
+4. **Document** in `.env.example` and this README.
+
+**Analyzers never change** - they only depend on `LLMProvider` ABC.
+
+### Factory Pattern
+
+```python
+from clients.llm_provider import create_llm_provider
+
+# Create provider from config
+llm = create_llm_provider(config.llm)
+
+# Call without knowing the concrete provider
+response = llm.create_message(
+    system="You are a CI troubleshooting expert",
+    user_content="Analyze this failure...",
+    tools=[ANALYSIS_TOOL],
+)
+```
+
+**Lazy imports:** Factory only imports the SDK that's configured, so you can run collectors without AI dependencies installed.
+
+### Langfuse Tracking
+
+**Module:** `langfuse_tracker.py`
+
+Wraps Langfuse SDK to track all LLM calls for observability. Records:
+- Traces per analysis run
+- Generations per LLM call
+- Token usage, cost, duration
+- Links trace IDs to database records
+
+**Graceful degradation:** If Langfuse not configured (missing `LANGFUSE_PUBLIC_KEY`), tracking is disabled but analysis still works.
+
+**Usage:**
+```python
+tracker = LangfuseTracker(enabled=True)
+
+# Create trace
+trace = tracker.create_trace(
+    name='build-failure-analysis',
+    metadata={'failure_id': 123}
+)
+
+# Record LLM generation
+tracker.record_generation(
+    trace, name='diagnose-root-cause',
+    model='claude-sonnet-4-5',
+    prompt=prompt, completion=response.content,
+    input_tokens=100, output_tokens=200,
+    duration_ms=1500
+)
+
+# Finalize
+tracker.end_trace(trace, output=analysis_result)
+tracker.flush()
+```
+
+### Testing LLM Clients
+
+**Mock the ABC:**
+```python
+from unittest.mock import MagicMock
+from clients.llm_provider import LLMProvider, LLMResponse
+
+def test_analyzer_with_mock_llm():
+    mock_llm = MagicMock(spec=LLMProvider)
+    mock_llm.create_message.return_value = LLMResponse(
+        content='',
+        tool_calls=[{
+            'name': 'record_analysis',
+            'input': {
+                'root_cause': 'Dependency conflict',
+                'failure_category': 'dependency_issue',
+                'confidence_score': 0.95,
+                'recommended_fix': 'Pin to version X',
+                'can_auto_fix': True,
+            }
+        }],
+        model='claude-sonnet-4-5',
+        input_tokens=1000,
+        output_tokens=200,
+        stop_reason='end_turn',
+    )
+    
+    analyzer = BuildFailureAnalyzer(config, llm=mock_llm)
+    result = analyzer.analyze_failure(failure_data)
+    
+    # Test analysis logic without calling real LLM
+```
+
+---
+
 ## Related Documentation
 
 - **[ARCHITECTURE.md](../docs/ARCHITECTURE.md)** - Overall system architecture

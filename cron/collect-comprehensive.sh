@@ -66,6 +66,37 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
 
     python3 collect_conforma.py 2>&1
 
+    # Step 6: Commit context collection (optional - only if GITHUB_TOKEN is set)
+    if [ -n "$GITHUB_TOKEN" ]; then
+        echo ""
+        echo "========================================================================"
+        echo "[6/7] Collecting commit context from GitHub..."
+        echo "========================================================================"
+        echo ""
+        python3.11 collect_commit_context.py 2>&1 || {
+            echo "Commit context collection failed (non-critical - continuing)"
+        }
+    else
+        echo ""
+        echo "[6/7] Skipping commit context collection (GITHUB_TOKEN not configured)"
+    fi
+
+    # Step 7: AI analysis (optional - only if LLM_PROVIDER is set)
+    # Note: Uses python3.11 for anthropic SDK compatibility (requires Python 3.7+)
+    if [ -n "$LLM_PROVIDER" ]; then
+        echo ""
+        echo "========================================================================"
+        echo "[7/7] Running AI analysis on new failures..."
+        echo "========================================================================"
+        echo ""
+        python3.11 analyze_failures.py 2>&1 || {
+            echo "AI analysis failed (non-critical - continuing)"
+        }
+    else
+        echo ""
+        echo "[7/7] Skipping AI analysis (LLM_PROVIDER not configured)"
+    fi
+
     echo ""
     echo "========================================================================"
     echo "Summary from Database"

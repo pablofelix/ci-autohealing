@@ -154,8 +154,8 @@ def _make_pr(component, scenario, timestamp, status):
 
 
 @patch('subprocess.run')
-def test_failing_pr_newer_pass_clears(mock_run, collector):
-    """Component with failure then pass should NOT appear as failing."""
+def test_newer_pass_clears_same_scenario(mock_run, collector):
+    """Component with failure then pass in same scenario should NOT appear as failing."""
     mock_run.return_value = MagicMock(returncode=1)
     prs = [
         _make_pr('comp-a', 'conforma-check', '2026-04-10T10:00:00Z', 'False'),
@@ -166,12 +166,14 @@ def test_failing_pr_newer_pass_clears(mock_run, collector):
     mock_resp.json.return_value = {'items': prs, 'metadata': {}}
     collector.kubearchive.session.get.return_value = mock_resp
 
-    result = collector.get_failing_conforma_pipelineruns()
-    assert len(result) == 0
+    all_results = collector.get_conforma_pipelineruns()
+    failing = {k: v for k, v in all_results.items() if v['status'] == 'False'}
+    assert len(failing) == 0
+    assert ('comp-a', 'conforma-check') in all_results
 
 
 @patch('subprocess.run')
-def test_failing_pr_latest_is_failure(mock_run, collector):
+def test_latest_is_failure(mock_run, collector):
     """Component whose latest run is a failure should appear."""
     mock_run.return_value = MagicMock(returncode=1)
     prs = [
@@ -183,8 +185,9 @@ def test_failing_pr_latest_is_failure(mock_run, collector):
     mock_resp.json.return_value = {'items': prs, 'metadata': {}}
     collector.kubearchive.session.get.return_value = mock_resp
 
-    result = collector.get_failing_conforma_pipelineruns()
-    assert 'comp-b' in result
+    all_results = collector.get_conforma_pipelineruns()
+    failing = {k: v for k, v in all_results.items() if v['status'] == 'False'}
+    assert ('comp-b', 'conforma-check') in failing
 
 
 @patch('subprocess.run')
@@ -200,8 +203,9 @@ def test_unknown_status_skipped(mock_run, collector):
     mock_resp.json.return_value = {'items': prs, 'metadata': {}}
     collector.kubearchive.session.get.return_value = mock_resp
 
-    result = collector.get_failing_conforma_pipelineruns()
-    assert 'comp-c' in result
+    all_results = collector.get_conforma_pipelineruns()
+    failing = {k: v for k, v in all_results.items() if v['status'] == 'False'}
+    assert ('comp-c', 'conforma-check') in failing
 
 
 @patch('subprocess.run')
@@ -225,5 +229,27 @@ def test_non_conforma_scenario_ignored(mock_run, collector):
     mock_resp.json.return_value = {'items': prs, 'metadata': {}}
     collector.kubearchive.session.get.return_value = mock_resp
 
-    result = collector.get_failing_conforma_pipelineruns()
+    result = collector.get_conforma_pipelineruns()
     assert len(result) == 0
+
+
+@patch('subprocess.run')
+def test_multiple_scenarios_independent(mock_run, collector):
+    """Two scenarios for same component are tracked independently."""
+    mock_run.return_value = MagicMock(returncode=1)
+    prs = [
+        _make_pr('comp-e', 'conforma-registry-single-component', '2026-04-10T10:00:00Z', 'False'),
+        _make_pr('comp-e', 'conforma-fbc-single-component', '2026-04-11T10:00:00Z', 'True'),
+    ]
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {'items': prs, 'metadata': {}}
+    collector.kubearchive.session.get.return_value = mock_resp
+
+    all_results = collector.get_conforma_pipelineruns()
+    failing = {k: v for k, v in all_results.items() if v['status'] == 'False'}
+
+    assert len(all_results) == 2
+    assert ('comp-e', 'conforma-registry-single-component') in failing
+    assert ('comp-e', 'conforma-fbc-single-component') not in failing
+    assert ('comp-e', 'conforma-fbc-single-component') in all_results

@@ -16,6 +16,7 @@ fi
 
 NAMESPACE="${NAMESPACE:-NAMESPACE_PLACEHOLDER}"
 APPLICATION_NAME="${APPLICATION_NAME:-acme-v2-0}"
+KUBEARCHIVE_URL="${KUBEARCHIVE_URL:-https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN}"
 export PGPASSWORD="admin"
 
 # Colors
@@ -34,6 +35,546 @@ sql() {
 
 sql_table() {
     docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -c "$1" 2>/dev/null | grep -v "Emulate Docker"
+}
+
+# Convert APPLICATION_NAME to conforma-reporter branch name
+# acme-v2-0 -> acme-3.4, acme-v2-0-ea-1 -> acme-3.4-ea.1
+app_to_reporter_branch() {
+    local version="${1#rhoai-v}"
+    version=$(echo "$version" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/')
+    version=$(echo "$version" | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
+    echo "rhoai-${version}"
+}
+
+# Convert scenario name to short label for display
+conforma_scenario_label() {
+    local scenario="$1"
+    case "$scenario" in
+        *-single-component) echo "single" ;;
+        conforma-fbc-*)     echo "fbc" ;;
+        conforma-custom-*)  echo "custom" ;;
+        *-chart-*)          echo "chart" ;;
+        csv-import)         echo "csv" ;;
+        *)                  echo "-" ;;
+    esac
+}
+
+# Jira API configuration
+JIRA_URL="${JIRA_URL:-https://JIRA_HOST}"
+JIRA_EMAIL="${JIRA_EMAIL:-user@example.com}"
+JIRA_PROJECT="${JIRA_PROJECT:-RHOAIENG}"
+JIRA_COMPONENT="${JIRA_COMPONENT:-DevOps}"
+
+jira_api() {
+    local method="$1" endpoint="$2" data="${3:-}"
+    if [ -z "${JIRA_TOKEN:-}" ]; then
+        echo -e "${RED}Error: JIRA_TOKEN not set. Export it in ~/.bashrc or .env${NC}" >&2
+        return 1
+    fi
+    if [ "$method" = "GET" ]; then
+        curl -s --max-time 15 -u "$JIRA_EMAIL:$JIRA_TOKEN" "$JIRA_URL$endpoint"
+    else
+        curl -s --max-time 15 -X "$method" -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Content-Type: application/json" -d "$data" "$JIRA_URL$endpoint"
+    fi
+}
+
+# Fetch exception/exclusion rules from conforma-reporter GitHub repo (cached daily)
+fetch_conforma_exceptions() {
+    local app="$1"
+    local branch=$(app_to_reporter_branch "$app")
+    local cache_dir="/tmp/ic-conforma-cache"
+    local cache_file="${cache_dir}/${branch}-exceptions-$(date +%Y%m%d)"
+
+    mkdir -p "$cache_dir"
+
+    if [ -f "$cache_file" ] && [ "${CONFORMA_NO_CACHE:-false}" != "true" ]; then
+        cat "$cache_file"
+        return
+    fi
+
+    local exceptions=""
+    for yaml_file in conforma-exceptions-components.yaml conforma-exclusions-components.yaml; do
+        local content
+        content=$(gh api "repos/acme-org/conforma-reporter/contents/${yaml_file}?ref=${branch}" 2>/dev/null \
+            | jq -r '.content // empty' 2>/dev/null | base64 -d 2>/dev/null)
+        if [ -n "$content" ]; then
+            local rules
+            rules=$(echo "$content" | grep '^ *- "' | sed 's/^ *- "//;s/".*//')
+            exceptions="${exceptions}${rules}"$'\n'
+        fi
+    done
+
+    echo "$exceptions" | sort -u | grep -v '^$' | tee "$cache_file"
+}
+
+# Fetch raw YAML from all 4 GitLab EnterpriseContractPolicy files (cached daily)
+# Shared by fetch_gitlab_exceptions and fetch_expiring_exceptions
+fetch_gitlab_policy_yaml() {
+    local cache_dir="/tmp/ic-conforma-cache"
+    local cache_file="${cache_dir}/gitlab-yaml-$(date +%Y%m%d)"
+
+    mkdir -p "$cache_dir"
+
+    if [ -f "$cache_file" ] && [ "${CONFORMA_NO_CACHE:-false}" != "true" ]; then
+        cat "$cache_file"
+        return
+    fi
+
+    local gitlab_api="https://GITLAB_INTERNAL_HOST/api/v4/projects/releng%2Fkonflux-release-data/repository/files"
+    local policy_files=(
+        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Fregistry-acme-prod.yaml"
+        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Ffbc-acme-prod.yaml"
+        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Fregistry-acme-stage.yaml"
+        "config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy%2Ffbc-acme-stage.yaml"
+    )
+
+    local all_yaml=""
+    for pf in "${policy_files[@]}"; do
+        local raw
+        raw=$(curl -s --max-time 10 "${gitlab_api}/${pf}/raw?ref=main" 2>/dev/null)
+        if [ -n "$raw" ]; then
+            local fname
+            fname=$(echo "$pf" | sed 's/.*%2F//')
+            all_yaml="${all_yaml}"$'\n'"# __FILE__:${fname}"$'\n'"${raw}"
+        fi
+    done
+
+    if [ -n "$all_yaml" ]; then
+        echo "$all_yaml" | tee "$cache_file"
+    fi
+}
+
+# Fetch active (non-expired) exception rule names from GitLab policy files
+# Returns newline-separated rule names (value field before ":")
+fetch_gitlab_exceptions() {
+    local cache_dir="/tmp/ic-conforma-cache"
+    local cache_file="${cache_dir}/gitlab-rules-$(date +%Y%m%d)"
+
+    mkdir -p "$cache_dir"
+
+    if [ -f "$cache_file" ] && [ "${CONFORMA_NO_CACHE:-false}" != "true" ]; then
+        cat "$cache_file"
+        return
+    fi
+
+    local all_yaml
+    all_yaml=$(fetch_gitlab_policy_yaml)
+    [ -z "$all_yaml" ] && return
+
+    python3 -c "
+import yaml, sys
+from datetime import datetime, timezone
+
+docs = list(yaml.safe_load_all(sys.stdin))
+now = datetime.now(timezone.utc)
+rules = set()
+for data in docs:
+    if not data or not isinstance(data, dict):
+        continue
+    for src in data.get('spec',{}).get('sources',[]):
+        for e in src.get('volatileConfig',{}).get('exclude',[]):
+            eu = e.get('effectiveUntil')
+            if eu:
+                exp = datetime.strptime(str(eu)[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                if exp < now:
+                    continue
+            val = e.get('value','')
+            if val:
+                rules.add(val.split(':')[0])
+for r in sorted(rules):
+    print(r)
+" <<< "$all_yaml" 2>/dev/null | tee "$cache_file"
+}
+
+# Check if a component's violations are covered by exceptions
+# Args: violation_summary, github_exceptions, gitlab_exceptions
+# Returns: YES, PARTIAL (github), PARTIAL (gitlab), NO, or UNKNOWN
+check_exception_status() {
+    local violation_summary="$1"
+    local gh_exceptions="$2"
+    local gl_exceptions="${3:-}"
+
+    # Extract rule names only from violation lines (✕ [Violation] rule.name)
+    local rules
+    rules=$(echo "$violation_summary" | grep -oP '(?<=[✕✗] \[Violation\] )[a-z_]+\.[a-z_]+' 2>/dev/null | sort -u)
+
+    [ -z "$rules" ] && echo "UNKNOWN" && return
+
+    local total=0
+    local gh_covered=0
+    local gl_covered=0
+    while IFS= read -r rule; do
+        [ -z "$rule" ] && continue
+        total=$((total + 1))
+        if [ -n "$gh_exceptions" ] && echo "$gh_exceptions" | grep -q "^${rule}"; then
+            gh_covered=$((gh_covered + 1))
+        fi
+        if [ -n "$gl_exceptions" ] && echo "$gl_exceptions" | grep -q "^${rule}"; then
+            gl_covered=$((gl_covered + 1))
+        fi
+    done <<< "$rules"
+
+    if [ "$total" -eq 0 ]; then echo "UNKNOWN"; return; fi
+
+    local gh_full=false gl_full=false
+    [ "$gh_covered" -eq "$total" ] && gh_full=true
+    [ "$gl_covered" -eq "$total" ] && gl_full=true
+
+    # Label shows where exceptions EXIST (not where the gap is)
+    if [ "$gh_full" = true ] && [ "$gl_full" = true ]; then
+        echo "YES"
+    elif [ "$gh_full" = true ] && [ "$gl_full" = false ]; then
+        echo "PARTIAL (github)"
+    elif [ "$gl_full" = true ] && [ "$gh_full" = false ]; then
+        echo "PARTIAL (gitlab)"
+    elif [ "$gh_covered" -gt 0 ] || [ "$gl_covered" -gt 0 ]; then
+        local sources=""
+        [ "$gh_covered" -gt 0 ] && sources="github"
+        [ "$gl_covered" -gt 0 ] && { [ -n "$sources" ] && sources="${sources}+gitlab" || sources="gitlab"; }
+        echo "PARTIAL (${sources})"
+    else
+        echo "NO"
+    fi
+}
+
+# Fetch expiring Conforma exceptions from GitLab konflux-release-data
+# Returns deduplicated lines: days_left|effectiveUntil|value|imageUrl|reference
+fetch_expiring_exceptions() {
+    local days_window="${1:-21}"
+    local cache_dir="/tmp/ic-conforma-cache"
+    local cache_file="${cache_dir}/gitlab-expiring-$(date +%Y%m%d)"
+
+    mkdir -p "$cache_dir"
+
+    if [ -f "$cache_file" ] && [ "${CONFORMA_NO_CACHE:-false}" != "true" ]; then
+        cat "$cache_file"
+        return
+    fi
+
+    local all_yaml
+    all_yaml=$(fetch_gitlab_policy_yaml)
+    [ -z "$all_yaml" ] && return
+
+    python3 -c "
+import yaml, sys, re
+from datetime import datetime, timezone
+
+raw = sys.stdin.read()
+lines = raw.split('\n')
+
+# Build per-file line mapping: for each line in combined text, track (filename, line_in_file)
+file_map = []
+cur_file = 'unknown.yaml'
+cur_line = 0
+for line in lines:
+    m = re.match(r'^# __FILE__:(.+)$', line)
+    if m:
+        cur_file = m.group(1)
+        cur_line = 0
+        file_map.append((cur_file, 0))
+    else:
+        cur_line += 1
+        file_map.append((cur_file, cur_line))
+
+# Find line numbers for each effectiveUntil + value + imageUrl combination
+def find_line(fname, val, eu_str, img=''):
+    in_file = False
+    for i, line in enumerate(lines):
+        if re.match(r'^# __FILE__:' + re.escape(fname) + r'$', line):
+            in_file = True
+            continue
+        if line.startswith('# __FILE__:'):
+            in_file = False
+            continue
+        if not in_file:
+            continue
+        if 'value:' in line and val[:40] in line:
+            block = '\n'.join(lines[max(0,i-2):min(len(lines),i+6)])
+            if eu_str not in block:
+                continue
+            if img and img[:40] not in block:
+                continue
+            return file_map[i][1] if i < len(file_map) else 0
+    return 0
+
+base = 'https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy'
+
+docs = list(yaml.safe_load_all(raw))
+now = datetime.now(timezone.utc)
+seen = set()
+results = []
+for data in docs:
+    if not data or not isinstance(data, dict):
+        continue
+    source = data.get('metadata',{}).get('name','unknown')
+    fname = source + '.yaml'
+    for src in data.get('spec',{}).get('sources',[]):
+        for e in src.get('volatileConfig',{}).get('exclude',[]):
+            eu = e.get('effectiveUntil')
+            if not eu:
+                continue
+            val = e.get('value','?')
+            img = e.get('imageUrl','')
+            key = (str(eu), val, img)
+            if key in seen:
+                continue
+            seen.add(key)
+            exp = datetime.strptime(str(eu)[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+            days_left = (exp - now).days
+            ln = find_line(fname, val, str(eu)[:10], img)
+            link = f'{base}/{fname}#L{ln}' if ln > 0 else f'{base}/{fname}'
+            results.append((days_left, exp.strftime('%Y-%m-%d'), val, img, e.get('reference',''), source, link))
+results.sort(key=lambda x: x[0])
+for r in results:
+    print(f'{r[0]}|{r[1]}|{r[2]}|{r[3]}|{r[4]}|{r[5]}|{r[6]}')
+" <<< "$all_yaml" 2>/dev/null | tee "$cache_file"
+}
+
+# Find the earliest expiring exception date for a component
+# Args: component_name, violation_summary, expiring_data (pipe-delimited lines from fetch_expiring_exceptions)
+# Returns: "YYYY-MM-DD (Nd)" or "-"
+find_component_expiry() {
+    local comp_name="$1"
+    local vsummary="$2"
+    local exp_data="$3"
+
+    [ -z "$exp_data" ] && echo "-" && return
+
+    # Extract violation rule names from summary
+    local rules
+    rules=$(echo "$vsummary" | grep -oP '(?<=[✕✗] \[Violation\] )[a-z_]+\.[a-z_]+' 2>/dev/null | sort -u)
+    [ -z "$rules" ] && echo "-" && return
+
+    # Derive image pattern from component name: odh-spark-operator-v3-4 -> odh-spark-operator
+    local image_stem
+    image_stem=$(echo "$comp_name" | sed 's/-v[0-9]\+.*$//')
+
+    local earliest_date=""
+    local earliest_days=999999
+
+    while IFS='|' read -r days_left eff_until value image_url reference; do
+        [ -z "$days_left" ] && continue
+        [ "$days_left" -lt 0 ] && continue
+
+        # Extract the base rule from the exception value (before any ":" detail)
+        local exc_rule="${value%%:*}"
+
+        local matched=false
+        while IFS= read -r rule; do
+            [ -z "$rule" ] && continue
+            if [ "$rule" = "$exc_rule" ]; then
+                # Rule matches — check if image also matches (or exception is global)
+                if [ -z "$image_url" ]; then
+                    matched=true
+                    break
+                elif echo "$image_url" | grep -q "$image_stem"; then
+                    matched=true
+                    break
+                fi
+            fi
+        done <<< "$rules"
+
+        if [ "$matched" = true ] && [ "$days_left" -lt "$earliest_days" ]; then
+            earliest_days=$days_left
+            earliest_date=$eff_until
+        fi
+    done <<< "$exp_data"
+
+    if [ -n "$earliest_date" ]; then
+        echo "${earliest_date} (${earliest_days}d)"
+    else
+        echo "-"
+    fi
+}
+
+# Part 1: Display AI analysis in describe commands
+display_ai_analysis() {
+    local component=$1
+    local failure_id=$2
+    local commit_author=$3
+
+    # Query for analysis of THIS specific failure (not just any failure of this component)
+    # Use REPLACE to escape | in text fields (psql uses | as field separator)
+    local query="
+        SELECT a.failure_category, ROUND(a.confidence_score * 100),
+               REPLACE(a.root_cause, '|', '¦'),
+               REPLACE(a.recommended_fix, '|', '¦'),
+               REPLACE(COALESCE(array_to_string(a.recommended_files, ', '), ''), '|', '¦'),
+               a.can_auto_fix, a.requires_human_review,
+               TO_CHAR(a.analyzed_at, 'YYYY-MM-DD HH24:MI:SS'),
+               COALESCE(a.langfuse_trace_url, ''),
+               COALESCE(EXTRACT(DAY FROM (NOW() - a.analyzed_at))::int::text, '0')
+        FROM ai_analysis a
+        WHERE a.build_failure_id = '$failure_id'
+        ORDER BY a.analyzed_at DESC
+        LIMIT 1
+    "
+
+    local analysis=$(sql "$query" 2>/dev/null)
+
+    if [ -n "$analysis" ]; then
+        # Parse multi-line SQL output: preserve paragraph breaks, collapse other newlines
+        # Step 1: awk paragraph mode — joins lines within paragraphs with spaces, marks paragraph breaks with ¶
+        # Step 2: IFS='|' splits fields
+        # Step 3: sed restores ¶ → actual blank lines in text fields
+        local analysis_temp=$(echo "$analysis" | awk 'BEGIN{RS=""; ORS="¶"} {gsub(/\n/," "); print}' | sed 's/¶$//')
+        IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
+            can_auto_fix requires_review analyzed_at trace_url days_old <<< "$analysis_temp"
+        # Restore paragraph breaks in text fields
+        root_cause=$(echo "$root_cause" | sed $'s/¶/\\\n\\\n/g')
+        recommended_fix=$(echo "$recommended_fix" | sed $'s/¶/\\\n\\\n/g')
+
+        # Trim whitespace
+        category=$(echo "$category" | xargs 2>/dev/null || echo "")
+        confidence=$(echo "$confidence" | xargs 2>/dev/null || echo "")
+        can_auto_fix=$(echo "$can_auto_fix" | xargs 2>/dev/null || echo "")
+        requires_review=$(echo "$requires_review" | xargs 2>/dev/null || echo "")
+        days_old=$(echo "$days_old" | xargs 2>/dev/null || echo "0")
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}AI Analysis${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        printf "Category:       %s\n" "$category"
+        printf "Confidence:     %s%%\n" "$confidence"
+
+        # Show commit author if available (for asking questions when confidence is low)
+        if [ -n "$commit_author" ] && [ "$commit_author" != "" ]; then
+            printf "Commit Author:  %s\n" "$commit_author"
+        fi
+
+        echo ""
+        echo "Root Cause:"
+        echo "$root_cause" | sed 's/^/  /'
+        echo ""
+        echo "Recommended Fix:"
+        echo "$recommended_fix" | sed 's/^/  /'
+
+        if [ -n "$recommended_files" ] && [ "$recommended_files" != "" ]; then
+            echo ""
+            echo "Files to modify:"
+            echo "$recommended_files" | sed 's/^/  /'
+        fi
+
+        echo ""
+        printf "Can Auto-Fix:   %s\n" "$([ "$can_auto_fix" = "t" ] && echo "YES" || echo "NO")"
+        printf "Requires Review: %s\n" "$([ "$requires_review" = "t" ] && echo "YES" || echo "NO")"
+        printf "Analyzed:       %s\n" "$analyzed_at"
+
+        # Suggest contacting commit author if confidence is low
+        if [ "${confidence:-0}" -lt 60 ] 2>/dev/null && [ -n "$commit_author" ]; then
+            echo ""
+            echo -e "${YELLOW}⚠ Low confidence (${confidence}%) - consider asking ${commit_author} about their changes${NC}"
+        fi
+
+        if [ "${days_old:-0}" -gt 7 ] 2>/dev/null; then
+            echo ""
+            echo -e "${YELLOW}[!] Analysis is $days_old days old (may be outdated)${NC}"
+            echo -e "${YELLOW}[!] Re-analyze: ic ai analyze component $component${NC}"
+        fi
+
+        if [ -n "$trace_url" ] && [ "$trace_url" != "" ]; then
+            echo ""
+            echo -e "Trace: ${CYAN}$trace_url${NC}"
+        fi
+
+        echo ""
+        echo -e "${CYAN}[!] Export to Jira: ic export component $component jira${NC}"
+        echo ""
+    else
+        echo -e "${YELLOW}[!] AI analysis not available${NC}"
+        echo -e "${CYAN}[!] Run: ic ai analyze component $component${NC}"
+        echo ""
+    fi
+}
+
+display_conforma_ai_analysis() {
+    local component=$1
+    local conforma_id=$2
+
+    # Query for analysis of THIS specific Conforma violation
+    # Use REPLACE to escape | in text fields (psql uses | as field separator)
+    local query="
+        SELECT a.failure_category, ROUND(a.confidence_score * 100),
+               REPLACE(a.root_cause, '|', '¦'),
+               REPLACE(a.recommended_fix, '|', '¦'),
+               REPLACE(COALESCE(array_to_string(a.recommended_files, ', '), ''), '|', '¦'),
+               a.can_auto_fix, a.requires_human_review,
+               TO_CHAR(a.analyzed_at, 'YYYY-MM-DD HH24:MI:SS'),
+               COALESCE(a.langfuse_trace_url, ''),
+               COALESCE(EXTRACT(DAY FROM (NOW() - a.analyzed_at))::int::text, '0')
+        FROM ai_analysis a
+        WHERE a.conforma_result_id = '$conforma_id'
+        ORDER BY a.analyzed_at DESC
+        LIMIT 1
+    "
+
+    local analysis=$(sql "$query" 2>/dev/null)
+
+    if [ -n "$analysis" ]; then
+        # Parse multi-line SQL output: preserve paragraph breaks, collapse other newlines
+        # Step 1: awk paragraph mode — joins lines within paragraphs with spaces, marks paragraph breaks with ¶
+        # Step 2: IFS='|' splits fields
+        # Step 3: sed restores ¶ → actual blank lines in text fields
+        local analysis_temp=$(echo "$analysis" | awk 'BEGIN{RS=""; ORS="¶"} {gsub(/\n/," "); print}' | sed 's/¶$//')
+        IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
+            can_auto_fix requires_review analyzed_at trace_url days_old <<< "$analysis_temp"
+        # Restore paragraph breaks in text fields
+        root_cause=$(echo "$root_cause" | sed $'s/¶/\\\n\\\n/g')
+        recommended_fix=$(echo "$recommended_fix" | sed $'s/¶/\\\n\\\n/g')
+
+        # Trim whitespace
+        category=$(echo "$category" | xargs 2>/dev/null || echo "")
+        confidence=$(echo "$confidence" | xargs 2>/dev/null || echo "")
+        can_auto_fix=$(echo "$can_auto_fix" | xargs 2>/dev/null || echo "")
+        requires_review=$(echo "$requires_review" | xargs 2>/dev/null || echo "")
+        days_old=$(echo "$days_old" | xargs 2>/dev/null || echo "0")
+
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}AI Analysis${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        printf "Category:       %s\n" "$category"
+        printf "Confidence:     %s%%\n" "$confidence"
+
+        echo ""
+        echo "Root Cause:"
+        echo "$root_cause" | sed 's/^/  /'
+        echo ""
+        echo "Recommended Fix:"
+        echo "$recommended_fix" | sed 's/^/  /'
+
+        if [ -n "$recommended_files" ] && [ "$recommended_files" != "" ]; then
+            echo ""
+            echo "Files to modify:"
+            echo "$recommended_files" | sed 's/^/  /'
+        fi
+
+        echo ""
+        printf "Can Auto-Fix:   %s\n" "$([ "$can_auto_fix" = "t" ] && echo "YES" || echo "NO")"
+        printf "Requires Review: %s\n" "$([ "$requires_review" = "t" ] && echo "YES" || echo "NO")"
+        printf "Analyzed:       %s\n" "$analyzed_at"
+
+        if [ "${days_old:-0}" -gt 7 ] 2>/dev/null; then
+            echo ""
+            echo -e "${YELLOW}[!] Analysis is $days_old days old (may be outdated)${NC}"
+            echo -e "${YELLOW}[!] Re-analyze: ic ai analyze conforma $component${NC}"
+        fi
+
+        if [ -n "$trace_url" ] && [ "$trace_url" != "" ]; then
+            echo ""
+            echo -e "Trace: ${CYAN}$trace_url${NC}"
+        fi
+
+        echo ""
+        echo -e "${CYAN}[!] Export to Jira: ic export conforma $component jira${NC}"
+        echo ""
+    else
+        echo -e "${YELLOW}[!] AI analysis not available${NC}"
+        echo -e "${CYAN}[!] Run: ic ai analyze conforma $component${NC}"
+        echo ""
+    fi
 }
 
 # Extract error context from logs
@@ -147,6 +688,10 @@ ${BOLD}COMMANDS:${NC}
     ic get alerts --date <date>              Alerts on a specific date
     ic get alerts --from <date> --to <date>  Changes between two dates
     ic get conforma                          Conforma test failures
+    ic conforma report [version...]            Daily Conforma violations report
+    ic conforma report 3.4                    Report for v3.4 only
+    ic conforma report 3.4 3.5-ea-1           Report for specific versions
+    ic conforma report --summary              Summary only (no per-component detail)
     ic get pipelineruns [--limit N]          List all PipelineRun failures
     ic get pipelinerun <name>                Get PipelineRun details
     ic get pr <name>                         Alias for pipelinerun
@@ -182,6 +727,18 @@ ${BOLD}COMMANDS:${NC}
     ic why <component>                       Why is this component failing?
     ic analyze <component>                   Deep failure analysis
     ic errors <component>                    Extract error messages
+
+  ${CYAN}AI Analysis:${NC}
+    ic ai analyze <num|component>            Analyze failure with AI
+    ic ai analyze --all                      Analyze all pending failures
+    ic ai status                             Show AI analysis summary
+    ic ai stats                              Detailed AI statistics
+
+  ${CYAN}Export to Tickets:${NC}
+    ic export <num|component> jira           Export to Jira format
+    ic export <num|component> markdown       Export to Markdown (GitHub)
+    ic export <num|component> json           Export to JSON
+    ic export <num|component> --clipboard    Copy to clipboard
 
   ${CYAN}Component Status:${NC}
     ic working                               Components currently working (last build = success)
@@ -634,16 +1191,19 @@ cmd_describe_component() {
     echo "  Latest Failure: $latest_failure"
     echo ""
 
-    # Get latest PipelineRun
+    # Get latest PipelineRun (including build_failure id for AI analysis matching)
+    # Replace newlines in text fields to prevent IFS parsing issues
     local pr_data=$(sql "
-        SELECT pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
+        SELECT id, pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
                CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
                COALESCE(konflux_logs_url, konflux_url),
                COALESCE(commit_sha, ''), COALESCE(commit_url, ''),
-               COALESCE(commit_author, ''), COALESCE(LEFT(commit_message, 120), ''),
+               COALESCE(commit_author, ''),
+               COALESCE(REPLACE(REPLACE(LEFT(commit_message, 120), E'\n', ' '), E'\r', ''), ''),
                COALESCE(failed_step_name, ''), COALESCE(error_type, ''),
-               COALESCE(LEFT(error_message, 200), ''),
-               COALESCE(build_duration_seconds::text, '')
+               COALESCE(REPLACE(REPLACE(LEFT(error_message, 200), E'\n', ' '), E'\r', ''), ''),
+               COALESCE(build_duration_seconds::text, ''),
+               COALESCE(jira_key, '')
         FROM build_failures
         WHERE component_name = '$component'
         ORDER BY first_detected_at DESC
@@ -651,9 +1211,9 @@ cmd_describe_component() {
     ")
 
     if [ -n "$pr_data" ]; then
-        IFS='|' read -r pr_name pr_uid status repo_url branch has_logs konflux_url \
+        IFS='|' read -r failure_id pr_name pr_uid status repo_url branch has_logs konflux_url \
             commit_sha commit_url commit_author commit_message \
-            failed_step error_type error_message build_duration <<< "$pr_data"
+            failed_step error_type error_message build_duration bf_jira_key <<< "$pr_data"
 
         echo -e "${BOLD}========================================${NC}"
         echo -e "${BOLD}Latest PipelineRun${NC}"
@@ -667,6 +1227,13 @@ cmd_describe_component() {
         esac
         echo -e "${BOLD}Repository:${NC} $repo_url"
         echo -e "${BOLD}Branch:${NC} $branch"
+
+        bf_jira_key=$(echo "${bf_jira_key:-}" | xargs 2>/dev/null || echo "")
+        if [ -n "$bf_jira_key" ]; then
+            echo -e "${BOLD}JIRA:${NC}        ${CYAN}${bf_jira_key}${NC} (${JIRA_URL}/browse/${bf_jira_key})"
+        else
+            echo -e "${BOLD}JIRA:${NC}        -"
+        fi
 
         commit_sha=$(echo "$commit_sha" | xargs 2>/dev/null || echo "")
         commit_url=$(echo "$commit_url" | xargs 2>/dev/null || echo "")
@@ -689,6 +1256,38 @@ cmd_describe_component() {
             [ -n "$error_type" ] && echo -e "  Error Type:  $error_type"
             [ -n "$error_message" ] && echo -e "  Error:       $error_message"
             [ -n "$build_duration" ] && echo -e "  Duration:    ${build_duration}s"
+
+            # If CONTEXT parameter error, extract Tekton config details
+            if [[ "$error_message" =~ "CONTEXT parameter" ]]; then
+                # Extract path-context using Python for proper YAML parsing
+                local context_value=$(docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -tAc "
+                    SELECT commit_context->'tekton_configs'->'${component}-push.yaml'
+                    FROM build_failures
+                    WHERE component_name = '$component' AND is_resolved = FALSE
+                    ORDER BY first_detected_at DESC LIMIT 1
+                " 2>/dev/null | python3 -c "
+import sys, yaml, json
+try:
+    data = json.load(sys.stdin)
+    if data:
+        config = yaml.safe_load(data)
+        for param in config.get('spec', {}).get('params', []):
+            if param.get('name') == 'path-context':
+                print(param.get('value', ''))
+                break
+except: pass
+" 2>/dev/null)
+
+                if [ -n "$context_value" ]; then
+                    echo ""
+                    echo -e "  ${YELLOW}Tekton Config:${NC}"
+                    echo -e "    path-context: ${RED}$context_value${NC}"
+                    if [[ "$context_value" =~ ^\. ]]; then
+                        echo -e "    ${YELLOW}⚠ Leading './' can cause buildah to reject the path${NC}"
+                        echo -e "    ${CYAN}→ Fix: Remove './' prefix → ${context_value#./}${NC}"
+                    fi
+                fi
+            fi
         fi
 
         echo ""
@@ -743,6 +1342,9 @@ cmd_describe_component() {
             echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
             echo ""
         fi
+
+        # Display AI analysis if available (matching this specific failure)
+        display_ai_analysis "$component" "$failure_id" "$commit_author"
     fi
 }
 
@@ -1502,6 +2104,993 @@ cmd_errors() {
     echo ""
 }
 
+# Part 2: AI commands
+cmd_ai() {
+    case "${1:-}" in
+        analyze)
+            shift
+            cmd_ai_analyze "$@"
+            ;;
+        status)
+            cmd_ai_status
+            ;;
+        stats)
+            cmd_ai_stats
+            ;;
+        *)
+            echo -e "${BOLD}IC AI - AI Analysis Commands${NC}"
+            echo ""
+            echo "Usage: ic ai {analyze|status|stats}"
+            echo ""
+            echo "Commands:"
+            echo "  analyze <num|component>  Analyze a specific failure"
+            echo "  analyze --all            Analyze all pending failures"
+            echo "  status                   Show analysis summary"
+            echo "  stats                    Show detailed statistics"
+            echo ""
+            echo "Examples:"
+            echo "  ic ai analyze 1                         # Analyze alert #1"
+            echo "  ic ai analyze component acme-automl-v3-4 # Analyze specific component"
+            echo "  ic ai analyze --all                     # Analyze all pending"
+            echo "  ic ai status                            # Show summary"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_ai_analyze() {
+    local target=""
+    local force=false
+    local component=""
+    local analysis_type=""  # "build", "conforma", or "" (auto-detect)
+
+    # Parse arguments - first arg is either number, "component", "conforma", or "--all"
+    if [ $# -eq 0 ]; then
+        echo -e "${RED}Error: Missing argument${NC}"
+        echo "Usage: ic ai analyze <num|component> [--force]"
+        echo "       ic ai analyze conforma <component> [--force]"
+        echo "       ic ai analyze --all"
+        exit 1
+    fi
+
+    # Parse first argument
+    if [ "$1" = "--all" ]; then
+        target="all"
+        shift
+    elif [ "$1" = "conforma" ]; then
+        analysis_type="conforma"
+        shift
+        component="$1"
+        shift
+    elif [ "$1" = "component" ]; then
+        shift
+        component="$1"
+        shift
+    elif [[ "$1" =~ ^[0-9]+$ ]]; then
+        target="$1"
+        shift
+    else
+        component="$1"
+        shift
+    fi
+
+    # Parse remaining flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force)
+                force=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Check if LLM is configured
+    if [ -z "$LLM_PROVIDER" ] && [ -z "$ANTHROPIC_VERTEX_PROJECT_ID" ]; then
+        echo -e "${RED}Error: LLM not configured${NC}"
+        echo ""
+        echo "Set LLM provider in .env or environment:"
+        echo "  export LLM_PROVIDER=vertex_ai"
+        echo "  export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id"
+        echo "  export CLOUD_ML_REGION=us-east5"
+        echo ""
+        echo "Or for direct Anthropic API:"
+        echo "  export LLM_PROVIDER=anthropic"
+        echo "  export ANTHROPIC_API_KEY=sk-ant-..."
+        exit 1
+    fi
+
+    cd "$SCRIPT_DIR/collectors/python" || exit 1
+
+    if [ "$target" = "all" ]; then
+        echo -e "${CYAN}Analyzing all pending failures and violations...${NC}"
+        echo ""
+
+        # Analyze build failures
+        echo -e "${BOLD}Build Failures:${NC}"
+        python3.11 analyze_failures.py
+        local build_result=$?
+
+        echo ""
+
+        # Analyze Conforma violations
+        echo -e "${BOLD}Conforma Violations:${NC}"
+        python3.11 analyze_conforma.py
+        local conforma_result=$?
+
+        # Return success if either succeeded
+        if [ "$build_result" -eq 0 ] || [ "$conforma_result" -eq 0 ]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    # Resolve component name and type from alert number if needed
+    if [ -z "$component" ] && [ -n "$target" ]; then
+        # Count build failures first
+        local build_count=$(sql "
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (component_name) component_name
+                FROM build_failures
+                WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+                ORDER BY component_name, first_detected_at DESC
+            ) sub;
+        " 2>/dev/null)
+        build_count=${build_count:-0}
+
+        # If number falls in build failures range
+        if [ "$target" -le "$build_count" ]; then
+            analysis_type="build"
+            local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
+            component=$(sql "
+                WITH latest_builds AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, status, is_resolved, first_detected_at,
+                        (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
+                    FROM build_failures
+                    WHERE application = '$APPLICATION_NAME'
+                    ORDER BY component_name, first_detected_at DESC
+                ),
+                failing AS (
+                    SELECT component_name, total_failures,
+                        CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
+                            THEN 2 ELSE 1
+                        END as sort_group
+                    FROM latest_builds
+                    WHERE status = 'Failed' AND is_resolved = FALSE
+                )
+                SELECT component_name FROM failing
+                ORDER BY sort_group, total_failures DESC
+                OFFSET $((target - 1))
+                LIMIT 1;
+            ")
+        else
+            # Falls in Conforma range
+            analysis_type="conforma"
+            local conforma_offset=$((target - build_count - 1))
+            component=$(sql "
+                SELECT component_name FROM (
+                    SELECT DISTINCT ON (component_name) component_name
+                    FROM conforma_results
+                    WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+                    ORDER BY component_name, last_updated_at DESC
+                ) sub
+                ORDER BY component_name
+                OFFSET $conforma_offset
+                LIMIT 1;
+            " 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component not found${NC}"
+        exit 1
+    fi
+
+    # Auto-detect type if not already set
+    if [ -z "$analysis_type" ]; then
+        local has_build=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+        local has_conforma=$(sql "SELECT COUNT(*) FROM conforma_results WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+
+        if [ "${has_build:-0}" -gt 0 ]; then
+            analysis_type="build"
+        elif [ "${has_conforma:-0}" -gt 0 ]; then
+            analysis_type="conforma"
+        else
+            echo -e "${RED}Error: No unresolved failures found for component: $component${NC}"
+            exit 1
+        fi
+    fi
+
+    # Check if already analyzed (based on type)
+    if [ "$force" = false ]; then
+        local exists=0
+        if [ "$analysis_type" = "build" ]; then
+            exists=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.component_name = '$component' AND b.is_resolved = FALSE AND b.application = '$APPLICATION_NAME';" 2>/dev/null)
+        else
+            exists=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.component_name = '$component' AND c.is_resolved = FALSE AND c.application = '$APPLICATION_NAME';" 2>/dev/null)
+        fi
+
+        if [ "${exists:-0}" -gt 0 ]; then
+            echo -e "${YELLOW}Component $component already analyzed${NC}"
+            echo ""
+            echo "Use --force to re-analyze:"
+            if [ "$analysis_type" = "build" ]; then
+                echo "  ic ai analyze component $component --force"
+            else
+                echo "  ic ai analyze conforma $component --force"
+            fi
+            echo ""
+            echo "Or view existing analysis:"
+            if [ "$analysis_type" = "build" ]; then
+                echo "  ic describe component $component"
+            else
+                echo "  ic describe conforma $component"
+            fi
+            exit 0
+        fi
+    fi
+
+    # Run appropriate analyzer
+    if [ "$analysis_type" = "build" ]; then
+        echo -e "${CYAN}Analyzing build failure: $component${NC}"
+        echo ""
+        python3.11 analyze_failures.py --component "$component"
+    else
+        echo -e "${CYAN}Analyzing Conforma violation: $component${NC}"
+        echo ""
+        python3.11 analyze_conforma.py --component "$component"
+    fi
+}
+
+cmd_ai_status() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}AI Analysis Status${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Build failures stats
+    local build_pending=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local build_analyzed=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+    local build_autofixable=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+
+    # Conforma violations stats
+    local conforma_pending=$(sql "SELECT COUNT(*) FROM conforma_results WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND violation_summary IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local conforma_analyzed=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '$APPLICATION_NAME' AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+    local conforma_autofixable=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '$APPLICATION_NAME' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+
+    # Total cost (both types)
+    local total_cost=$(sql "
+        SELECT COALESCE(SUM(a.cost_usd), 0)
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+
+    echo -e "${BOLD}Build Failures:${NC}"
+    printf "  Pending:      %s failures awaiting analysis\n" "${build_pending:-0}"
+    printf "  Analyzed:     %s failures (last 30 days)\n" "${build_analyzed:-0}"
+
+    if [ "${build_analyzed:-0}" -gt 0 ]; then
+        local build_pct=$((build_autofixable * 100 / build_analyzed))
+        printf "  Auto-fixable: %s failures (%s%%)\n" "${build_autofixable:-0}" "$build_pct"
+    else
+        printf "  Auto-fixable: 0 failures\n"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Conforma Violations:${NC}"
+    printf "  Pending:      %s violations awaiting analysis\n" "${conforma_pending:-0}"
+    printf "  Analyzed:     %s violations (last 30 days)\n" "${conforma_analyzed:-0}"
+
+    if [ "${conforma_analyzed:-0}" -gt 0 ]; then
+        local conforma_pct=$((conforma_autofixable * 100 / conforma_analyzed))
+        printf "  Auto-fixable: %s violations (%s%%)\n" "${conforma_autofixable:-0}" "$conforma_pct"
+    else
+        printf "  Auto-fixable: 0 violations\n"
+    fi
+
+    echo ""
+    printf "${BOLD}Total cost:${NC}   \$%.2f (last 30 days)\n" "${total_cost:-0}"
+    echo ""
+
+    # Show recent analyses (both types)
+    local recent_count=$(sql "
+        SELECT COUNT(*)
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '7 days';" 2>/dev/null)
+
+    if [ "${recent_count:-0}" -gt 0 ]; then
+        echo -e "${BOLD}Recent analyses (last 7 days):${NC}"
+        sql_table "
+            SELECT
+                ROW_NUMBER() OVER (ORDER BY a.analyzed_at DESC) as \"#\",
+                COALESCE(b.component_name, c.component_name) as \"Component\",
+                CASE
+                    WHEN a.build_failure_id IS NOT NULL THEN 'Build'
+                    ELSE 'Conforma'
+                END as \"Type\",
+                a.failure_category as \"Category\",
+                ROUND(a.confidence_score * 100) || '%' as \"Confidence\",
+                CASE WHEN a.can_auto_fix THEN '✓' ELSE '✗' END as \"Fixable\"
+            FROM ai_analysis a
+            LEFT JOIN build_failures b ON a.build_failure_id = b.id
+            LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+            WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+              AND a.analyzed_at > NOW() - INTERVAL '7 days'
+            ORDER BY a.analyzed_at DESC
+            LIMIT 10;
+        "
+        echo ""
+    fi
+
+    local total_pending=$((build_pending + conforma_pending))
+    if [ "$total_pending" -gt 0 ]; then
+        echo -e "${CYAN}Run 'ic ai analyze --all' to analyze pending failures and violations${NC}"
+    else
+        echo -e "${GREEN}✓ No pending failures or violations to analyze${NC}"
+    fi
+    echo ""
+}
+
+cmd_ai_stats() {
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}AI Analysis Statistics${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # By category and type
+    echo -e "${BOLD}Analyses by Category (last 30 days):${NC}"
+    sql_table "
+        SELECT
+            CASE
+                WHEN a.build_failure_id IS NOT NULL THEN 'Build'
+                ELSE 'Conforma'
+            END as \"Type\",
+            a.failure_category as \"Category\",
+            COUNT(*) as \"Count\",
+            ROUND(AVG(a.confidence_score * 100)) || '%' as \"Avg Confidence\",
+            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as \"Auto-fixable\"
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '30 days'
+        GROUP BY
+            CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END,
+            a.failure_category
+        ORDER BY COUNT(*) DESC;
+    "
+    echo ""
+
+    # By date
+    echo -e "${BOLD}Analyses by Date (last 7 days):${NC}"
+    sql_table "
+        SELECT
+            DATE(a.analyzed_at) as \"Date\",
+            COUNT(*) as \"Analyzed\",
+            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as \"Auto-fixable\",
+            COALESCE(SUM(a.cost_usd), 0)::numeric(10,2) as \"Cost USD\"
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '7 days'
+        GROUP BY DATE(a.analyzed_at)
+        ORDER BY DATE(a.analyzed_at) DESC;
+    "
+    echo ""
+
+    # Token usage (both types)
+    local total_tokens=$(sql "
+        SELECT COALESCE(SUM(a.tokens_used), 0)
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+    local avg_tokens=$(sql "
+        SELECT COALESCE(AVG(a.tokens_used), 0)::int
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '$APPLICATION_NAME' OR c.application = '$APPLICATION_NAME')
+          AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+
+    echo -e "${BOLD}Token Usage (last 30 days):${NC}"
+    printf "  Total tokens: %s\n" "${total_tokens:-0}"
+    printf "  Avg per analysis: %s tokens\n" "${avg_tokens:-0}"
+    echo ""
+}
+
+# Part 3: Export commands
+calculate_priority() {
+    local occurrence_count=$1
+    local days_failing=$2
+    local confidence=$3
+    local can_auto_fix=$4
+
+    if [ "${occurrence_count:-0}" -gt 10 ] 2>/dev/null || [ "${days_failing:-0}" -gt 7 ] 2>/dev/null; then
+        echo "P1"
+    elif [ "$can_auto_fix" = "t" ] && [ "$(echo "$confidence >= 0.9" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+        echo "P2"
+    else
+        echo "P3"
+    fi
+}
+
+calculate_risk() {
+    local requires_review=$1
+    local can_auto_fix=$2
+    local confidence=$3
+
+    if [ "$requires_review" = "t" ]; then
+        echo "HIGH"
+    elif [ "$can_auto_fix" = "f" ]; then
+        echo "MEDIUM"
+    elif [ "$(echo "$confidence < 0.7" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+        echo "MEDIUM"
+    else
+        echo "LOW"
+    fi
+}
+
+estimate_fix_time() {
+    local category=$1
+    case "$category" in
+        dependency_issue) echo "5-15 min" ;;
+        config_error) echo "10-20 min" ;;
+        build_error) echo "20-45 min" ;;
+        test_failure) echo "30-60 min" ;;
+        resource_limit) echo "15-30 min" ;;
+        infrastructure) echo "1-2 hours" ;;
+        *) echo "30-60 min" ;;
+    esac
+}
+
+cmd_export() {
+    local target="$1"
+    local export_type=""  # "build", "conforma", or "" (auto-detect)
+
+    # Handle "component <name>" and "conforma <name>" syntax
+    if [ "$target" = "component" ]; then
+        export_type="build"
+        target="$2"
+        shift
+    elif [ "$target" = "conforma" ]; then
+        export_type="conforma"
+        target="$2"
+        shift
+    fi
+    local format="$2"
+    shift 2
+
+    case "$format" in
+        jira)
+            export_jira "$target" "$export_type" "$@"
+            ;;
+        markdown)
+            export_markdown "$target" "$export_type" "$@"
+            ;;
+        json)
+            export_json "$target" "$export_type" "$@"
+            ;;
+        slack)
+            export_slack "$target" "$export_type" "$@"
+            ;;
+        *)
+            echo -e "${BOLD}IC Export - Export AI Analysis to Ticket Formats${NC}"
+            echo ""
+            echo "Usage: ic export <num|component> {jira|markdown|json|slack} [--clipboard]"
+            echo "       ic export conforma <component> {jira|markdown|json|slack} [--clipboard]"
+            echo ""
+            echo "Formats:"
+            echo "  jira       Jira markup format"
+            echo "  markdown   GitHub Issues / Markdown"
+            echo "  json       JSON for automation"
+            echo "  slack      Slack message format"
+            echo ""
+            echo "Options:"
+            echo "  --clipboard  Copy to clipboard (macOS: pbcopy, Linux: xclip)"
+            echo ""
+            echo "Examples:"
+            echo "  ic export 1 jira                        # Print Jira ticket"
+            echo "  ic export 1 jira --clipboard            # Copy to clipboard"
+            echo "  ic export component acme-automl-v3-4 markdown"
+            echo "  ic export conforma acme-autorag-v3-4 jira"
+            exit 1
+            ;;
+    esac
+}
+
+export_jira() {
+    local target="$1"
+    local export_type="$2"  # "build", "conforma", or "" (auto-detect)
+    local clipboard=false
+
+    # Check if second/third arg is --clipboard
+    if [ "$2" = "--clipboard" ] || [ "$3" = "--clipboard" ]; then
+        clipboard=true
+    fi
+
+    # Get component name and detect type
+    local component=""
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        # Number - resolve to component and detect type (same logic as cmd_describe_by_number)
+        local build_count=$(sql "
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (component_name) component_name
+                FROM build_failures
+                WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+                ORDER BY component_name, first_detected_at DESC
+            ) sub;
+        " 2>/dev/null)
+        build_count=${build_count:-0}
+
+        # If number falls in build failures range
+        if [ "$target" -le "$build_count" ]; then
+            export_type="build"
+            local retriggered_json=$(sql "SELECT COALESCE(retriggered_components::text, '[]') FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null)
+            component=$(sql "
+                WITH latest_builds AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, status, is_resolved, first_detected_at,
+                        (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
+                    FROM build_failures
+                    WHERE application = '$APPLICATION_NAME'
+                    ORDER BY component_name, first_detected_at DESC
+                ),
+                failing AS (
+                    SELECT component_name, total_failures,
+                        CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}")'))
+                            THEN 2 ELSE 1
+                        END as sort_group
+                    FROM latest_builds
+                    WHERE status = 'Failed' AND is_resolved = FALSE
+                )
+                SELECT component_name FROM failing
+                ORDER BY sort_group, total_failures DESC
+                OFFSET $((target - 1))
+                LIMIT 1;
+            ")
+        else
+            # Falls in Conforma range
+            export_type="conforma"
+            local conforma_offset=$((target - build_count - 1))
+            component=$(sql "
+                WITH latest_conforma AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, violations_count
+                    FROM conforma_results
+                    WHERE application = '$APPLICATION_NAME'
+                      AND is_resolved = FALSE
+                    ORDER BY component_name, last_updated_at DESC
+                )
+                SELECT component_name FROM latest_conforma
+                ORDER BY violations_count DESC
+                OFFSET $conforma_offset
+                LIMIT 1;
+            " 2>/dev/null)
+        fi
+    else
+        component="$target"
+    fi
+
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component not found${NC}"
+        exit 1
+    fi
+
+    # Auto-detect type if not already set
+    if [ -z "$export_type" ]; then
+        local has_build=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+        local has_conforma=$(sql "SELECT COUNT(*) FROM conforma_results WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+
+        if [ "${has_build:-0}" -gt 0 ]; then
+            export_type="build"
+        elif [ "${has_conforma:-0}" -gt 0 ]; then
+            export_type="conforma"
+        else
+            echo -e "${RED}Error: No unresolved failures found for component: $component${NC}"
+            exit 1
+        fi
+    fi
+
+    # Delegate to appropriate export function
+    if [ "$export_type" = "conforma" ]; then
+        export_conforma_jira "$component" "$clipboard"
+        return $?
+    fi
+
+    # Fetch build failure data (latest failure for component)
+    local data=$(sql "
+        SELECT b.component_name, b.pipelinerun_name, b.error_message,
+               b.repository_url, b.branch, b.commit_sha, b.commit_message,
+               b.commit_author, b.commit_url,
+               TO_CHAR(b.first_detected_at, 'YYYY-MM-DD HH24:MI'),
+               TO_CHAR(b.last_updated_at, 'YYYY-MM-DD HH24:MI'),
+               EXTRACT(DAY FROM (NOW() - b.first_detected_at))::int as days_failing,
+               (SELECT COUNT(*) FROM build_failures WHERE component_name = b.component_name AND is_resolved = FALSE) as occurrence_count,
+               COALESCE(b.konflux_logs_url, b.konflux_url),
+               b.failed_step_name, b.error_type
+        FROM build_failures b
+        WHERE b.component_name = '$component'
+          AND b.is_resolved = FALSE
+          AND b.application = '$APPLICATION_NAME'
+        ORDER BY b.last_updated_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: No failure data found for component: $component${NC}"
+        exit 1
+    fi
+
+    # Collapse newlines within fields (SQL returns multi-line text in commit messages, error messages)
+    local data_oneline=$(echo "$data" | tr '\n' ' ' | sed 's/  */ /g')
+    IFS='|' read -r comp_name pr_name error_msg repo_url branch commit_sha commit_msg \
+        commit_author commit_url first_seen last_seen days_failing occurrence_count \
+        konflux_url failed_step error_type <<< "$data_oneline"
+
+    # Fetch AI analysis separately (most recent for any failure of this component)
+    local ai_data=$(sql "
+        SELECT a.failure_category, ROUND(a.confidence_score * 100),
+               a.root_cause, a.recommended_fix, a.recommended_files,
+               a.can_auto_fix, a.requires_human_review,
+               TO_CHAR(a.analyzed_at, 'YYYY-MM-DD HH24:MI:SS'),
+               a.langfuse_trace_url, a.model_used
+        FROM ai_analysis a
+        JOIN build_failures b ON a.build_failure_id = b.id
+        WHERE b.component_name = '$component'
+        ORDER BY a.analyzed_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    local category="" confidence="" root_cause="" recommended_fix="" recommended_files=""
+    local can_auto_fix="" requires_review="" analyzed_at="" trace_url="" model=""
+
+    if [ -n "$ai_data" ]; then
+        # Collapse newlines within fields (SQL returns multi-line text)
+        local ai_oneline=$(echo "$ai_data" | tr '\n' ' ' | sed 's/  */ /g')
+        IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
+            can_auto_fix requires_review analyzed_at trace_url model <<< "$ai_oneline"
+    fi
+
+    # Calculate priority and risk
+    local priority=$(calculate_priority "$occurrence_count" "$days_failing" "${confidence:-0}" "$can_auto_fix")
+    local risk=$(calculate_risk "$requires_review" "$can_auto_fix" "${confidence:-0}")
+    local est_time=$(estimate_fix_time "$category")
+
+    # Generate Jira template (collaborative, tentative tone)
+    local output=""
+    output+="h2. Build Failure: ${comp_name}\n"
+    output+="\n"
+    output+="||Field||Value||\n"
+    output+="|Component|${comp_name}|\n"
+    output+="|Status|Failed|\n"
+    output+="|Suggested Priority|${priority}|\n"
+    output+="|Risk Assessment|${risk}|\n"
+    output+="|PipelineRun|[${pr_name}|${konflux_url}]|\n"
+    output+="|First Seen|${first_seen}|\n"
+    output+="|Last Seen|${last_seen}|\n"
+    output+="|Occurrences|${occurrence_count} times|\n"
+    output+="\n"
+
+    if [ -n "$category" ]; then
+        output+="h3. Initial Findings (${confidence}% confidence)\n"
+        output+="\n"
+        output+="From what we can see, this appears to be a *${category}* issue. The analysis below is based on the available evidence — build logs, commit history, and pipeline configuration — though there may be additional context we're not capturing here.\n"
+        output+="\n"
+        output+="||Category||${category}||\n"
+        output+="|Likely auto-fixable|$([ "$can_auto_fix" = "t" ] && echo "Appears so" || echo "Probably not")|\n"
+        output+="|Review suggested|$([ "$requires_review" = "t" ] && echo "Yes, worth a look" || echo "Seems straightforward")|\n"
+        output+="|Estimated effort|${est_time}|\n"
+        output+="\n"
+        output+="h4. What Appears to Have Gone Wrong\n"
+        output+="\n"
+        output+="${root_cause}\n"
+        output+="\n"
+        output+="h4. Suggested Approach\n"
+        output+="\n"
+
+        if [ -n "$recommended_files" ]; then
+            output+="It might be worth looking at the following files:\n"
+            output+="{code:language=diff}\n"
+            output+="${recommended_fix}\n"
+            output+="{code}\n"
+            output+="\n"
+        else
+            output+="${recommended_fix}\n"
+            output+="\n"
+        fi
+
+        # Add "Recommended Contact" if confidence is low
+        if [ "${confidence:-0}" -lt 60 ] 2>/dev/null && [ -n "$commit_author" ]; then
+            output+="h4. Recommended Contact\n"
+            output+="\n"
+            output+="Given the uncertainty in this analysis (${confidence}% confidence), it might be worth reaching out to *${commit_author}* who authored the changes in commit [${commit_sha:0:8}|${commit_url}] for additional context.\n"
+            output+="\n"
+        fi
+    fi
+
+    output+="h3. Context & Impact\n"
+    output+="\n"
+    output+="*Repository:* [${repo_url##*/}|${repo_url}]\n"
+    output+="*Branch:* ${branch}\n"
+    output+="*Commit:* [${commit_sha:0:8}|${commit_url}] by ${commit_author}\n"
+    output+="*Commit Message:* ${commit_msg}\n"
+    output+="\n"
+
+    if [ -n "$failed_step" ]; then
+        output+="*Failed Step:* ${failed_step}\n"
+    fi
+    if [ -n "$error_type" ]; then
+        output+="*Error Type:* ${error_type}\n"
+    fi
+    if [ -n "$error_msg" ]; then
+        output+="*Error Message:*\n"
+        output+="{code}\n"
+        output+="${error_msg}\n"
+        output+="{code}\n"
+    fi
+
+    output+="\n"
+    output+="h3. Useful Resources\n"
+    output+="\n"
+    output+="* [Full Build Logs|${konflux_url}]\n"
+    if [ -n "$trace_url" ]; then
+        output+="* [Analysis Trace|${trace_url}]\n"
+    fi
+    output+="\n"
+
+    output+="h3. Suggested Next Steps\n"
+    output+="\n"
+    output+="{panel:bgColor=#E3FCEF|title=Possible Approach}\n"
+
+    if [ "$can_auto_fix" = "t" ] && [ "$(echo "${confidence:-0} >= 90" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+        output+="The evidence seems fairly strong here, so it might be reasonable to proceed with the suggested fix — though it would be worth a quick sanity check first.\n"
+        output+="1. Review the suggested changes above\n"
+        output+="2. If it looks right, apply and monitor the next build\n"
+        output+="3. Do let the team know if the context here seems off\n"
+    elif [ "$can_auto_fix" = "t" ]; then
+        output+="There appears to be a relatively straightforward fix, though it would be good to have someone verify the approach before applying.\n"
+        output+="1. Have a look at the suggested fix\n"
+        output+="2. Test locally if practical\n"
+        output+="3. Create a PR when comfortable\n"
+    else
+        output+="This one seems to need a bit more investigation. The analysis gives us a starting point, but there may be nuances we're missing.\n"
+        output+="1. Review the findings and logs for additional clues\n"
+        output+="2. Investigate in the repository — the commit diff may help\n"
+        output+="3. Reach out if a second pair of eyes would be useful\n"
+    fi
+
+    output+="{panel}\n"
+    output+="\n"
+    output+="---\n"
+    if [ -n "$model" ]; then
+        output+="_Automated analysis by ${model} (${analyzed_at}). These findings are indicative rather than definitive — please use your judgement._\n"
+    else
+        output+="_No automated analysis available yet. Run: ic ai analyze component ${comp_name}_\n"
+    fi
+    if [ -n "$category" ]; then
+        output+="_Confidence: ${confidence}% | Category: ${category}_\n"
+    fi
+
+    # Output or copy to clipboard
+    if [ "$clipboard" = true ]; then
+        if command -v pbcopy &> /dev/null; then
+            echo -e "$output" | pbcopy
+            echo -e "${GREEN}✓ Jira ticket copied to clipboard (macOS)${NC}"
+        elif command -v xclip &> /dev/null; then
+            echo -e "$output" | xclip -selection clipboard
+            echo -e "${GREEN}✓ Jira ticket copied to clipboard (Linux)${NC}"
+        else
+            echo -e "${YELLOW}Clipboard command not found (install pbcopy or xclip)${NC}"
+            echo -e "$output"
+        fi
+    else
+        echo -e "$output"
+    fi
+}
+
+export_conforma_jira() {
+    local component="$1"
+    local clipboard="$2"
+
+    # Fetch Conforma violation data
+    local data=$(sql "
+        SELECT c.component_name, c.pipelinerun_name, c.scenario,
+               c.violations_count, c.warnings_count, c.successes_count,
+               TO_CHAR(c.first_detected_at, 'YYYY-MM-DD HH24:MI'),
+               TO_CHAR(c.last_updated_at, 'YYYY-MM-DD HH24:MI'),
+               EXTRACT(DAY FROM (NOW() - c.first_detected_at))::int as days_failing,
+               (SELECT COUNT(*) FROM conforma_results WHERE component_name = c.component_name AND is_resolved = FALSE) as occurrence_count,
+               COALESCE(c.repository_url, ''), COALESCE(c.commit_sha, ''),
+               COALESCE(c.commit_url, ''), COALESCE(c.snapshot_name, '')
+        FROM conforma_results c
+        WHERE c.component_name = '$component'
+          AND c.is_resolved = FALSE
+          AND c.application = '$APPLICATION_NAME'
+        ORDER BY c.last_updated_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: No Conforma violation found for component: $component${NC}"
+        exit 1
+    fi
+
+    # Collapse newlines within fields
+    local data_oneline=$(echo "$data" | tr '\n' ' ' | sed 's/  */ /g')
+    IFS='|' read -r comp_name pr_name scenario violations warnings successes \
+        first_seen last_seen days_failing occurrence_count \
+        repo_url commit_sha commit_url snapshot <<< "$data_oneline"
+
+    # Fetch AI analysis
+    local ai_data=$(sql "
+        SELECT a.failure_category, ROUND(a.confidence_score * 100),
+               a.root_cause, a.recommended_fix, a.recommended_files,
+               a.can_auto_fix, a.requires_human_review,
+               TO_CHAR(a.analyzed_at, 'YYYY-MM-DD HH24:MI:SS'),
+               a.langfuse_trace_url, a.model_used
+        FROM ai_analysis a
+        JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE c.component_name = '$component'
+        ORDER BY a.analyzed_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    local category="" confidence="" root_cause="" recommended_fix="" recommended_files=""
+    local can_auto_fix="" requires_review="" analyzed_at="" trace_url="" model=""
+
+    if [ -n "$ai_data" ]; then
+        local ai_oneline=$(echo "$ai_data" | tr '\n' ' ' | sed 's/  */ /g')
+        IFS='|' read -r category confidence root_cause recommended_fix recommended_files \
+            can_auto_fix requires_review analyzed_at trace_url model <<< "$ai_oneline"
+    fi
+
+    # Konflux UI URL
+    local konflux_url="https://konflux-ui.apps.CLUSTER_DOMAIN/ns/${NAMESPACE}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}/logs"
+
+    # Generate Jira template for Conforma
+    local output=""
+    output+="h2. Conforma Policy Violation: ${comp_name}\n"
+    output+="\n"
+    output+="||Field||Value||\n"
+    output+="|Component|${comp_name}|\n"
+    output+="|Status|Policy Violation|\n"
+    output+="|Scenario|${scenario}|\n"
+    output+="|Violations|${violations} violations, ${warnings} warnings, ${successes} successes|\n"
+    output+="|PipelineRun|[${pr_name}|${konflux_url}]|\n"
+    output+="|Snapshot|${snapshot}|\n"
+    output+="|First Seen|${first_seen}|\n"
+    output+="|Last Seen|${last_seen}|\n"
+    output+="|Occurrences|${occurrence_count} times|\n"
+    output+="\n"
+
+    if [ -n "$category" ]; then
+        output+="h3. AI Analysis (${confidence}% confidence)\n"
+        output+="\n"
+        output+="||Category||${category}||\n"
+        output+="|Can Auto-Fix|$([ "$can_auto_fix" = "t" ] && echo "Yes" || echo "No")|\n"
+        output+="|Requires Review|$([ "$requires_review" = "t" ] && echo "Yes" || echo "No")|\n"
+        output+="\n"
+
+        output+="h4. Root Cause\n"
+        output+="\n"
+        output+="${root_cause}\n"
+        output+="\n"
+
+        output+="h4. Recommended Fix\n"
+        output+="\n"
+        output+="${recommended_fix}\n"
+        output+="\n"
+
+        if [ -n "$recommended_files" ]; then
+            output+="*Files/Configs to modify:*\n"
+            output+="{code}\n"
+            output+="${recommended_files}\n"
+            output+="{code}\n"
+            output+="\n"
+        fi
+
+        output+="h5. Policy Exception Process\n"
+        output+="\n"
+        output+="If the recommended fix isn't immediately feasible:\n"
+        output+="# File JIRA at: [Create Issue|https://JIRA_CREATE_ISSUE_URL]\n"
+        output+="# Explain business justification and timeline for proper fix\n"
+        output+="# Create MR to exception file: {{konflux-release-data/.../fbc-acme-prod.yaml}}\n"
+        output+="# Add exception terms (check AI analysis for specific package URLs)\n"
+        output+="# Ping @owatkins (ProdSec) in #wg-3_0-openshift-ai-release for approval\n"
+        output+="\n"
+    fi
+
+    output+="h3. Context & Resources\n"
+    output+="\n"
+    output+="*Repository:* ${repo_url}\n"
+    if [ -n "$commit_sha" ]; then
+        output+="*Commit:* [${commit_sha:0:8}|${commit_url}]\n"
+    fi
+    output+="\n"
+    output+="*Useful Links:*\n"
+    output+="* [Konflux PipelineRun|${konflux_url}]\n"
+    output+="* [Quay Repository|https://quay.io/repository/rhoai/${comp_name}]\n"
+    if [ -n "$trace_url" ]; then
+        output+="* [AI Analysis Trace|${trace_url}]\n"
+    fi
+    output+="* [Enterprise Contract Docs|https://enterprisecontract.dev/]\n"
+    output+="\n"
+
+    output+="h3. Suggested Next Steps\n"
+    output+="\n"
+    output+="{panel:bgColor=#FFF4E6|title=Compliance Resolution}\n"
+
+    if [ "$can_auto_fix" = "t" ]; then
+        output+="The suggested fix appears straightforward:\n"
+        output+="1. Review the recommended approach above\n"
+        output+="2. Apply the fix (vendoring, config update, etc.)\n"
+        output+="3. Rebuild and verify Conforma passes\n"
+    else
+        output+="This violation requires investigation:\n"
+        output+="1. Review the violation details in Konflux UI\n"
+        output+="2. Determine if fix or policy exception is appropriate\n"
+        output+="3. If exception needed, follow policy exception process above\n"
+    fi
+
+    output+="{panel}\n"
+    output+="\n"
+    output+="---\n"
+    if [ -n "$model" ]; then
+        output+="_Automated analysis by ${model} (${analyzed_at})._\n"
+    else
+        output+="_No automated analysis available yet. Run: ic ai analyze conforma ${comp_name}_\n"
+    fi
+    if [ -n "$category" ]; then
+        output+="_Confidence: ${confidence}% | Category: ${category}_\n"
+    fi
+
+    # Output or copy to clipboard
+    if [ "$clipboard" = true ]; then
+        if command -v pbcopy &> /dev/null; then
+            echo -e "$output" | pbcopy
+            echo -e "${GREEN}✓ Jira ticket copied to clipboard (macOS)${NC}"
+        elif command -v xclip &> /dev/null; then
+            echo -e "$output" | xclip -selection clipboard
+            echo -e "${GREEN}✓ Jira ticket copied to clipboard (Linux)${NC}"
+        else
+            echo -e "${YELLOW}Clipboard command not found (install pbcopy or xclip)${NC}"
+            echo -e "$output"
+        fi
+    else
+        echo -e "$output"
+    fi
+}
+
+export_markdown() {
+    local target="$1"
+    echo -e "${YELLOW}Markdown export not yet implemented${NC}"
+    echo "Use: ic export $target jira"
+}
+
+export_json() {
+    local target="$1"
+    echo -e "${YELLOW}JSON export not yet implemented${NC}"
+    echo "Use: ic export $target jira"
+}
+
+export_slack() {
+    local target="$1"
+    echo -e "${YELLOW}Slack export not yet implemented${NC}"
+    echo "Use: ic export $target jira"
+}
+
 # GET CONFORMA - Conforma test failures
 cmd_get_conforma() {
     local refresh=false
@@ -1536,10 +3125,16 @@ cmd_get_conforma() {
     SELECT
         ROW_NUMBER() OVER (ORDER BY violations_count DESC) as \"#\",
         component_name as \"Component\",
+        CASE WHEN scenario LIKE '%-single-component' THEN 'single'
+             WHEN scenario LIKE 'conforma-fbc-%' THEN 'fbc'
+             WHEN scenario LIKE 'conforma-custom-%' THEN 'custom'
+             WHEN scenario LIKE '%-chart-%' THEN 'chart'
+             ELSE '-' END as \"Type\",
         violations_count as \"Violations\",
         warnings_count as \"Warnings\",
         successes_count as \"OK\",
-        TO_CHAR(first_detected_at, 'DD Mon') as \"Since\"
+        TO_CHAR(first_detected_at, 'DD Mon') as \"Since\",
+        COALESCE(jira_key, '-') as \"JIRA\"
     FROM conforma_results
     WHERE application = '$APPLICATION_NAME'
       AND is_resolved = FALSE
@@ -1668,14 +3263,14 @@ cmd_get_alerts() {
         sql_table "
         WITH push_failed AS (
             SELECT DISTINCT ON (component_name)
-                component_name, status, is_resolved, first_detected_at,
+                component_name, status, is_resolved, first_detected_at, jira_key,
                 (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures
             FROM build_failures
             WHERE application = '$APPLICATION_NAME'
             ORDER BY component_name, first_detected_at DESC
         ),
         failing AS (
-            SELECT component_name, total_failures,
+            SELECT component_name, total_failures, jira_key,
                 TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
                 CASE WHEN component_name IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
                     THEN 'Re-triggered ✓'
@@ -1692,7 +3287,8 @@ cmd_get_alerts() {
             component_name as \"Component\",
             status_label as \"Status\",
             failed_date as \"Failed\",
-            total_failures as \"Builds\"
+            total_failures as \"Builds\",
+            COALESCE(jira_key, '-') as \"JIRA\"
         FROM failing
         ORDER BY sort_group, total_failures DESC;
         "
@@ -1714,26 +3310,78 @@ cmd_get_alerts() {
     if [ "${conforma_count:-0}" = "0" ]; then
         echo -e "  ${GREEN}✓ No Conforma failures${NC}"
     else
-        # Offset numbering to continue from build failures
         local offset=${build_count:-0}
-        sql_table "
+        local exceptions=""
+        exceptions=$(fetch_conforma_exceptions "$APPLICATION_NAME" 2>/dev/null)
+        local gl_exc=""
+        gl_exc=$(fetch_gitlab_exceptions 2>/dev/null)
+        local expiring_data=""
+        expiring_data=$(fetch_expiring_exceptions 21 2>/dev/null)
+
+        local comp_rows
+        comp_rows=$(sql "
         WITH latest_conforma AS (
             SELECT DISTINCT ON (component_name)
-                component_name, violations_count, warnings_count, first_detected_at
+                component_name, scenario, violations_count, warnings_count, first_detected_at,
+                COALESCE(jira_key, '') as jira_key
             FROM conforma_results
             WHERE application = '$APPLICATION_NAME'
               AND is_resolved = FALSE
             ORDER BY component_name, last_updated_at DESC
         )
-        SELECT
-            (ROW_NUMBER() OVER (ORDER BY violations_count DESC) + $offset) as \"#\",
-            component_name as \"Component\",
-            violations_count as \"Violations\",
-            warnings_count as \"Warnings\",
-            TO_CHAR(first_detected_at, 'DD Mon') as \"Since\"
+        SELECT component_name, scenario, violations_count, warnings_count,
+               TO_CHAR(first_detected_at, 'DD Mon'), jira_key
         FROM latest_conforma
         ORDER BY violations_count DESC;
-        "
+        " 2>/dev/null)
+
+        printf "  %-4s %-45s %-7s %10s %10s %-28s %-6s %-16s\n" "#" "Component" "Type" "Violations" "Warnings" "Exception" "Since" "JIRA"
+        printf "  %-4s %-45s %-7s %10s %10s %-28s %-6s %-16s\n" "---" "$(printf '%0.s-' {1..45})" "-------" "----------" "----------" "----------------------------" "------" "----------------"
+
+        local row_num=0
+        echo "$comp_rows" | while IFS='|' read -r c_name c_scenario c_viol c_warn c_since c_jira; do
+            c_name=$(echo "$c_name" | xargs)
+            c_scenario=$(echo "$c_scenario" | xargs)
+            c_viol=$(echo "$c_viol" | xargs)
+            c_warn=$(echo "$c_warn" | xargs)
+            c_since=$(echo "$c_since" | xargs)
+            c_jira=$(echo "${c_jira:-}" | xargs)
+            [ -z "$c_name" ] && continue
+
+            row_num=$((row_num + 1))
+            local display_num=$((row_num + offset))
+            local c_type
+            c_type=$(conforma_scenario_label "$c_scenario")
+
+            local exc_status="-"
+            local vsummary=""
+            if [ -n "$exceptions" ] || [ -n "$gl_exc" ]; then
+                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$c_name' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                exc_status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exc")
+            fi
+
+            # Append expiry date to exception status
+            local exc_display="$exc_status"
+            if [ -n "$expiring_data" ] && [ "$exc_status" != "NO" ] && [ "$exc_status" != "-" ] && [ "$exc_status" != "UNKNOWN" ]; then
+                local expiry_info
+                expiry_info=$(find_component_expiry "$c_name" "$vsummary" "$expiring_data")
+                if [ "$expiry_info" != "-" ]; then
+                    exc_display="${exc_status} → ${expiry_info}"
+                fi
+            fi
+
+            local exc_color="$NC"
+            case "$exc_status" in
+                YES) exc_color="$GREEN" ;;
+                NO) exc_color="$RED" ;;
+                PARTIAL*) exc_color="$YELLOW" ;;
+            esac
+
+            printf "  %-4s %-45s %-7s %10s %10s " "$display_num" "${c_name:0:45}" "$c_type" "$c_viol" "$c_warn"
+            echo -ne "${exc_color}$(printf '%-28s' "$exc_display")${NC} "
+            printf "%-6s " "$c_since"
+            echo "${c_jira:--}"
+        done
     fi
     echo ""
 
@@ -1785,6 +3433,100 @@ cmd_get_alerts() {
             local started_fmt=$(date -d "$r_ts" '+%d %b %H:%M' 2>/dev/null || echo "$r_ts")
             printf "  %-40s %-10s %-18s " "${r_comp:0:40}" "$r_type" "$started_fmt"
             echo -e "$duration_str"
+        done
+        echo ""
+    fi
+
+    # --- Section 4: Expiring Exceptions (within 10 days) ---
+    local all_exceptions
+    all_exceptions=$(fetch_expiring_exceptions 10 2>/dev/null || true)
+    local expiring_soon
+    expiring_soon=$(echo "$all_exceptions" | awk -F'|' '$1 >= -1 && $1 <= 10' || true)
+    local expired_count
+    expired_count=$(echo "$all_exceptions" | awk -F'|' '$1 < -1 && $1 != ""' | wc -l)
+    if [ -n "$expiring_soon" ]; then
+        local exp_count
+        exp_count=$(echo "$expiring_soon" | wc -l)
+        local expired_msg=""
+        if [ "$expired_count" -gt 0 ]; then
+            expired_msg=" ${RED}(${expired_count} already expired)${NC}"
+        fi
+        echo -e "${BOLD}${YELLOW}⚠ Expiring Exceptions — next 10 days (${exp_count}):${NC}${expired_msg}"
+        printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "Days" "Expires" "Source" "Rule" "Component" "JIRA"
+        printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "------" "------------" "--------" "$(printf '%0.s-' {1..45})" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..16})"
+        echo "$expiring_soon" | while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
+            [ -z "$days_left" ] && continue
+            local day_color="$NC"
+            local day_label="${days_left}d"
+            if [ "$days_left" -lt 0 ]; then
+                day_color="$RED"
+                day_label="TODAY"
+            elif [ "$days_left" -le 3 ]; then
+                day_color="$RED"
+            elif [ "$days_left" -le 7 ]; then
+                day_color="$YELLOW"
+            fi
+            # Short source label: registry-acme-prod -> reg-prod, fbc-acme-stage -> fbc-stg
+            local src_label="${source:-?}"
+            src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+            # Derive component from image URL, fall back to rule value
+            local comp_name=""
+            if [ -n "$image_url" ]; then
+                comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
+                local app_suffix="${APPLICATION_NAME#rhoai-}"
+                comp_name="${comp_name}-${app_suffix}"
+            else
+                comp_name="(global rule)"
+            fi
+            # Use reference field from GitLab YAML as JIRA source
+            local jira_key="-"
+            if [ -n "$reference" ]; then
+                jira_key=$(echo "$reference" | grep -oP '[A-Z]+-[0-9]+' 2>/dev/null | tail -1 || true)
+                [ -z "$jira_key" ] && jira_key="$reference"
+            fi
+            local comp_short="${comp_name:0:30}"
+            echo -ne "  ${day_color}$(printf '%-6s' "$day_label")${NC} "
+            printf "%-12s %-8s %-45s %-30s %s\n" "$eff_until" "$src_label" "${value:0:45}" "$comp_short" "$jira_key"
+            if [ -n "$gl_link" ]; then
+                echo -e "         ${CYAN}↳ ${gl_link}${NC}"
+            fi
+        done
+        echo ""
+    fi
+
+    # --- Section 5: Already Expired Exceptions ---
+    local already_expired
+    already_expired=$(echo "$all_exceptions" | awk -F'|' '$1 < -1 && $1 != ""' || true)
+    if [ -n "$already_expired" ]; then
+        local ae_count
+        ae_count=$(echo "$already_expired" | wc -l)
+        echo -e "${BOLD}${RED}✕ Expired Exceptions (${ae_count}):${NC}"
+        printf "  %-8s %-12s %-8s %-40s %-30s %s\n" "Expired" "Date" "Source" "Rule" "Component" "JIRA"
+        printf "  %-8s %-12s %-8s %-40s %-30s %s\n" "--------" "------------" "--------" "$(printf '%0.s-' {1..40})" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..16})"
+        echo "$already_expired" | while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
+            [ -z "$days_left" ] && continue
+            local ago=$(( -1 * days_left ))
+            local src_label="${source:-?}"
+            src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+            local comp_name=""
+            if [ -n "$image_url" ]; then
+                comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
+                local app_suffix="${APPLICATION_NAME#rhoai-}"
+                comp_name="${comp_name}-${app_suffix}"
+            else
+                comp_name="(global rule)"
+            fi
+            local jira_key="-"
+            if [ -n "$reference" ]; then
+                jira_key=$(echo "$reference" | grep -oP '[A-Z]+-[0-9]+' 2>/dev/null | tail -1 || true)
+                [ -z "$jira_key" ] && jira_key="$reference"
+            fi
+            local comp_short="${comp_name:0:30}"
+            echo -ne "  ${RED}$(printf '%-8s' "${ago}d ago")${NC} "
+            printf "%-12s %-8s %-40s %-30s %s\n" "$eff_until" "$src_label" "${value:0:40}" "$comp_short" "$jira_key"
+            if [ -n "$gl_link" ]; then
+                echo -e "            ${CYAN}↳ ${gl_link}${NC}"
+            fi
         done
         echo ""
     fi
@@ -2037,22 +3779,834 @@ cmd_get_alerts_range() {
     echo ""
 }
 
+# CONFORMA CSV - fetch and compare with conforma-reporter CSV
+cmd_conforma_csv() {
+    local mode="summary"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --diff) mode="diff"; shift ;;
+            --raw)  mode="raw"; shift ;;
+            *)      shift ;;
+        esac
+    done
+
+    local branch
+    branch=$(app_to_reporter_branch "$APPLICATION_NAME")
+
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        echo -e "${RED}Error: GITHUB_TOKEN not set. Export it in ~/.bashrc${NC}" >&2
+        return 1
+    fi
+
+    local csv_data
+    csv_data=$(curl -sH "Authorization: token $GITHUB_TOKEN" \
+        "https://api.github.com/repos/acme-org/conforma-reporter/contents/latest/conforma-violations-report.csv?ref=${branch}" \
+        | python3 -c "import json,sys,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())" 2>/dev/null)
+
+    if [ -z "$csv_data" ]; then
+        echo -e "${RED}Error: Could not fetch CSV from conforma-reporter (branch: $branch)${NC}"
+        return 1
+    fi
+
+    if [ "$mode" = "raw" ]; then
+        echo "$csv_data"
+        return
+    fi
+
+    local csv_summary
+    csv_summary=$(echo "$csv_data" | python3 -c "
+import csv, sys, collections
+reader = csv.DictReader(sys.stdin)
+counts = collections.Counter()
+codes = collections.defaultdict(set)
+for row in reader:
+    if row['type'] == 'violation':
+        counts[row['component_name']] += 1
+        codes[row['component_name']].add(row['code'])
+for comp in sorted(counts):
+    code_list = ', '.join(sorted(codes[comp]))
+    print(f'{comp}|{counts[comp]}|{code_list}')
+print(f'TOTAL|{sum(counts.values())}|{len(counts)}')
+" 2>/dev/null)
+
+    if [ "$mode" = "summary" ]; then
+        echo -e "${BOLD}Conforma Reporter CSV (${branch})${NC}"
+        echo -e "Source: https://github.com/acme-org/conforma-reporter/blob/${branch}/latest/conforma-violations-report.csv"
+        echo ""
+        printf "  ${BOLD}%-55s %-12s %s${NC}\n" "Component" "Violations" "Codes"
+        printf "  %-55s %-12s %s\n" "---------" "----------" "-----"
+
+        echo "$csv_summary" | while IFS='|' read -r comp count codes; do
+            if [ "$comp" = "TOTAL" ]; then
+                echo ""
+                echo -e "  ${BOLD}Total: $count violations across $codes components${NC}"
+            else
+                printf "  %-55s %-12s %s\n" "$comp" "$count" "$codes"
+            fi
+        done
+        echo ""
+        return
+    fi
+
+    # --diff mode: compare CSV with DB
+    echo -e "${BOLD}Comparing Reporter CSV vs ic DB (${APPLICATION_NAME})${NC}"
+    echo ""
+
+    local db_counts
+    db_counts=$(sql "
+        SELECT component_name, violations_count, scenario
+        FROM conforma_results
+        WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+        ORDER BY component_name
+    " 2>/dev/null)
+
+    printf "  ${BOLD}%-50s %-8s %-8s %-8s %-8s %s${NC}\n" "Component" "Type" "CSV" "DB" "Delta" "Status"
+    printf "  %-50s %-8s %-8s %-8s %-8s %s\n" "---------" "----" "---" "--" "-----" "------"
+
+    local diff_output
+    diff_output=$(python3 -c "
+import sys
+
+csv_data = {}
+for line in '''$csv_summary'''.strip().split('\n'):
+    parts = line.split('|')
+    if parts[0] != 'TOTAL':
+        csv_data[parts[0]] = int(parts[1])
+
+db_data = {}
+db_types = {}
+db_raw = '''$db_counts'''.strip()
+if db_raw:
+    for line in db_raw.split('\n'):
+        parts = line.split('|')
+        if len(parts) >= 3:
+            comp = parts[0].strip()
+            count = int(parts[1].strip())
+            scenario = parts[2].strip()
+            if not comp:
+                continue
+            key = (comp, scenario)
+            db_data[key] = count
+            s = scenario
+            if 'single-component' in s:
+                label = 'single'
+            elif s.startswith('conforma-fbc'):
+                label = 'fbc'
+            elif s.startswith('conforma-custom'):
+                label = 'custom'
+            elif 'chart' in s:
+                label = 'chart'
+            else:
+                label = '-'
+            db_types[key] = label
+
+# Group DB by (component, type) for multi-scenario display
+all_keys = set()
+for key in db_data:
+    all_keys.add(key)
+for comp in csv_data:
+    found = False
+    for key in db_data:
+        if key[0] == comp:
+            found = True
+            break
+    if not found:
+        all_keys.add((comp, ''))
+
+for key in sorted(all_keys):
+    comp, scenario = key
+    label = db_types.get(key, 'csv')
+    csv_n = csv_data.get(comp, 0)
+    db_n = db_data.get(key, 0)
+
+    # Only compare CSV against single-component scenarios
+    if label == 'single' or label == 'csv':
+        delta = csv_n - db_n
+    else:
+        delta = 0
+        csv_n = '-'
+
+    if label == 'csv':
+        status = 'NEW in CSV'
+        delta_str = f'+{csv_n}'
+    elif csv_n == '-':
+        status = 'DB only'
+        delta_str = '-'
+    elif csv_n == 0 and db_n > 0:
+        status = 'RESOLVED'
+        delta_str = str(-db_n)
+    elif delta == 0:
+        status = 'Match'
+        delta_str = '0'
+    elif delta > 0:
+        status = f'+{delta} in CSV'
+        delta_str = f'+{delta}'
+    else:
+        status = f'{delta} in CSV'
+        delta_str = str(delta)
+
+    print(f'{comp}|{label}|{csv_n}|{db_n}|{delta_str}|{status}')
+" 2>/dev/null)
+
+    echo "$diff_output" | while IFS='|' read -r comp label csv_n db_n delta status; do
+        local color=""
+        case "$status" in
+            Match)        color="" ;;
+            "NEW in CSV") color="${RED}" ;;
+            RESOLVED)     color="${GREEN}" ;;
+            "DB only")    color="${CYAN}" ;;
+            *)            color="${YELLOW}" ;;
+        esac
+        printf "  %-50s %-8s %-8s %-8s %-8s ${color}%s${NC}\n" "$comp" "$label" "$csv_n" "$db_n" "$delta" "$status"
+    done
+
+    echo ""
+}
+
+fetch_csv_violations() {
+    local branch
+    branch=$(app_to_reporter_branch "$APPLICATION_NAME")
+
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        return 1
+    fi
+
+    curl -sH "Authorization: token $GITHUB_TOKEN" \
+        "https://api.github.com/repos/acme-org/conforma-reporter/contents/latest/conforma-violations-report.csv?ref=${branch}" \
+        | python3 -c "import json,sys,base64; d=json.load(sys.stdin); print(base64.b64decode(d['content']).decode())" 2>/dev/null \
+        | python3 -c "
+import csv, sys, collections
+
+reader = csv.DictReader(sys.stdin)
+comps = collections.defaultdict(lambda: {'count': 0, 'codes': set()})
+for row in reader:
+    if row['type'] == 'violation':
+        c = comps[row['component_name']]
+        c['count'] += 1
+        c['codes'].add(row['code'])
+for comp in sorted(comps):
+    d = comps[comp]
+    codes = ','.join(sorted(d['codes']))
+    print(f'{comp}|{d[\"count\"]}|{codes}')
+" 2>/dev/null
+}
+
+cmd_conforma_snapshot() {
+    local do_import=false
+    local refresh_snap=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --import)   do_import=true; shift ;;
+            --refresh)  refresh_snap=true; shift ;;
+            *)          shift ;;
+        esac
+    done
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Snapshot Coverage — ${CYAN}${APPLICATION_NAME}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local cache_dir="/tmp/ic-conforma-cache"
+    local snap_cache="${cache_dir}/snapshot-${APPLICATION_NAME}"
+    mkdir -p "$cache_dir"
+
+    local tmp_snap tmp_db tmp_csv
+    tmp_snap=$(mktemp) tmp_db=$(mktemp) tmp_csv=$(mktemp)
+
+    # Check snapshot cache (valid for 6 hours)
+    local use_cache=false
+    if [ "$refresh_snap" = false ] && [ -f "$snap_cache" ]; then
+        local cache_age=$(( $(date +%s) - $(stat -c %Y "$snap_cache") ))
+        if [ "$cache_age" -lt 21600 ]; then
+            use_cache=true
+        fi
+    fi
+
+    echo -e "${CYAN}Fetching data...${NC}"
+
+    # CSV violations (fast, ~1s)
+    fetch_csv_violations > "$tmp_csv" 2>/dev/null || true
+
+    # DB — all components with any conforma data (synced via 'ic get conforma --refresh')
+    local tmp_db_all
+    tmp_db_all=$(mktemp)
+    sql "SELECT DISTINCT component_name FROM conforma_results WHERE application = '$APPLICATION_NAME'" > "$tmp_db_all" 2>/dev/null || true
+
+    # DB — components with unresolved violations (with source)
+    sql "SELECT DISTINCT component_name || '|' || CASE WHEN scenario = 'csv-import' THEN 'csv-import' ELSE 'kubearchive' END FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE" > "$tmp_db" 2>/dev/null || true
+
+    # Snapshot: from cache or live query
+    local snap_name snap_count
+    if [ "$use_cache" = true ]; then
+        snap_name=$(head -1 "$snap_cache")
+        tail -n +2 "$snap_cache" > "$tmp_snap"
+        snap_count=$(grep -c . "$tmp_snap")
+        local cache_age_min=$(( ($(date +%s) - $(stat -c %Y "$snap_cache")) / 60 ))
+        echo -e "  Snapshot: ${BOLD}${snap_name}${NC} (${snap_count} components) ${CYAN}[cached ${cache_age_min}m ago]${NC}"
+    else
+        echo -e "  ${YELLOW}Querying snapshot (slow, ~2min — will cache for 6h)...${NC}"
+        snap_name=$(oc get snapshots -n "$NAMESPACE" \
+            -l "appstudio.openshift.io/application=$APPLICATION_NAME" \
+            --sort-by=.metadata.creationTimestamp \
+            -o name 2>/dev/null | tail -1 | sed 's|.*/||')
+
+        if [ -z "$snap_name" ]; then
+            echo -e "${RED}Error: Could not find snapshots for $APPLICATION_NAME${NC}"
+            rm -f "$tmp_snap" "$tmp_db" "$tmp_csv" "$tmp_db_all"
+            return 1
+        fi
+
+        oc get snapshot "$snap_name" -n "$NAMESPACE" \
+            -o jsonpath='{range .spec.components[*]}{.name}{"\n"}{end}' 2>/dev/null > "$tmp_snap"
+        snap_count=$(grep -c . "$tmp_snap")
+
+        # Save to cache: line 1 = name, rest = components
+        { echo "$snap_name"; cat "$tmp_snap"; } > "$snap_cache"
+
+        echo -e "  Snapshot: ${BOLD}${snap_name}${NC} (${snap_count} components) ${GREEN}[cached]${NC}"
+    fi
+    echo -e "  ${GREEN}Data loaded${NC}"
+    echo ""
+
+    local tmp_py
+    tmp_py=$(mktemp --suffix=.py)
+    cat > "$tmp_py" << 'PYEOF'
+import sys
+
+def read_lines(path):
+    with open(path) as f:
+        return set(l.strip() for l in f if l.strip())
+
+snap = read_lines(sys.argv[1])
+
+# DB violations: "component_name|source" format
+db_violations = {}
+with open(sys.argv[2]) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split('|', 1)
+        db_violations[parts[0]] = parts[1] if len(parts) > 1 else 'kubearchive'
+
+csv_data = {}
+with open(sys.argv[3]) as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split('|', 3)
+        if len(parts) >= 2:
+            csv_data[parts[0]] = {'count': int(parts[1]), 'codes': parts[2] if len(parts) > 2 else ''}
+
+db_all = read_lines(sys.argv[4]) if len(sys.argv) > 4 else set()
+
+evaluated = db_all & snap
+csv_only = set()
+no_data = set()
+for comp in snap:
+    if comp not in evaluated:
+        if comp in csv_data:
+            csv_only.add(comp)
+        else:
+            no_data.add(comp)
+
+eval_pct = len(evaluated) * 100 // len(snap) if snap else 0
+print(f'COVERAGE|{len(evaluated)}|{len(csv_only)}|{len(no_data)}|{eval_pct}')
+
+for comp in sorted(db_violations):
+    if comp in snap:
+        print(f'VIOLATION|{comp}|{db_violations[comp]}')
+
+for comp in sorted(csv_only):
+    if comp not in db_violations:
+        d = csv_data[comp]
+        print(f'CSV_ONLY|{comp}|{d["count"]}|{d["codes"]}')
+
+for comp in sorted(no_data):
+    print(f'NO_DATA|{comp}')
+PYEOF
+
+    local tmp_cov
+    tmp_cov=$(mktemp)
+    python3 "$tmp_py" "$tmp_snap" "$tmp_db" "$tmp_csv" "$tmp_db_all" > "$tmp_cov" 2>/dev/null
+
+    rm -f "$tmp_db" "$tmp_db_all" "$tmp_py"
+
+    echo ""
+
+    local ka_n csv_n nodata_n ka_pct
+    IFS='|' read -r _ ka_n csv_n nodata_n ka_pct <<< "$(grep '^COVERAGE' "$tmp_cov")"
+
+    echo -e "  ${BOLD}Coverage:${NC}"
+    echo -e "    Evaluated:    ${GREEN}${ka_n}${NC} components (${ka_pct}%)"
+    if [ "${csv_n:-0}" -gt 0 ]; then
+        echo -e "    CSV only:     ${YELLOW}${csv_n}${NC} components"
+    fi
+    if [ "${nodata_n:-0}" -gt 0 ]; then
+        echo -e "    No data:      ${RED}${nodata_n}${NC} components"
+    fi
+    echo ""
+
+    local violations
+    violations=$(grep '^VIOLATION' "$tmp_cov" || true)
+    if [ -n "$violations" ]; then
+        echo -e "  ${BOLD}Components with violations in DB:${NC}"
+        printf "    ${BOLD}%-55s %s${NC}\n" "Component" "Source"
+        printf "    %-55s %s\n" "---------" "------"
+        echo "$violations" | while IFS='|' read -r _ comp source; do
+            printf "    %-55s %s\n" "$comp" "$source"
+        done
+        echo ""
+    fi
+
+    local csv_only_lines
+    csv_only_lines=$(grep '^CSV_ONLY' "$tmp_cov" || true)
+    if [ -n "$csv_only_lines" ]; then
+        echo -e "  ${BOLD}${YELLOW}Components in CSV but NOT in KubeArchive:${NC}"
+        printf "    ${BOLD}%-50s %-12s %s${NC}\n" "Component" "Violations" "Codes"
+        printf "    %-50s %-12s %s\n" "---------" "----------" "-----"
+        echo "$csv_only_lines" | while IFS='|' read -r _ comp count codes; do
+            printf "    %-50s %-12s %s\n" "$comp" "$count" "$codes"
+        done
+        echo ""
+
+        if [ "$do_import" = true ]; then
+            echo -e "  ${CYAN}Importing CSV violations into DB...${NC}"
+            local today
+            today=$(date +%Y%m%d)
+            local imported=0
+            echo "$csv_only_lines" | while IFS='|' read -r _ comp count codes; do
+                local pr_name="csv-import-${today}-${comp}"
+                local safe_codes
+                safe_codes=$(echo "$codes" | sed "s/'/''/g")
+                sql "INSERT INTO conforma_results (
+                        application, component_name, scenario,
+                        pipelinerun_name, pipelinerun_uid,
+                        status, violations_count, violation_summary
+                    ) VALUES (
+                        '${APPLICATION_NAME}', '${comp}', 'csv-import',
+                        '${pr_name}', 'csv-import',
+                        'Failed', ${count}, '${safe_codes}'
+                    )
+                    ON CONFLICT (pipelinerun_name) DO UPDATE SET
+                        violations_count = ${count},
+                        violation_summary = '${safe_codes}',
+                        last_updated_at = NOW()
+                    ;" > /dev/null 2>&1
+                echo -e "    ${GREEN}+${NC} ${comp}: ${count} violations imported"
+            done
+            echo ""
+        else
+            echo -e "  ${CYAN}Tip:${NC} Use 'ic conforma snapshot --import' to import these into the DB"
+            echo ""
+        fi
+    fi
+
+    # Resolve stale DB entries when --import is used
+    if [ "$do_import" = true ]; then
+        # 1) Resolve csv-import entries for components no longer in current CSV
+        local db_csv_components
+        db_csv_components=$(sql "SELECT DISTINCT component_name FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND scenario = 'csv-import'
+            AND is_resolved = FALSE" 2>/dev/null || true)
+
+        if [ -n "$db_csv_components" ]; then
+            local csv_resolved=0
+            while IFS= read -r comp; do
+                [ -z "$comp" ] && continue
+                if ! grep -q "^${comp}|" "$tmp_csv" 2>/dev/null; then
+                    sql "UPDATE conforma_results
+                        SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
+                        WHERE component_name = '$comp' AND application = '$APPLICATION_NAME'
+                        AND scenario = 'csv-import' AND is_resolved = FALSE" >/dev/null 2>&1
+                    csv_resolved=$((csv_resolved + 1))
+                fi
+            done <<< "$db_csv_components"
+            if [ "$csv_resolved" -gt 0 ]; then
+                echo -e "  ${GREEN}✓${NC} Resolved ${csv_resolved} csv-import components no longer in CSV"
+            fi
+        fi
+
+        # 2) Resolve kubearchive entries for snapshot components that passed clean in CSV
+        local db_ka_components
+        db_ka_components=$(sql "SELECT DISTINCT component_name FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND scenario != 'csv-import'
+            AND is_resolved = FALSE" 2>/dev/null || true)
+
+        if [ -n "$db_ka_components" ]; then
+            local ka_resolved=0
+            while IFS= read -r comp; do
+                [ -z "$comp" ] && continue
+                if grep -q "^${comp}$" "$tmp_snap" 2>/dev/null && \
+                   ! grep -q "^${comp}|" "$tmp_csv" 2>/dev/null; then
+                    sql "UPDATE conforma_results
+                        SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
+                        WHERE component_name = '$comp' AND application = '$APPLICATION_NAME'
+                        AND scenario != 'csv-import' AND is_resolved = FALSE" >/dev/null 2>&1
+                    ka_resolved=$((ka_resolved + 1))
+                fi
+            done <<< "$db_ka_components"
+            if [ "$ka_resolved" -gt 0 ]; then
+                echo -e "  ${GREEN}✓${NC} Resolved ${ka_resolved} kubearchive components no longer in CSV"
+            fi
+        fi
+    fi
+
+    local nodata_lines
+    nodata_lines=$(grep '^NO_DATA' "$tmp_cov" || true)
+    if [ -n "$nodata_lines" ]; then
+        echo -e "  ${BOLD}Components with no conforma data:${NC}"
+        echo "$nodata_lines" | while IFS='|' read -r _ comp; do
+            echo "    - $comp"
+        done
+        echo ""
+    fi
+
+    rm -f "$tmp_snap" "$tmp_csv" "$tmp_cov"
+    return 0
+}
+
+# CONFORMA REPORT - daily tracking table for DLY standup
+cmd_conforma_report() {
+    local no_cache=false
+    local show_detail=true
+    local version_filters=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-cache) no_cache=true; shift ;;
+            --detail) show_detail=true; shift ;;
+            --summary) show_detail=false; shift ;;
+            --*) shift ;;
+            *)
+                # Treat positional args as version filters
+                # Accept: 3.4, 3.4-ea-1, v3-4, acme-v2-0, 3.5-ea.1, etc.
+                version_filters="${version_filters} $1"
+                shift
+                ;;
+        esac
+    done
+
+    [ "$no_cache" = true ] && export CONFORMA_NO_CACHE=true
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Conforma Daily Report — $(date +%Y-%m-%d)${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    # Discover all active applications with conforma violations
+    local apps
+    apps=$(sql "SELECT DISTINCT application FROM conforma_results WHERE is_resolved = FALSE ORDER BY application;" 2>/dev/null)
+
+    if [ -z "$apps" ]; then
+        echo -e "${GREEN}No active Conforma violations in any application.${NC}"
+        echo ""
+        return
+    fi
+
+    # Known versions to always show (even if no data)
+    local known_versions="acme-v2-0 acme-v2-1-ea-1"
+    local all_versions
+    all_versions=$(echo -e "${apps}\n${known_versions}" | tr ' ' '\n' | sort -u | grep -v '^$')
+
+    # Apply version filters if provided
+    if [ -n "$version_filters" ]; then
+        local filtered=""
+        for filter in $version_filters; do
+            # Normalize filter to APPLICATION_NAME format
+            # Accept: 3.4, 3.4-ea-1, v3-4, acme-v2-0, 3.5-ea.1
+            local normalized="$filter"
+            normalized="${normalized#rhoai-}"
+            normalized="${normalized#v}"
+            # Convert dots to dashes for major.minor: 3.4 -> 3-4
+            normalized=$(echo "$normalized" | sed 's/^\([0-9]\+\)\.\([0-9]\+\)/\1-\2/')
+            # Convert -ea.N to -ea-N: -ea.1 -> -ea-1
+            normalized=$(echo "$normalized" | sed 's/-ea\.\([0-9]\+\)/-ea-\1/')
+            normalized="rhoai-v${normalized}"
+
+            # Find matching apps (substring match)
+            local matches
+            matches=$(echo "$all_versions" | grep "$normalized" 2>/dev/null || true)
+            [ -n "$matches" ] && filtered="${filtered}${matches}"$'\n'
+        done
+        all_versions=$(echo "$filtered" | sort -u | grep -v '^$')
+
+        if [ -z "$all_versions" ]; then
+            echo -e "${RED}No matching versions found for: ${version_filters}${NC}"
+            echo -e "${CYAN}Available:${NC} $(echo "$apps" | tr '\n' ' ')"
+            echo ""
+            return
+        fi
+    fi
+
+    echo -e "${BOLD}DLY PROGRESS TABLE:${NC}"
+    echo -e "${CYAN}(copy-paste ready for standup)${NC}"
+    echo ""
+    printf "%-32s %-40s %s\n" "ITEM" "CURRENT STATUS" "NEXT STEPS"
+    printf "%-32s %-40s %s\n" "----" "--------------" "----------"
+
+    # Fetch GitLab exceptions once (shared across all versions)
+    local gl_exceptions
+    gl_exceptions=$(fetch_gitlab_exceptions 2>/dev/null)
+
+    # Track totals for summary
+    local total_needs_jira=0
+
+    while IFS= read -r app; do
+        [ -z "$app" ] && continue
+
+        local branch_label="${app#rhoai-v}"
+        branch_label=$(echo "$branch_label" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/' | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
+
+        # Check if app has data in DB
+        local has_data
+        has_data=$(echo "$apps" | grep -c "^${app}$" 2>/dev/null || echo "0")
+
+        if [ "$has_data" -eq 0 ]; then
+            printf "%-32s %-40s %s\n" "Conforma ${branch_label}" "(no data)" "Not yet monitored"
+            continue
+        fi
+
+        # Query DB for summary
+        local summary
+        summary=$(sql "SELECT COUNT(DISTINCT component_name), COALESCE(SUM(violations_count),0) FROM conforma_results WHERE application = '${app}' AND is_resolved = FALSE;" 2>/dev/null)
+        local comp_count=$(echo "$summary" | cut -d'|' -f1)
+        local viol_total=$(echo "$summary" | cut -d'|' -f2)
+
+        # Fetch exceptions from GitHub
+        local exceptions
+        exceptions=$(fetch_conforma_exceptions "$app" 2>/dev/null)
+        local exception_available=true
+        [ -z "$exceptions" ] && [ -z "$gl_exceptions" ] && exception_available=false
+
+        # Count excepted vs not
+        local excepted_count=0
+        local needs_jira_count=0
+        local partial_count=0
+
+        if [ "$exception_available" = true ]; then
+            local comp_list
+            comp_list=$(sql "SELECT DISTINCT component_name FROM conforma_results WHERE application = '${app}' AND is_resolved = FALSE;" 2>/dev/null)
+            while IFS= read -r comp_name; do
+                [ -z "$comp_name" ] && continue
+                local vsummary
+                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '${comp_name}' AND application = '${app}' AND is_resolved = FALSE LIMIT 1;" 2>/dev/null)
+                local status
+                status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exceptions")
+                case "$status" in
+                    YES) excepted_count=$((excepted_count + 1)) ;;
+                    PARTIAL*) partial_count=$((partial_count + 1)); needs_jira_count=$((needs_jira_count + 1)) ;;
+                    NO|UNKNOWN) needs_jira_count=$((needs_jira_count + 1)) ;;
+                esac
+            done <<< "$comp_list"
+        fi
+
+        total_needs_jira=$((total_needs_jira + needs_jira_count))
+
+        local status_text="${comp_count} components, ${viol_total} violations"
+        local next_text=""
+        if [ "$exception_available" = true ]; then
+            next_text="${needs_jira_count} need JIRA, ${excepted_count} excepted"
+            [ "$partial_count" -gt 0 ] && next_text="${next_text}, ${partial_count} partial"
+        else
+            next_text="Exception data unavailable"
+        fi
+
+        printf "%-32s %-40s %s\n" "Conforma ${branch_label}" "$status_text" "$next_text"
+    done <<< "$all_versions"
+
+    # Expiring exceptions row — fetch from GitLab
+    local expiring_data
+    expiring_data=$(fetch_expiring_exceptions 21 2>/dev/null)
+    local expiring_soon=""
+    local expired=""
+    if [ -n "$expiring_data" ]; then
+        expiring_soon=$(echo "$expiring_data" | awk -F'|' '$1 >= 0 && $1 <= 21')
+        expired=$(echo "$expiring_data" | awk -F'|' '$1 < 0')
+    fi
+    local exp_soon_count=$(echo "$expiring_soon" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    local exp_expired_count=$(echo "$expired" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+
+    if [ -n "$expiring_data" ]; then
+        local exp_status=""
+        [ "$exp_expired_count" -gt 0 ] && exp_status="${exp_expired_count} expired, "
+        exp_status="${exp_status}${exp_soon_count} expiring within 3 weeks"
+        local exp_link="GITLAB_INTERNAL_HOST/releng/konflux-release-data"
+        printf "%-32s %-40s %s\n" "Expiring Exceptions" "$exp_status" "$exp_link"
+    else
+        printf "%-32s %-40s %s\n" "Expiring Exceptions" "GitLab unreachable" "GITLAB_INTERNAL_HOST/releng/konflux-release-data"
+    fi
+    echo ""
+
+    # Show expiring exceptions detail
+    if [ -n "$expiring_soon" ] && [ "$exp_soon_count" -gt 0 ]; then
+        echo -e "${BOLD}EXPIRING EXCEPTIONS (within 3 weeks):${NC}"
+        echo ""
+        local prev_date=""
+        while IFS='|' read -r days_left eff_until value image_url reference; do
+            [ -z "$days_left" ] && continue
+            local date_label=""
+            if [ "$eff_until" != "$prev_date" ]; then
+                local day_name
+                day_name=$(date -d "$eff_until" +%A 2>/dev/null || echo "")
+                if [ "$days_left" -le 7 ]; then
+                    date_label="${RED}${day_name} ${eff_until} (${days_left}d) — expiring soon${NC}"
+                elif [ "$days_left" -le 14 ]; then
+                    date_label="${YELLOW}${day_name} ${eff_until} (${days_left}d)${NC}"
+                else
+                    date_label="${eff_until} (${days_left}d)"
+                fi
+                echo -e "  $date_label"
+                prev_date="$eff_until"
+            fi
+            local display_value="$value"
+            if [ ${#display_value} -gt 70 ]; then
+                display_value="${display_value:0:67}..."
+            fi
+            echo "    - $display_value"
+            [ -n "$image_url" ] && echo "      image: $image_url"
+            [ -n "$reference" ] && echo "      ref: $reference"
+        done <<< "$expiring_soon"
+        echo ""
+    fi
+
+    if [ -n "$expired" ] && [ "$exp_expired_count" -gt 0 ]; then
+        echo -e "${BOLD}ALREADY EXPIRED:${NC}"
+        echo ""
+        while IFS='|' read -r days_left eff_until value image_url reference; do
+            [ -z "$days_left" ] && continue
+            local display_value="$value"
+            if [ ${#display_value} -gt 70 ]; then
+                display_value="${display_value:0:67}..."
+            fi
+            echo -e "  ${RED}${eff_until} (${days_left#-}d ago)${NC}  $display_value"
+            [ -n "$reference" ] && echo "      ref: $reference"
+        done <<< "$expired"
+        echo ""
+    fi
+
+    # Detailed breakdown per application
+    if [ "$show_detail" = true ]; then
+        while IFS= read -r app; do
+            [ -z "$app" ] && continue
+
+            local has_data
+            has_data=$(echo "$apps" | grep -c "^${app}$" 2>/dev/null || echo "0")
+            [ "$has_data" -eq 0 ] && continue
+
+            local comp_count
+            comp_count=$(sql "SELECT COUNT(DISTINCT component_name) FROM conforma_results WHERE application = '${app}' AND is_resolved = FALSE;" 2>/dev/null)
+
+            echo -e "${BOLD}DETAILED BREAKDOWN — ${app} (${comp_count} components):${NC}"
+            echo ""
+
+            local exceptions
+            exceptions=$(fetch_conforma_exceptions "$app" 2>/dev/null)
+
+            printf " %2s  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "#" "Component" "Type" "Violations" "Exception" "AI" "Expiry" "Action"
+            printf " %2s  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "--" "$(printf '%0.s-' {1..40})" "-------" "----------" "------------------" "-----" "-----------------" "------"
+
+            local idx=0
+            while IFS='|' read -r comp_name c_scenario viol_count warn_count ai_status; do
+                [ -z "$comp_name" ] && continue
+                idx=$((idx + 1))
+
+                c_scenario=$(echo "$c_scenario" | xargs)
+                local c_type
+                c_type=$(conforma_scenario_label "$c_scenario")
+
+                # Get exception status
+                local vsummary
+                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '${comp_name}' AND application = '${app}' AND is_resolved = FALSE LIMIT 1;" 2>/dev/null)
+                local exc_status="?"
+                [ -n "$exceptions" ] || [ -n "$gl_exceptions" ] && exc_status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exceptions")
+
+                # Find expiry date from GitLab data
+                local expiry_info="-"
+                if [ -n "$expiring_data" ]; then
+                    expiry_info=$(find_component_expiry "$comp_name" "$vsummary" "$expiring_data")
+                fi
+
+                # Determine action
+                local action=""
+                case "$exc_status" in
+                    YES) action="Excepted" ;;
+                    PARTIAL*) action="Needs JIRA (partial)" ;;
+                    NO) action="Needs JIRA" ;;
+                    *) action="Check manually" ;;
+                esac
+
+                # Truncate long component names
+                local display_name="$comp_name"
+                if [ ${#display_name} -gt 40 ]; then
+                    display_name="${display_name:0:37}..."
+                fi
+
+                printf " %2d  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "$idx" "$display_name" "$c_type" "$viol_count" "$exc_status" "${ai_status:--}" "$expiry_info" "$action"
+            done < <(sql "
+                SELECT c.component_name, c.scenario, c.violations_count, c.warnings_count,
+                    COALESCE((SELECT ROUND(confidence_score * 100) || '%' FROM ai_analysis WHERE conforma_result_id = c.id ORDER BY analyzed_at DESC LIMIT 1), '-')
+                FROM conforma_results c
+                WHERE c.application = '${app}' AND c.is_resolved = FALSE
+                ORDER BY c.violations_count DESC
+                LIMIT 20;
+            " 2>/dev/null)
+
+            if [ "$comp_count" -gt 20 ]; then
+                echo -e "  ${CYAN}... and $((comp_count - 20)) more components (use 'ic get conforma' for full list)${NC}"
+            fi
+            echo ""
+        done <<< "$all_versions"
+    fi
+
+    # Sources
+    echo -e "${BOLD}Sources:${NC}"
+    echo "  Violations DB     local PostgreSQL (konflux_monitoring)"
+    echo "  Exceptions (GH)   https://github.com/acme-org/conforma-reporter/blob/acme-3.4/conforma-exceptions-components.yaml"
+    echo "  Policy Prod (GL)  https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/registry-acme-prod.yaml"
+    echo "  Policy Prod (GL)  https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/fbc-acme-prod.yaml"
+    echo "  Policy Stage (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/registry-acme-stage.yaml"
+    echo "  Policy Stage (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/fbc-acme-stage.yaml"
+    echo "  Reporter CSV      https://github.com/acme-org/conforma-reporter/blob/acme-3.4/latest/conforma-violations-report.csv"
+    echo ""
+
+    # Tips
+    echo -e "${CYAN}Tips:${NC}"
+    echo -e "  ic describe conforma <name>       Full violation details"
+    echo -e "  ic export conforma <name> jira    Export for JIRA ticket"
+    echo -e "  ic ai analyze conforma <name>     Run AI analysis"
+    echo ""
+
+    # Cleanup
+    unset CONFORMA_NO_CACHE
+}
+
 # DESCRIBE CONFORMA - violation details for a component
 cmd_describe_conforma() {
-    local component="$1"
+    local component="" history=false
+    for arg in "$@"; do
+        case "$arg" in
+            --history|-H) history=true ;;
+            *) [ -z "$component" ] && component="$arg" ;;
+        esac
+    done
+
     if [ -z "$component" ]; then
         echo -e "${RED}Error: Component name required${NC}"
-        echo "Usage: ic describe conforma <component>"
+        echo "Usage: ic describe conforma <component> [--history]"
         exit 1
     fi
 
     # Get metadata (without violation_summary to avoid pipe conflicts)
     local data=$(sql "
-        SELECT component_name, scenario, pipelinerun_name, status,
+        SELECT id, component_name, scenario, pipelinerun_name, status,
                violations_count, warnings_count, successes_count,
                TO_CHAR(first_detected_at, 'YYYY-MM-DD HH24:MI:SS'),
                COALESCE(repository_url, ''), COALESCE(commit_sha, ''),
-               COALESCE(snapshot_name, ''), COALESCE(commit_url, '')
+               COALESCE(snapshot_name, ''), COALESCE(commit_url, ''),
+               COALESCE(jira_key, '')
         FROM conforma_results
         WHERE component_name = '$component'
           AND application = '$APPLICATION_NAME'
@@ -2062,13 +4616,20 @@ cmd_describe_conforma() {
     " 2>/dev/null)
 
     if [ -z "$data" ]; then
+        if [ "$history" = true ]; then
+            echo -e "${GREEN}No active Conforma violations for: $component${NC}"
+            echo ""
+            cmd_conforma_history "$component"
+            return
+        fi
         echo -e "${RED}Error: No Conforma results found for: $component${NC}"
         echo -e "${CYAN}Tip:${NC} Use 'ic get conforma' to list components with failures"
+        echo -e "${CYAN}Tip:${NC} Use '--history' to see PipelineRun timeline even for resolved components"
         exit 1
     fi
 
-    IFS='|' read -r comp_name scenario pr_name status violations warnings successes \
-        detected_at repo_url commit_sha snapshot commit_url <<< "$data"
+    IFS='|' read -r conforma_id comp_name scenario pr_name status violations warnings successes \
+        detected_at repo_url commit_sha snapshot commit_url jira_key <<< "$data"
 
     echo -e "${BOLD}========================================${NC}"
     echo -e "${BOLD}Conforma Results: $comp_name${NC}"
@@ -2088,6 +4649,13 @@ cmd_describe_conforma() {
     [ -n "$commit_sha" ] && echo -e "${BOLD}Commit:${NC}      ${commit_sha:0:8}"
     [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
     [ -n "$snapshot" ] && echo -e "${BOLD}Snapshot:${NC}    $snapshot"
+
+    jira_key=$(echo "${jira_key:-}" | xargs 2>/dev/null || echo "")
+    if [ -n "$jira_key" ]; then
+        echo -e "${BOLD}JIRA:${NC}        ${CYAN}${jira_key}${NC} (${JIRA_URL}/browse/${jira_key})"
+    else
+        echo -e "${BOLD}JIRA:${NC}        -"
+    fi
 
     # Container image from violation_details JSON
     local container_image=$(sql "
@@ -2126,6 +4694,556 @@ cmd_describe_conforma() {
         echo -e "${CYAN}→ Run 'ic get conforma --refresh' to fetch violation details${NC}"
     fi
     echo ""
+
+    # Display AI analysis if available (matching this specific Conforma violation)
+    display_conforma_ai_analysis "$component" "$conforma_id"
+
+    if [ "$history" = true ]; then
+        echo ""
+        cmd_conforma_history "$component"
+    fi
+}
+
+# CONFORMA HISTORY - PipelineRun timeline from KubeArchive
+cmd_conforma_history() {
+    local component="$1"
+    local limit="${2:-10}"
+
+    local token
+    token=$(oc whoami -t 2>/dev/null)
+    if [ -z "$token" ]; then
+        echo -e "${RED}Error: Not logged into OpenShift (run 'oc login' first)${NC}"
+        return 1
+    fi
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}PipelineRun History: ${CYAN}$component${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+
+    local base="${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${NAMESPACE}/pipelineruns"
+    local build_selector="appstudio.openshift.io/component=${component},pipelines.appstudio.openshift.io/type=build"
+    local test_selector="appstudio.openshift.io/component=${component},pipelines.appstudio.openshift.io/type=test"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap "rm -rf $tmpdir" RETURN
+
+    curl -sk --max-time 60 -H "Authorization: Bearer $token" \
+        "${base}?labelSelector=${build_selector}&limit=10" > "$tmpdir/build.json" 2>/dev/null &
+    curl -sk --max-time 60 -H "Authorization: Bearer $token" \
+        "${base}?labelSelector=${test_selector}&limit=20" > "$tmpdir/test.json" 2>/dev/null &
+    wait
+
+    python3 -c "
+import json, sys
+from datetime import datetime
+
+limit = int(sys.argv[1])
+build_file = sys.argv[2]
+test_file = sys.argv[3]
+
+try:
+    with open(build_file) as f:
+        build_data = json.load(f)
+except:
+    build_data = {'items': []}
+try:
+    with open(test_file) as f:
+        test_data = json.load(f)
+except:
+    test_data = {'items': []}
+
+runs = []
+
+for pr in build_data.get('items', []):
+    meta = pr.get('metadata', {})
+    labels = meta.get('labels', {})
+    conditions = pr.get('status', {}).get('conditions', [])
+    if not conditions:
+        continue
+    reason = conditions[-1].get('reason', '?')
+    status_val = conditions[-1].get('status', '?')
+    if status_val == 'True':
+        result = 'Succeeded'
+    elif status_val == 'False':
+        result = 'Failed'
+    else:
+        result = 'Running'
+    event = labels.get('pipelinesascode.tekton.dev/event-type', 'push')
+    runs.append({
+        'ts': meta.get('creationTimestamp', ''),
+        'type': 'build/' + event,
+        'result': result,
+        'name': meta.get('name', '?'),
+    })
+
+for pr in test_data.get('items', []):
+    meta = pr.get('metadata', {})
+    labels = meta.get('labels', {})
+    scenario = labels.get('test.appstudio.openshift.io/scenario', '')
+    if not scenario.startswith('conforma'):
+        continue
+    conditions = pr.get('status', {}).get('conditions', [])
+    if not conditions:
+        continue
+    status_val = conditions[-1].get('status', '?')
+    if status_val == 'True':
+        result = 'Succeeded'
+    elif status_val == 'False':
+        result = 'Failed'
+    elif status_val == 'Unknown':
+        result = 'Running'
+    else:
+        result = status_val
+    short = scenario.replace('conforma-registry-acme-prod-v3-4-', '').replace('conforma-', '')
+    runs.append({
+        'ts': meta.get('creationTimestamp', ''),
+        'type': 'test/' + short,
+        'result': result,
+        'name': meta.get('name', '?'),
+    })
+
+runs.sort(key=lambda r: r['ts'])
+runs = runs[-limit:]
+
+if not runs:
+    print('No PipelineRuns found for this component')
+    sys.exit(0)
+
+GREEN = '\033[0;32m'
+RED = '\033[0;31m'
+YELLOW = '\033[1;33m'
+NC = '\033[0m'
+
+print(' %-20s  %-22s  %-10s  %s' % ('Timestamp (UTC)', 'Type', 'Result', 'PipelineRun'))
+print(' %-20s  %-22s  %-10s  %s' % ('-' * 20, '-' * 22, '-' * 10, '-' * 30))
+for r in runs:
+    ts = r['ts'][:16].replace('T', ' ') if r['ts'] else '?'
+    try:
+        dt = datetime.strptime(ts, '%Y-%m-%d %H:%M')
+        ts_fmt = dt.strftime('%d %b %H:%M')
+    except:
+        ts_fmt = ts
+    res = r['result']
+    color = GREEN if res == 'Succeeded' else RED if res == 'Failed' else YELLOW
+    print(' %-20s  %-22s  %s%-10s%s  %s' % (ts_fmt, r['type'], color, res, NC, r['name']))
+sys.exit(0)
+" "$limit" "$tmpdir/build.json" "$tmpdir/test.json"
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error fetching PipelineRun history from KubeArchive${NC}"
+    fi
+}
+
+# ============================================================================
+# JIRA COMMANDS
+# ============================================================================
+
+cmd_jira_help() {
+    echo -e "${BOLD}Jira Integration${NC}"
+    echo ""
+    echo "  ic get jira [JIRA-KEY]                List linked tickets with live status"
+    echo "  ic describe jira <JIRA-KEY>           Show full ticket details and comments"
+    echo "  ic describe jira <JIRA-KEY> --full    Show without truncation"
+    echo "  ic jira link <component> <JIRA-KEY>   Link a ticket to a component"
+    echo "  ic jira create conforma <component>   Preview ticket creation (dry-run)"
+    echo "  ic jira create conforma <comp> --execute  Actually create the ticket"
+    echo "  ic jira status                        Alias for ic get jira"
+    echo ""
+}
+
+cmd_jira_link() {
+    local component="${1:-}"
+    local jira_key="${2:-}"
+
+    if [ -z "$component" ] || [ -z "$jira_key" ]; then
+        echo -e "${RED}Usage: ic jira link <component> <JIRA-KEY>${NC}"
+        return 1
+    fi
+
+    # Check component exists in conforma_results or build_failures
+    local conforma_count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE")
+    local bf_count=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE")
+
+    if [ "${conforma_count:-0}" = "0" ] && [ "${bf_count:-0}" = "0" ]; then
+        echo -e "${RED}Error: No active violations or failures for '$component'${NC}"
+        return 1
+    fi
+
+    # Verify ticket exists via Jira API (optional, graceful)
+    local ticket_info
+    ticket_info=$(jira_api GET "/rest/api/2/issue/$jira_key?fields=summary,status" 2>/dev/null)
+    if echo "$ticket_info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['fields']['summary'])" 2>/dev/null; then
+        local ticket_status
+        ticket_status=$(echo "$ticket_info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['fields']['status']['name'])" 2>/dev/null)
+        echo -e "${GREEN}Ticket verified: $jira_key ($ticket_status)${NC}"
+    else
+        echo -e "${YELLOW}Warning: Could not verify ticket $jira_key (proceeding anyway)${NC}"
+    fi
+
+    # Update DB
+    local updated=0
+    if [ "${conforma_count:-0}" != "0" ]; then
+        sql "UPDATE conforma_results SET jira_key = '$jira_key' WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE" >/dev/null
+        updated=$((updated + conforma_count))
+    fi
+    if [ "${bf_count:-0}" != "0" ]; then
+        sql "UPDATE build_failures SET jira_key = '$jira_key' WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE" >/dev/null
+        updated=$((updated + bf_count))
+    fi
+
+    echo -e "${GREEN}Linked $jira_key → $component ($updated rows updated)${NC}"
+}
+
+cmd_get_jira() {
+    local filter_key="${1:-}"
+
+    local tickets=$(sql "
+        SELECT DISTINCT jira_key, component_name, 'conforma' as source
+        FROM conforma_results WHERE jira_key IS NOT NULL AND application = '$APPLICATION_NAME'
+        UNION
+        SELECT DISTINCT jira_key, component_name, 'build' as source
+        FROM build_failures WHERE jira_key IS NOT NULL AND application = '$APPLICATION_NAME'
+        ORDER BY 1
+    ")
+
+    if [ -z "$tickets" ]; then
+        echo "No linked Jira tickets found."
+        echo -e "${CYAN}→ Use 'ic jira link <component> <JIRA-KEY>' to link one${NC}"
+        return
+    fi
+
+    printf "  ${BOLD}%-18s %-15s %-22s %-32s %-10s %-10s %s${NC}\n" "JIRA" "Status" "Assignee" "Component" "Source" "Updated" "Comments"
+    printf "  %-18s %-15s %-22s %-32s %-10s %-10s %s\n" "----" "------" "--------" "---------" "------" "-------" "--------"
+
+    echo "$tickets" | while IFS='|' read -r jira_key comp_name source; do
+        jira_key=$(echo "$jira_key" | xargs)
+        comp_name=$(echo "$comp_name" | xargs)
+        source=$(echo "$source" | xargs)
+
+        [ -n "$filter_key" ] && [ "$jira_key" != "$filter_key" ] && continue
+
+        local status="?" assignee="?" updated="?" comments="?"
+        local info
+        info=$(jira_api GET "/rest/api/2/issue/$jira_key?fields=status,assignee,updated,comment" 2>/dev/null)
+        if [ -n "$info" ]; then
+            status=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['fields']['status']['name'])" 2>/dev/null || echo "?")
+            assignee=$(echo "$info" | python3 -c "import json,sys; a=json.load(sys.stdin)['fields'].get('assignee'); print(a['displayName'][:20] if a else 'Unassigned')" 2>/dev/null || echo "?")
+            updated=$(echo "$info" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+u=d['fields'].get('updated','')
+if u:
+    from datetime import datetime
+    print(datetime.strptime(u[:10],'%Y-%m-%d').strftime('%d %b'))
+else: print('?')
+" 2>/dev/null || echo "?")
+            comments=$(echo "$info" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['fields'].get('comment',{}).get('total',0))" 2>/dev/null || echo "?")
+        fi
+
+        printf "  %-18s %-15s %-22s %-32s %-10s %-10s %s\n" "$jira_key" "$status" "$assignee" "$comp_name" "$source" "$updated" "$comments"
+    done
+
+    echo ""
+}
+
+cmd_describe_jira() {
+    local jira_key="${1:-}"
+    local full_mode=false
+    [ "${2:-}" = "--full" ] && full_mode=true
+
+    if [ -z "$jira_key" ]; then
+        echo -e "${RED}Usage: ic describe jira <JIRA-KEY> [--full]${NC}"
+        return 1
+    fi
+
+    local info
+    info=$(curl -s --max-time 30 -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+        "$JIRA_URL/rest/api/2/issue/$jira_key?fields=summary,description,status,assignee,priority,labels,components,comment,updated,created" 2>/dev/null)
+    if [ -z "$info" ] || echo "$info" | grep -q '"errorMessages"'; then
+        echo -e "${RED}Error: Could not fetch $jira_key${NC}"
+        return 1
+    fi
+
+    local parsed
+    parsed=$(echo "$info" | python3 -c "
+import json, sys
+from datetime import datetime
+
+d = json.load(sys.stdin)
+f = d['fields']
+
+def fmt_date(s):
+    if not s: return '?'
+    return datetime.strptime(s[:10], '%Y-%m-%d').strftime('%d %b %Y')
+
+def fmt_date_short(s):
+    if not s: return '?'
+    try:
+        return datetime.strptime(s[:16], '%Y-%m-%dT%H:%M').strftime('%d %b %H:%M')
+    except: return datetime.strptime(s[:10], '%Y-%m-%d').strftime('%d %b')
+
+summary = f.get('summary', '')
+status = f.get('status', {}).get('name', '?')
+priority = f.get('priority', {}).get('name', '?') if f.get('priority') else '?'
+assignee = f.get('assignee', {}).get('displayName', 'Unassigned') if f.get('assignee') else 'Unassigned'
+labels = ', '.join(f.get('labels', [])) or '-'
+components = ', '.join(c['name'] for c in f.get('components', [])) or '-'
+created = fmt_date(f.get('created', ''))
+updated = fmt_date(f.get('updated', ''))
+description = f.get('description', '') or ''
+
+print(f'SUMMARY={summary}')
+print(f'STATUS={status}')
+print(f'PRIORITY={priority}')
+print(f'ASSIGNEE={assignee}')
+print(f'LABELS={labels}')
+print(f'COMPONENTS={components}')
+print(f'CREATED={created}')
+print(f'UPDATED={updated}')
+
+comments = f.get('comment', {}).get('comments', [])
+print(f'COMMENT_COUNT={len(comments)}')
+
+for c in comments:
+    author = c.get('author', {}).get('displayName', '?')
+    date = fmt_date_short(c.get('created', ''))
+    body = c.get('body', '')
+    print(f'COMMENT_AUTHOR={author}')
+    print(f'COMMENT_DATE={date}')
+    print(f'COMMENT_BODY={body}')
+    print('COMMENT_END')
+
+print(f'DESCRIPTION_BODY={description}')
+" 2>/dev/null)
+
+    if [ -z "$parsed" ]; then
+        echo -e "${RED}Error: Failed to parse response for $jira_key${NC}"
+        return 1
+    fi
+
+    local summary status priority assignee labels components created updated comment_count
+    summary=$(echo "$parsed" | grep '^SUMMARY=' | cut -d= -f2-)
+    status=$(echo "$parsed" | grep '^STATUS=' | cut -d= -f2-)
+    priority=$(echo "$parsed" | grep '^PRIORITY=' | cut -d= -f2-)
+    assignee=$(echo "$parsed" | grep '^ASSIGNEE=' | cut -d= -f2-)
+    labels=$(echo "$parsed" | grep '^LABELS=' | cut -d= -f2-)
+    components=$(echo "$parsed" | grep '^COMPONENTS=' | cut -d= -f2-)
+    created=$(echo "$parsed" | grep '^CREATED=' | cut -d= -f2-)
+    updated=$(echo "$parsed" | grep '^UPDATED=' | cut -d= -f2-)
+    comment_count=$(echo "$parsed" | grep '^COMMENT_COUNT=' | cut -d= -f2-)
+    local description_body
+    description_body=$(echo "$parsed" | grep '^DESCRIPTION_BODY=' | cut -d= -f2-)
+
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}$jira_key${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${BOLD}Summary:${NC}     $summary"
+    echo -e "${BOLD}Status:${NC}      $status"
+    echo -e "${BOLD}Priority:${NC}    $priority"
+    echo -e "${BOLD}Assignee:${NC}    $assignee"
+    echo -e "${BOLD}Labels:${NC}      $labels"
+    echo -e "${BOLD}Components:${NC}  $components"
+    echo -e "${BOLD}Created:${NC}     $created"
+    echo -e "${BOLD}Updated:${NC}     $updated"
+    echo -e "${BOLD}URL:${NC}         ${CYAN}${JIRA_URL}/browse/${jira_key}${NC}"
+
+    if [ -n "$description_body" ]; then
+        echo ""
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Description${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        if $full_mode; then
+            echo "$description_body"
+        else
+            echo "${description_body:0:500}"
+            [ ${#description_body} -gt 500 ] && echo -e "\n${CYAN}... (use --full to see complete description)${NC}"
+        fi
+    fi
+
+    # Linked data from ic DB
+    local db_data=$(sql "
+        SELECT component_name, 'conforma' as source, violations_count, scenario
+        FROM conforma_results
+        WHERE jira_key = '$jira_key' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE
+        UNION
+        SELECT component_name, 'build' as source, 0, ''
+        FROM build_failures
+        WHERE jira_key = '$jira_key' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE
+    " 2>/dev/null)
+
+    if [ -n "$db_data" ]; then
+        echo ""
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Linked in ic${NC}"
+        echo -e "${BOLD}========================================${NC}"
+        echo ""
+        echo "$db_data" | while IFS='|' read -r comp src vcount scen; do
+            comp=$(echo "$comp" | xargs)
+            src=$(echo "$src" | xargs)
+            vcount=$(echo "$vcount" | xargs)
+            scen=$(echo "$scen" | xargs)
+            echo -e "${BOLD}Component:${NC}   $comp"
+            echo -e "${BOLD}Source:${NC}       $src"
+            [ "$src" = "conforma" ] && echo -e "${BOLD}Violations:${NC}  $vcount"
+            [ -n "$scen" ] && echo -e "${BOLD}Scenario:${NC}    $scen"
+        done
+    fi
+
+    # Comments
+    if [ "${comment_count:-0}" != "0" ]; then
+        echo ""
+        echo -e "${BOLD}========================================${NC}"
+        echo -e "${BOLD}Comments ($comment_count)${NC}"
+        echo -e "${BOLD}========================================${NC}"
+
+        local in_comment=false
+        local c_author="" c_date="" c_body=""
+        echo "$parsed" | while IFS= read -r line; do
+            case "$line" in
+                COMMENT_AUTHOR=*)
+                    c_author="${line#COMMENT_AUTHOR=}"
+                    ;;
+                COMMENT_DATE=*)
+                    c_date="${line#COMMENT_DATE=}"
+                    ;;
+                COMMENT_BODY=*)
+                    c_body="${line#COMMENT_BODY=}"
+                    ;;
+                COMMENT_END)
+                    echo ""
+                    echo -e "--- ${BOLD}$c_author${NC} ($c_date) ---"
+                    if $full_mode; then
+                        echo "$c_body"
+                    else
+                        echo "${c_body:0:300}"
+                        [ ${#c_body} -gt 300 ] && echo -e "${CYAN}...${NC}"
+                    fi
+                    c_author="" c_date="" c_body=""
+                    ;;
+            esac
+        done
+    fi
+
+    echo ""
+}
+
+cmd_jira_create() {
+    local type="${1:-}"
+    shift || true
+
+    case "$type" in
+        conforma) cmd_jira_create_conforma "$@" ;;
+        *)
+            echo -e "${RED}Usage: ic jira create conforma <component> [--execute]${NC}"
+            return 1
+            ;;
+    esac
+}
+
+cmd_jira_create_conforma() {
+    local component="${1:-}"
+    local execute=false
+    if [ "${2:-}" = "--execute" ]; then
+        execute=true
+    fi
+
+    if [ -z "$component" ]; then
+        echo -e "${RED}Usage: ic jira create conforma <component> [--execute]${NC}"
+        return 1
+    fi
+
+    # Check for existing link
+    local existing=$(sql "SELECT jira_key FROM conforma_results WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE AND jira_key IS NOT NULL LIMIT 1")
+    if [ -n "$existing" ]; then
+        echo -e "${YELLOW}Warning: $component already linked to $existing${NC}"
+        echo -e "Use 'ic jira link $component <NEW-KEY>' to override"
+        return 1
+    fi
+
+    # Fetch violation data
+    local data=$(sql "
+        SELECT c.component_name, c.scenario,
+               c.violations_count, c.warnings_count, c.successes_count,
+               COALESCE(c.repository_url, ''), COALESCE(c.commit_sha, ''),
+               c.pipelinerun_name
+        FROM conforma_results c
+        WHERE c.component_name = '$component'
+          AND c.is_resolved = FALSE
+          AND c.application = '$APPLICATION_NAME'
+        ORDER BY c.last_updated_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: No active Conforma violation for '$component'${NC}"
+        return 1
+    fi
+
+    local data_oneline=$(echo "$data" | tr '\n' ' ' | sed 's/  */ /g')
+    IFS='|' read -r comp_name scenario violations warnings successes repo_url commit_sha pr_name <<< "$data_oneline"
+
+    local summary="[Conforma] ${comp_name} - ${scenario} (${violations} violations)"
+
+    # Generate description by reusing the export function output
+    local description
+    description=$(export_conforma_jira "$component" 2>/dev/null)
+
+    if [ "$execute" = true ]; then
+        echo -e "${BOLD}Creating Jira ticket...${NC}"
+
+        # Build JSON payload
+        local payload
+        payload=$(python3 -c "
+import json, sys
+desc = sys.stdin.read()
+print(json.dumps({
+    'fields': {
+        'project': {'key': '$JIRA_PROJECT'},
+        'issuetype': {'name': 'Bug'},
+        'summary': '''$summary''',
+        'description': desc,
+        'labels': ['conforma-violation'],
+        'components': [{'name': '$JIRA_COMPONENT'}],
+        'priority': {'name': 'Blocker'}
+    }
+}))
+" <<< "$description")
+
+        local response
+        response=$(jira_api POST "/rest/api/2/issue" "$payload")
+
+        local new_key
+        new_key=$(echo "$response" | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])" 2>/dev/null)
+
+        if [ -n "$new_key" ]; then
+            sql "UPDATE conforma_results SET jira_key = '$new_key' WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE" >/dev/null
+            echo -e "${GREEN}Created: $new_key${NC}"
+            echo -e "URL: ${JIRA_URL}/browse/$new_key"
+        else
+            echo -e "${RED}Error creating ticket:${NC}"
+            echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+            return 1
+        fi
+    else
+        echo -e "${BOLD}[DRY RUN] Would create Jira ticket:${NC}"
+        echo ""
+        echo -e "  ${CYAN}Project:${NC}   $JIRA_PROJECT"
+        echo -e "  ${CYAN}Type:${NC}      Bug"
+        echo -e "  ${CYAN}Priority:${NC}  Blocker"
+        echo -e "  ${CYAN}Labels:${NC}    conforma-violation"
+        echo -e "  ${CYAN}Component:${NC} $JIRA_COMPONENT"
+        echo -e "  ${CYAN}Summary:${NC}   $summary"
+        echo ""
+        echo -e "${BOLD}Description preview:${NC}"
+        echo "$description" | head -30
+        echo "..."
+        echo ""
+        echo -e "${YELLOW}→ Add --execute to actually create: ic jira create conforma $component --execute${NC}"
+    fi
 }
 
 # Main command router
@@ -2157,14 +5275,18 @@ case "${1:-}" in
             apps|applications|versions)
                 cmd_get_apps
                 ;;
+            jira)
+                cmd_get_jira "${3:-}"
+                ;;
             *) usage ;;
         esac
         ;;
     describe)
         case "${2:-}" in
             component) shift 2; cmd_describe_component "$@" ;;
-            conforma) cmd_describe_conforma "$3" ;;
+            conforma) shift 2; cmd_describe_conforma "$@" ;;
             pipelinerun|pr) cmd_describe_pipelinerun "$3" ;;
+            jira) shift 2; cmd_describe_jira "$@" ;;
             *) usage ;;
         esac
         ;;
@@ -2207,6 +5329,31 @@ case "${1:-}" in
         ;;
     history)
         cmd_history "$2"
+        ;;
+    ai)
+        shift
+        cmd_ai "$@"
+        ;;
+    export)
+        shift
+        cmd_export "$@"
+        ;;
+    jira)
+        shift
+        case "${1:-}" in
+            create) shift; cmd_jira_create "$@" ;;
+            link)   shift; cmd_jira_link "$@" ;;
+            status) cmd_get_jira ;;
+            *)      cmd_jira_help ;;
+        esac
+        ;;
+    conforma)
+        case "${2:-}" in
+            report)   shift 2; cmd_conforma_report "$@" ;;
+            csv)      shift 2; cmd_conforma_csv "$@" ;;
+            snapshot) shift 2; cmd_conforma_snapshot "$@" ;;
+            *) cmd_get_conforma "${2:-}" ;;
+        esac
         ;;
     db)
         case "${2:-}" in
