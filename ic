@@ -541,6 +541,12 @@ ${BOLD}COMMANDS:${NC}
     ic analyze <component>                   Deep failure analysis
     ic errors <component>                    Extract error messages
 
+  ${CYAN}Fix Actions:${NC}
+    ic fix <num|component>                   Triage a failure: choose PR / Jira / Slack
+                                             Shows AI recommendation, prompts for action
+                                             PR: dry-run diff (no push yet)
+                                             Jira: edit loop → confirm → post
+
   ${CYAN}AI Analysis:${NC}
     ic ai analyze <num|component>            Analyze failure with AI
     ic ai analyze --all                      Analyze all pending failures
@@ -4630,6 +4636,163 @@ cmd_jira_help() {
     echo ""
 }
 
+cmd_fix() {
+    local target="${1:-}"
+    shift || true
+
+    if [ -z "$target" ]; then
+        echo -e "${RED}Usage: ic fix <num|component>${NC}"
+        echo ""
+        echo "Examples:"
+        echo "  ic fix 1                     Triage failure #1 (interactive action menu)"
+        echo "  ic fix odh-mlmd-grpc-server-v3-4"
+        return 1
+    fi
+
+    require_db || return 1
+
+    # Resolve target → component + failure_id + type (reuse export_jira pattern)
+    local component="" export_type="" failure_id=""
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        local build_count
+        build_count=$(sql "
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT ON (component_name) component_name
+                FROM build_failures
+                WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+                ORDER BY component_name, first_detected_at DESC
+            ) sub;
+        " 2>/dev/null)
+        build_count=${build_count:-0}
+
+        if [ "$target" -le "$build_count" ]; then
+            export_type="build"
+            local retriggered_json
+            retriggered_json=$(sql_get_retriggered_json)
+            component=$(sql_resolve_build_number "$target" "${retriggered_json:-[]}")
+        else
+            export_type="conforma"
+            local conforma_offset=$((target - build_count - 1))
+            component=$(sql_resolve_conforma_number "$conforma_offset")
+        fi
+    else
+        component="$target"
+        local has_build
+        has_build=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+        export_type=$( [ "${has_build:-0}" -gt 0 ] && echo "build" || echo "conforma" )
+    fi
+
+    if [ -z "$component" ]; then
+        echo -e "${RED}Error: Component not found for: $target${NC}"
+        return 1
+    fi
+
+    # Fetch failure_id and basic info
+    local fix_data
+    fix_data=$(sql "
+        SELECT b.id, b.error_type, b.failed_step_name,
+               TO_CHAR(b.first_detected_at, 'YYYY-MM-DD'),
+               EXTRACT(DAY FROM NOW() - b.first_detected_at)::int,
+               (SELECT COUNT(*) FROM build_failures WHERE component_name = b.component_name AND is_resolved = FALSE)
+        FROM build_failures b
+        WHERE b.component_name = '$component'
+          AND b.application = '$APPLICATION_NAME'
+          AND b.is_resolved = FALSE
+        ORDER BY b.last_updated_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    local data_line
+    data_line=$(echo "$fix_data" | tr '\n' ' ' | sed 's/  */ /g')
+    IFS='|' read -r failure_id error_type failed_step first_seen days_failing occurrences <<< "$data_line"
+    failure_id=$(trim "$failure_id"); error_type=$(trim "$error_type")
+    failed_step=$(trim "$failed_step"); days_failing=$(trim "$days_failing")
+    occurrences=$(trim "$occurrences")
+
+    # Fetch AI analysis recommendation
+    local ai_data
+    ai_data=$(sql "
+        SELECT failure_category, ROUND(confidence_score * 100)::int,
+               can_auto_fix, requires_human_review, recommended_fix
+        FROM ai_analysis
+        WHERE build_failure_id = $failure_id
+        ORDER BY created_at DESC
+        LIMIT 1;
+    " 2>/dev/null)
+
+    local ai_line
+    ai_line=$(echo "$ai_data" | tr '\n' ' ' | sed 's/  */ /g')
+    IFS='|' read -r ai_category ai_confidence ai_can_fix ai_human_review ai_rec_fix <<< "$ai_line"
+    ai_category=$(trim "$ai_category"); ai_confidence=$(trim "$ai_confidence")
+    ai_can_fix=$(trim "$ai_can_fix"); ai_rec_fix=$(trim "$ai_rec_fix")
+
+    # Display header
+    section_header "Fix Triage — ${component}"
+    echo -e "${BOLD}Type:${NC}    ${export_type}"
+    echo -e "${BOLD}Error:${NC}   ${error_type:-unknown} at step ${failed_step:-unknown}"
+    echo -e "${BOLD}Age:${NC}     ${days_failing:-?} days (${occurrences:-?} occurrence(s))"
+    echo ""
+
+    if [ -n "$ai_category" ]; then
+        echo -e "${BOLD}AI Analysis:${NC}"
+        echo -e "  Category:   ${ai_category}"
+        echo -e "  Confidence: ${ai_confidence}%"
+        echo -e "  Can fix:    ${ai_can_fix}"
+        [ -n "$ai_rec_fix" ] && echo -e "  Fix hint:   $(echo "$ai_rec_fix" | head -c 120)"
+        echo ""
+
+        # Recommendation
+        if [ "$ai_can_fix" = "t" ] || [ "$ai_can_fix" = "true" ]; then
+            echo -e "${GREEN}Recommendation: [1] Generate PR fix  (confidence ${ai_confidence}%, auto-fixable)${NC}"
+        else
+            echo -e "${YELLOW}Recommendation: [2] Create Jira ticket  (needs human review)${NC}"
+        fi
+    else
+        echo -e "${YELLOW}No AI analysis yet. Run: ic ai analyze ${target}${NC}"
+        echo -e "${YELLOW}Recommendation: [2] Create Jira ticket${NC}"
+    fi
+    echo ""
+
+    # Action menu
+    echo -e "${BOLD}What do you want to do?${NC}"
+    echo "  [1] Generate PR fix (dry-run — shows diff, no push)"
+    echo "  [2] Create Jira ticket (review + edit before posting)"
+    echo "  [3] Send Slack notification"
+    echo "  [4] Skip"
+    echo ""
+    printf "Choice [1-4]: "
+    read -r choice
+
+    case "$choice" in
+        1)
+            echo ""
+            python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                --mode pr \
+                --component "$component" \
+                --failure-id "$failure_id" \
+                --application "$APPLICATION_NAME"
+            ;;
+        2)
+            echo ""
+            export_jira "$component" "$export_type" | \
+                python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                    --mode jira \
+                    --component "$component"
+            ;;
+        3)
+            echo ""
+            export_slack "$component" "$export_type"
+            ;;
+        4|"")
+            echo "Skipped."
+            ;;
+        *)
+            echo -e "${RED}Invalid choice.${NC}"
+            return 1
+            ;;
+    esac
+}
+
 cmd_jira_link() {
     local component="${1:-}"
     local jira_key="${2:-}"
@@ -5052,6 +5215,9 @@ case "${1:-}" in
             status) cmd_get_jira ;;
             *)      cmd_jira_help ;;
         esac
+        ;;
+    fix)
+        shift; cmd_fix "$@"
         ;;
     report)
         case "${2:-}" in
