@@ -47,6 +47,21 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class JiraConfig:
+    """Jira API configuration for creating tickets."""
+
+    base_url: str
+    email: str
+    token: str
+    project: str
+
+    @property
+    def auth(self):
+        # type: () -> tuple
+        return (self.email, self.token)
+
+
+@dataclass(frozen=True)
 class CollectorConfig:
     """Main collector configuration."""
 
@@ -54,6 +69,7 @@ class CollectorConfig:
     k8s: KubernetesConfig
     llm: Optional[LLMConfig] = None
     github_token: Optional[str] = None
+    jira: Optional[JiraConfig] = None
     components_file: Optional[Path] = None
 
     @classmethod
@@ -126,10 +142,23 @@ class CollectorConfig:
         # GitHub token (for commit context collection)
         github_token = os.getenv('GITHUB_TOKEN')
 
+        # Jira config (optional - for ticket creation via ic fix)
+        jira_email = os.getenv('JIRA_EMAIL')
+        jira_token = os.getenv('JIRA_TOKEN')
+        jira_config = None
+        if jira_email and jira_token:
+            jira_config = JiraConfig(
+                base_url=os.getenv('JIRA_BASE_URL', 'https://JIRA_HOST'),
+                email=jira_email,
+                token=jira_token,
+                project=os.getenv('JIRA_PROJECT', 'RHOAIENG'),
+            )
+
         return cls(
             db=db_config,
             k8s=k8s_config,
             llm=llm_config,
             github_token=github_token,
+            jira=jira_config,
             components_file=components_file
         )

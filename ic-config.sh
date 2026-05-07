@@ -22,6 +22,14 @@ require_db() {
     }
 }
 
+# Langfuse observability — inherited by python3.11 subprocesses (analyze_failures.py etc.)
+: "${LANGFUSE_HOST:=http://localhost:3000}"
+export LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY
+
+: "${COMPONENT_DATA_URL:=https://GITLAB_INTERNAL_HOST/wznoinsk/rhoai-monitoring/-/raw/main/data/rhoai-component-data.yaml}"
+: "${COMPONENT_DATA_CACHE:=/tmp/rhoai-component-data.yaml}"
+: "${COMPONENT_DATA_TTL:=86400}"
+
 GITLAB_API_BASE="https://GITLAB_INTERNAL_HOST/api/v4/projects/releng%2Fkonflux-release-data/repository/files"
 GITLAB_POLICY_PATH="config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy"
 GITLAB_POLICY_FILES=(
