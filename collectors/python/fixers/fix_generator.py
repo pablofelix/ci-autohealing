@@ -157,8 +157,8 @@ def fetch_files_for_fix(github_client, repo_url, branch, recommended_files):
 def generate_unified_diff(path, old_content, new_content):
     # type: (str, str, str) -> str
     """Generate a unified diff between old and new file content."""
-    old_lines = (old_content or '').splitlines(keepends=True)
-    new_lines = (new_content or '').splitlines(keepends=True)
+    old_lines = (old_content or '').splitlines()
+    new_lines = (new_content or '').splitlines()
 
     diff = difflib.unified_diff(
         old_lines,
