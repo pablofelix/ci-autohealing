@@ -341,6 +341,32 @@ def run_pr_mode(config, component, failure_id, application):
 # Jira mode
 # ---------------------------------------------------------------------------
 
+def _open_tty():
+    # type: () -> Any
+    """Return a readable file for interactive prompts.
+
+    When stdin is a pipe (ticket text), input() reads from stdin which
+    is already exhausted after sys.stdin.read(). Open /dev/tty directly
+    so interactive prompts still reach the user's keyboard.
+    """
+    if sys.stdin.isatty():
+        return sys.stdin
+    try:
+        return open('/dev/tty', 'r')
+    except OSError:
+        return sys.stdin
+
+
+def _prompt(tty, msg):
+    # type: (Any, str) -> str
+    """Print msg and read one line from tty (not stdin)."""
+    print(msg, end='', flush=True)
+    try:
+        return tty.readline().rstrip('\n')
+    except (EOFError, KeyboardInterrupt):
+        raise KeyboardInterrupt
+
+
 def run_jira_mode(config, component):
     # type: (CollectorConfig, str) -> int
     """Read ticket from stdin, interactive edit loop, POST to Jira."""
@@ -357,6 +383,9 @@ def run_jira_mode(config, component):
     llm = create_llm_provider(config.llm)
     current_ticket = initial_ticket
 
+    # stdin is now exhausted (pipe); use /dev/tty for interactive prompts
+    tty = _open_tty()
+
     print("\n" + "=" * 70)
     print(current_ticket)
     print("=" * 70)
@@ -364,8 +393,8 @@ def run_jira_mode(config, component):
     # Interactive edit loop
     while True:
         try:
-            user_input = input("\nChange anything? (Enter to post, or describe changes): ").strip()
-        except (EOFError, KeyboardInterrupt):
+            user_input = _prompt(tty, "\nChange anything? (Enter to post, or describe changes): ").strip()
+        except KeyboardInterrupt:
             print("\nAborted.")
             return 0
 
@@ -397,8 +426,8 @@ def run_jira_mode(config, component):
         return 0
 
     try:
-        confirm = input("\nPost to Jira? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        confirm = _prompt(tty, "\nPost to Jira? [y/N]: ").strip().lower()
+    except KeyboardInterrupt:
         print("\nAborted.")
         return 0
 
