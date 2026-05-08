@@ -4737,7 +4737,9 @@ cmd_fix() {
         echo -e "${BOLD}AI Analysis:${NC}"
         echo -e "  Category:   ${ai_category}"
         echo -e "  Confidence: ${ai_confidence}%"
-        echo -e "  Can fix:    ${ai_can_fix}"
+        local can_fix_label="no"
+        [ "$ai_can_fix" = "t" ] || [ "$ai_can_fix" = "true" ] && can_fix_label="yes"
+        echo -e "  Can fix:    ${can_fix_label}"
         [ -n "$ai_rec_fix" ] && echo -e "  Fix hint:   $(echo "$ai_rec_fix" | head -c 120)"
         echo ""
 

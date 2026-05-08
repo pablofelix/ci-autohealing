@@ -2,6 +2,9 @@
 
 Write-only operations: create_issue. Uses Basic auth (email:token).
 All reads are done via the MCP Jira tools, not this client.
+
+Uses API v2 — JIRA_HOST works reliably with v2 and plain-text
+descriptions. API v3 requires ADF JSON and is not needed here.
 """
 
 import requests
@@ -11,7 +14,7 @@ from logger import setup_logger
 
 logger = setup_logger(__name__)
 
-JIRA_API_VERSION = '3'
+JIRA_API_VERSION = '2'
 
 
 class JiraClient:
@@ -44,7 +47,7 @@ class JiraClient:
 
         Args:
             summary: Issue title (one line).
-            description_text: Plain text body — converted to ADF paragraph blocks.
+            description_text: Plain text / wiki markup body (API v2 format).
             issue_type: Jira issue type name (Bug, Task, Story).
             priority: Priority name (Blocker, Critical, Major, Minor). None = default.
             labels: List of label strings.
@@ -57,7 +60,7 @@ class JiraClient:
             'project': {'key': self._project},
             'summary': summary,
             'issuetype': {'name': issue_type},
-            'description': self._text_to_adf(description_text),
+            'description': description_text,
         }
 
         if priority:
@@ -98,37 +101,3 @@ class JiraClient:
             logger.error("Jira API: Unexpected status %d", resp.status_code)
 
         return None
-
-    @staticmethod
-    def _text_to_adf(text):
-        # type: (str) -> Dict[str, Any]
-        """Convert plain text to minimal Atlassian Document Format.
-
-        Splits on blank lines into paragraphs. Code blocks (indented with 4
-        spaces or surrounded by ```) are preserved as code nodes.
-        """
-        paragraphs = []
-        current_lines = []
-
-        for line in text.splitlines():
-            if line.strip() == '':
-                if current_lines:
-                    paragraphs.append('\n'.join(current_lines))
-                    current_lines = []
-            else:
-                current_lines.append(line)
-        if current_lines:
-            paragraphs.append('\n'.join(current_lines))
-
-        content = []
-        for para in paragraphs:
-            content.append({
-                'type': 'paragraph',
-                'content': [{'type': 'text', 'text': para}],
-            })
-
-        return {
-            'version': 1,
-            'type': 'doc',
-            'content': content or [{'type': 'paragraph', 'content': [{'type': 'text', 'text': ''}]}],
-        }
