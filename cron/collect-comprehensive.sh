@@ -42,6 +42,22 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
     # Step 2: Sync component status (mark resolved, record successes)
     python3 sync_component_status.py 2>&1
 
+    # Step 2.5: Verify fix resolution attempts (optional - only if GITHUB_TOKEN is set)
+    # Must run after sync_component_status.py so is_resolved is up to date.
+    if [ -n "$GITHUB_TOKEN" ]; then
+        echo ""
+        echo "========================================================================"
+        echo "[2.5] Verifying fix resolution attempts..."
+        echo "========================================================================"
+        echo ""
+        python3.11 fixers/verify_fixes.py 2>&1 || {
+            echo "Fix verification failed (non-critical - continuing)"
+        }
+    else
+        echo ""
+        echo "[2.5] Skipping fix verification (GITHUB_TOKEN not configured)"
+    fi
+
     echo ""
     echo "========================================================================"
     echo "[3/5] Updating sync status cache..."

@@ -546,6 +546,8 @@ ${BOLD}COMMANDS:${NC}
                                              Shows AI recommendation, prompts for action
                                              PR: dry-run diff (no push yet)
                                              Jira: edit loop → confirm → post
+    ic get fixes                             List recent PR fix attempts and outcomes
+    ic get fixes --all                       All fix attempts (no date limit)
 
   ${CYAN}AI Analysis:${NC}
     ic ai analyze <num|component>            Analyze failure with AI
@@ -4636,6 +4638,63 @@ cmd_jira_help() {
     echo ""
 }
 
+cmd_get_fixes() {
+    local days="${1:-30}"
+    [[ "$1" == "--all" ]] && days=3650
+
+    section_header "Fix Resolution Attempts"
+    echo -e "${BOLD}Application:${NC} ${CYAN}${APPLICATION_NAME}${NC}  |  Last ${days} day(s)"
+    echo ""
+
+    local count
+    count=$(sql "
+        SELECT COUNT(*)
+        FROM resolution_attempts ra
+        JOIN build_failures bf ON bf.id = ra.build_failure_id
+        WHERE ra.attempted_at >= NOW() - INTERVAL '${days} days';
+    " 2>/dev/null)
+
+    if [ "${count:-0}" = "0" ]; then
+        echo -e "${YELLOW}No fix attempts in the last ${days} days.${NC}"
+        echo ""
+        echo -e "${CYAN}Tip:${NC} Use 'ic fix <num>' to triage a failure and create a PR."
+        return
+    fi
+
+    echo -e "${BOLD}Total:${NC} ${count} attempt(s)"
+    echo ""
+
+    sql_table "
+    SELECT
+        ra.id          AS \"ID\",
+        bf.component_name AS \"Component\",
+        CASE ra.status
+            WHEN 'pr_created'  THEN 'PR open'
+            WHEN 'success'     THEN '✓ Fixed'
+            WHEN 'failed'      THEN '✗ Failed'
+            WHEN 'abandoned'   THEN '~ Abandoned'
+            ELSE ra.status
+        END            AS \"Status\",
+        CASE
+            WHEN ra.was_successful = TRUE  THEN 'Yes'
+            WHEN ra.was_successful = FALSE THEN 'No'
+            ELSE '-'
+        END            AS \"Build OK\",
+        COALESCE('#' || ra.pr_number::text, '-') AS \"PR\",
+        TO_CHAR(ra.attempted_at, 'DD Mon HH24:MI') AS \"Attempted\",
+        COALESCE(TO_CHAR(ra.verified_at, 'DD Mon HH24:MI'), '-') AS \"Verified\"
+    FROM resolution_attempts ra
+    JOIN build_failures bf ON bf.id = ra.build_failure_id
+    WHERE ra.attempted_at >= NOW() - INTERVAL '${days} days'
+    ORDER BY ra.attempted_at DESC;
+    "
+
+    echo ""
+    echo -e "${CYAN}Tip:${NC} PR links are stored in resolution_attempts.pr_url"
+    echo -e "${CYAN}Tip:${NC} Use '--all' to see all time: ic get fixes --all"
+    echo ""
+}
+
 cmd_fix() {
     local target="${1:-}"
     shift || true
@@ -5164,6 +5223,9 @@ case "${1:-}" in
                 ;;
             jira)
                 cmd_get_jira "${3:-}"
+                ;;
+            fixes|fix-attempts)
+                cmd_get_fixes "${3:-}"
                 ;;
             *) usage ;;
         esac

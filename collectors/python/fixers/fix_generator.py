@@ -386,19 +386,43 @@ def run_pr_mode(config, component, failure_id, application, execute=False):
     pr_body += '\n\n---\n_Automated fix by ci-autohealing (failure id: {})_'.format(
         failure['id']
     )
-    pr_url = github.create_pull_request(
+    pr_result = github.create_pull_request(
         owner, repo,
         title=fix.get('pr_title', 'fix({}): automated CI fix'.format(failure['component_name'])),
         body=pr_body,
         head=branch_name,
         base=base_branch,
     )
-    if pr_url:
-        print("\nPR created: {}".format(pr_url))
-        return 0
-    else:
+    if not pr_result:
         print("\nError: Failed to create PR — check logs above.", file=sys.stderr)
         return 1
+
+    pr_url = pr_result['url']
+    pr_number = pr_result['number']
+    print("\nPR created: {}".format(pr_url))
+
+    # Record the attempt in resolution_attempts
+    try:
+        from repositories.resolution_attempt_repository import ResolutionAttemptRepository
+        repo_obj = ResolutionAttemptRepository(db_conn)
+        changes_desc = '; '.join(
+            f.get('change_summary', f.get('path', ''))
+            for f in files_to_push
+        )
+        attempt_id = repo_obj.record_pr_created(
+            build_failure_id=failure['id'],
+            pr_url=pr_url,
+            pr_number=pr_number,
+            pr_branch=branch_name,
+            files_modified=[f['path'] for f in files_to_push],
+            changes_description=changes_desc,
+            notes=fix.get('caveat'),
+        )
+        logger.info("Recorded resolution attempt #%d", attempt_id)
+    except Exception as e:
+        logger.warning("Could not record resolution attempt: %s", str(e)[:100])
+
+    return 0
 
 
 # ---------------------------------------------------------------------------

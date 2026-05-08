@@ -442,8 +442,8 @@ class GitHubClient:
         return True
 
     def create_pull_request(self, owner, repo, title, body, head, base='main'):
-        # type: (str, str, str, str, str, str) -> Optional[str]
-        """Create a PR and return its HTML URL, or None on failure.
+        # type: (str, str, str, str, str, str) -> Optional[Dict[str, Any]]
+        """Create a PR and return {'url': ..., 'number': ...}, or None on failure.
 
         head: branch name that contains the changes (e.g. 'ci-autohealing/comp/42').
         base: target branch (default: 'main').
@@ -459,9 +459,36 @@ class GitHubClient:
         resp = self._post(path, payload)
         if resp is None:
             return None
-        url = resp.json().get('html_url', '')
-        logger.info("Created PR: %s", url)
-        return url or None
+        data = resp.json()
+        url = data.get('html_url', '')
+        number = data.get('number')
+        if not url:
+            return None
+        logger.info("Created PR #%s: %s", number, url)
+        return {'url': url, 'number': number}
+
+    def get_pull_request(self, owner, repo, pr_number):
+        # type: (str, str, int) -> Optional[Dict[str, Any]]
+        """Return PR metadata including merge status, or None if not found.
+
+        Returned dict keys: number, state, merged, merged_at, merge_commit_sha, title.
+        state is 'open' or 'closed'. merged is True only when the PR was merged
+        (a closed-but-not-merged PR has merged=False).
+        """
+        resp = self._get('/repos/{}/{}/pulls/{}'.format(owner, repo, pr_number))
+        if not resp:
+            return None
+        data = resp.json()
+        return {
+            'number': data.get('number'),
+            'state': data.get('state'),
+            'merged': data.get('merged', False),
+            'merged_at': data.get('merged_at'),
+            'merge_commit_sha': data.get('merge_commit_sha'),
+            'title': data.get('title', ''),
+            'head_sha': data.get('head', {}).get('sha'),
+            'base_branch': data.get('base', {}).get('ref', ''),
+        }
 
     def check_rate_limit(self):
         # type: () -> Optional[Dict[str, int]]
