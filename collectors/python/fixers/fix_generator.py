@@ -230,7 +230,7 @@ def run_pr_mode(config, component, failure_id, application):
         print("Error: GITHUB_TOKEN not set in .env", file=sys.stderr)
         return 1
 
-    db_conn = DatabaseConnection(config.db.connection_string)
+    db_conn = DatabaseConnection(config.db)
     failure, analysis = load_failure_and_analysis(db_conn, failure_id, component, application)
 
     if not failure:
@@ -273,20 +273,22 @@ def run_pr_mode(config, component, failure_id, application):
 
     print("\nGenerating fix with Claude...\n")
     response = llm.create_message(
-        messages=[{'role': 'user', 'content': prompt}],
         system=FIX_PROMPT_SYSTEM,
+        user_content=prompt,
         max_tokens=4096,
     )
 
-    # Extract text response
-    content = response.content if hasattr(response, 'content') else []
-    response_text = ''
-    for block in content:
-        if hasattr(block, 'text'):
-            response_text += block.text
+    response_text = response.content if isinstance(response.content, str) else ''
+
+    # Strip markdown code fences if present (```json ... ```)
+    clean = response_text.strip()
+    if clean.startswith('```'):
+        clean = '\n'.join(clean.split('\n')[1:])
+    if clean.endswith('```'):
+        clean = '\n'.join(clean.split('\n')[:-1])
 
     try:
-        fix = json.loads(response_text.strip())
+        fix = json.loads(clean.strip())
     except Exception:
         print("Claude response (raw):\n{}".format(response_text))
         return 1
@@ -378,18 +380,12 @@ def run_jira_mode(config, component):
         ).format(current_ticket, user_input)
 
         response = llm.create_message(
-            messages=[{'role': 'user', 'content': edit_prompt}],
             system='You are editing a Jira ticket. Apply the requested change and return only the updated ticket text.',
+            user_content=edit_prompt,
             max_tokens=2048,
         )
 
-        content = response.content if hasattr(response, 'content') else []
-        updated = ''
-        for block in content:
-            if hasattr(block, 'text'):
-                updated += block.text
-
-        current_ticket = updated.strip()
+        current_ticket = (response.content if isinstance(response.content, str) else '').strip()
         print("\n" + "=" * 70)
         print(current_ticket)
         print("=" * 70)
