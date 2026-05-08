@@ -4773,6 +4773,20 @@ cmd_fix() {
                 --component "$component" \
                 --failure-id "$failure_id" \
                 --application "$APPLICATION_NAME"
+            local pr_exit=$?
+            if [ $pr_exit -eq 0 ]; then
+                echo ""
+                printf "Create this PR on GitHub? [y/N]: "
+                read -r push_choice
+                if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
+                    python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                        --mode pr \
+                        --component "$component" \
+                        --failure-id "$failure_id" \
+                        --application "$APPLICATION_NAME" \
+                        --execute
+                fi
+            fi
             ;;
         2)
             echo ""

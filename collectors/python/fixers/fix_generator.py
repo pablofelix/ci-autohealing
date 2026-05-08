@@ -219,9 +219,13 @@ def build_fix_prompt(failure, analysis, file_contents):
 # PR mode
 # ---------------------------------------------------------------------------
 
-def run_pr_mode(config, component, failure_id, application):
-    # type: (CollectorConfig, Optional[str], Optional[int], str) -> int
-    """Fetch files, call Claude, print unified diff. No writes."""
+def run_pr_mode(config, component, failure_id, application, execute=False):
+    # type: (CollectorConfig, Optional[str], Optional[int], str, bool) -> int
+    """Fetch files, call Claude, print unified diff.
+
+    With execute=True: creates branch, pushes files, opens PR on GitHub.
+    Default (dry-run): prints diff only, no writes.
+    """
     if not config.llm:
         print("Error: LLM not configured — set ANTHROPIC_API_KEY or LLM_PROVIDER in .env", file=sys.stderr)
         return 1
@@ -293,17 +297,21 @@ def run_pr_mode(config, component, failure_id, application):
         print("Claude response (raw):\n{}".format(response_text))
         return 1
 
-    # Display results
     target_repo = determine_target_repo(failure, analysis, fix)
     branch_name = 'ci-autohealing/{}/{}'.format(
         failure['component_name'], failure['id']
     )
+    base_branch = failure.get('branch') or 'main'
+    if fix.get('target_repo') == 'konflux-central':
+        base_branch = 'main'
 
+    header = "  PR DRY-RUN — no changes pushed" if not execute else "  PR EXECUTE — will push to GitHub"
     print("=" * 70)
-    print("  PR DRY-RUN — no changes pushed")
+    print(header)
     print("=" * 70)
     print("Target repo : {}".format(target_repo))
     print("Branch      : {}".format(branch_name))
+    print("Base branch : {}".format(base_branch))
     print("PR title    : {}".format(fix.get('pr_title', '')))
     print("Confidence  : {:.0%}".format(fix.get('confidence', 0)))
     if fix.get('target_repo_reason'):
@@ -331,10 +339,66 @@ def run_pr_mode(config, component, failure_id, application):
         print()
 
     print("=" * 70)
-    print("  To create this PR: --execute flag (not yet implemented)")
-    print("=" * 70)
 
-    return 0
+    if not execute:
+        print("  To create this PR: add --execute flag")
+        print("=" * 70)
+        return 0
+
+    # --- Execute: create branch, push files, open PR ---
+    parsed = parse_github_repo(target_repo)
+    if not parsed:
+        print("Error: Cannot parse target repo URL: {}".format(target_repo), file=sys.stderr)
+        return 1
+    owner, repo = parsed
+
+    # Find the SHA of base branch to branch from
+    base_sha = github.get_ref_sha(owner, repo, base_branch)
+    if not base_sha:
+        print("Error: Could not resolve {} branch SHA in {}/{}".format(
+            base_branch, owner, repo), file=sys.stderr)
+        return 1
+
+    print("Creating branch {}...".format(branch_name))
+    if not github.create_branch(owner, repo, branch_name, base_sha):
+        print("Error: Failed to create branch", file=sys.stderr)
+        return 1
+
+    # Push each file
+    files_to_push = fix.get('files', [])
+    for file_fix in files_to_push:
+        path = file_fix['path']
+        new_content = file_fix.get('new_content', '')
+        commit_msg = 'fix({}): {}'.format(
+            failure['component_name'],
+            file_fix.get('change_summary', 'update {}'.format(path)),
+        )
+        # Fetch existing SHA for update (None if new file)
+        existing_sha = github.get_file_sha(owner, repo, path, branch_name)
+        print("Pushing {} ...".format(path))
+        if not github.put_file(owner, repo, path, new_content, commit_msg,
+                               branch_name, existing_sha):
+            print("Error: Failed to push {}".format(path), file=sys.stderr)
+            return 1
+
+    # Create PR
+    pr_body = fix.get('pr_body', '')
+    pr_body += '\n\n---\n_Automated fix by ci-autohealing (failure id: {})_'.format(
+        failure['id']
+    )
+    pr_url = github.create_pull_request(
+        owner, repo,
+        title=fix.get('pr_title', 'fix({}): automated CI fix'.format(failure['component_name'])),
+        body=pr_body,
+        head=branch_name,
+        base=base_branch,
+    )
+    if pr_url:
+        print("\nPR created: {}".format(pr_url))
+        return 0
+    else:
+        print("\nError: Failed to create PR — check logs above.", file=sys.stderr)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -473,12 +537,15 @@ def main():
     parser.add_argument('--failure-id', type=int, help='build_failures.id')
     parser.add_argument('--application', default='acme-v2-0')
     parser.add_argument('--summary', help='Jira issue title (mode=jira). Auto-generated if omitted.')
+    parser.add_argument('--execute', action='store_true',
+                        help='mode=pr: actually create branch and open PR (default: dry-run)')
     args = parser.parse_args()
 
     config = CollectorConfig.from_env()
 
     if args.mode == 'pr':
-        return run_pr_mode(config, args.component, args.failure_id, args.application)
+        return run_pr_mode(config, args.component, args.failure_id, args.application,
+                           execute=args.execute)
     else:
         return run_jira_mode(config, args.component or '', args.summary)
 

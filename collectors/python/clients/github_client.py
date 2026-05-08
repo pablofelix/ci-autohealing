@@ -4,6 +4,7 @@ Fetches commit diffs, file contents, and PR info via HTTP.
 No disk usage — all data returned in memory.
 """
 
+import base64
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -347,6 +348,120 @@ class GitHubClient:
                          owner, repo, ref[:8])
 
         return context
+
+    # ------------------------------------------------------------------
+    # Write methods (require repo write scope on the token)
+    # ------------------------------------------------------------------
+
+    def _post(self, path, payload):
+        # type: (str, Dict) -> Optional[requests.Response]
+        """POST with JSON payload. Returns response on 2xx, None on error."""
+        url = '{}{}'.format(self.API_BASE, path)
+        try:
+            resp = self._session.post(url, json=payload, timeout=30)
+        except requests.RequestException as e:
+            logger.error("GitHub POST %s: %s", path, str(e)[:100])
+            return None
+        if resp.status_code in (200, 201, 422):
+            return resp
+        logger.error("GitHub POST %s: HTTP %d — %s", path, resp.status_code,
+                     resp.text[:200])
+        return None
+
+    def _put(self, path, payload):
+        # type: (str, Dict) -> Optional[requests.Response]
+        """PUT with JSON payload. Returns response on 2xx, None on error."""
+        url = '{}{}'.format(self.API_BASE, path)
+        try:
+            resp = self._session.put(url, json=payload, timeout=30)
+        except requests.RequestException as e:
+            logger.error("GitHub PUT %s: %s", path, str(e)[:100])
+            return None
+        if resp.status_code in (200, 201):
+            return resp
+        logger.error("GitHub PUT %s: HTTP %d — %s", path, resp.status_code,
+                     resp.text[:200])
+        return None
+
+    def get_ref_sha(self, owner, repo, branch):
+        # type: (str, str, str) -> Optional[str]
+        """Return the commit SHA that a branch points to, or None if not found."""
+        resp = self._get('/repos/{}/{}/git/ref/heads/{}'.format(owner, repo, branch))
+        if not resp:
+            return None
+        return resp.json().get('object', {}).get('sha')
+
+    def get_file_sha(self, owner, repo, path, ref):
+        # type: (str, str, str, str) -> Optional[str]
+        """Return the blob SHA of a file (needed to update an existing file)."""
+        resp = self._get('/repos/{}/{}/contents/{}'.format(owner, repo, quote(path, safe='')),
+                         params={'ref': ref})
+        if not resp:
+            return None
+        return resp.json().get('sha')
+
+    def create_branch(self, owner, repo, branch_name, from_sha):
+        # type: (str, str, str, str) -> bool
+        """Create a new branch pointing to from_sha. Returns True on success."""
+        path = '/repos/{}/{}/git/refs'.format(owner, repo)
+        payload = {'ref': 'refs/heads/{}'.format(branch_name), 'sha': from_sha}
+        resp = self._post(path, payload)
+        if resp is None:
+            return False
+        if resp.status_code == 422:
+            err = resp.json().get('message', '')
+            if 'already exists' in err:
+                logger.warning("Branch %s already exists in %s/%s", branch_name, owner, repo)
+                return True
+            logger.error("GitHub create_branch 422: %s", err)
+            return False
+        logger.info("Created branch %s in %s/%s", branch_name, owner, repo)
+        return True
+
+    def put_file(self, owner, repo, path, content, message, branch, existing_sha=None):
+        # type: (str, str, str, str, str, str, Optional[str]) -> bool
+        """Create or update a file on branch. Returns True on success.
+
+        existing_sha is required when updating (not creating) a file — GitHub
+        uses it as a collision guard. Pass None when creating a new file.
+        """
+        encoded = base64.b64encode(content.encode('utf-8')).decode('ascii')
+        payload = {
+            'message': message,
+            'content': encoded,
+            'branch': branch,
+        }  # type: Dict[str, Any]
+        if existing_sha:
+            payload['sha'] = existing_sha
+
+        api_path = '/repos/{}/{}/contents/{}'.format(owner, repo, quote(path, safe=''))
+        resp = self._put(api_path, payload)
+        if resp is None:
+            return False
+        logger.info("Updated %s on %s/%s@%s", path, owner, repo, branch)
+        return True
+
+    def create_pull_request(self, owner, repo, title, body, head, base='main'):
+        # type: (str, str, str, str, str, str) -> Optional[str]
+        """Create a PR and return its HTML URL, or None on failure.
+
+        head: branch name that contains the changes (e.g. 'ci-autohealing/comp/42').
+        base: target branch (default: 'main').
+        """
+        path = '/repos/{}/{}/pulls'.format(owner, repo)
+        payload = {
+            'title': title,
+            'body': body,
+            'head': head,
+            'base': base,
+            'draft': False,
+        }
+        resp = self._post(path, payload)
+        if resp is None:
+            return None
+        url = resp.json().get('html_url', '')
+        logger.info("Created PR: %s", url)
+        return url or None
 
     def check_rate_limit(self):
         # type: () -> Optional[Dict[str, int]]
