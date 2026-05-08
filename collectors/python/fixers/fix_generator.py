@@ -367,8 +367,8 @@ def _prompt(tty, msg):
         raise KeyboardInterrupt
 
 
-def run_jira_mode(config, component):
-    # type: (CollectorConfig, str) -> int
+def run_jira_mode(config, component, summary=None):
+    # type: (CollectorConfig, str, Optional[str]) -> int
     """Read ticket from stdin, interactive edit loop, POST to Jira."""
     if not config.llm:
         print("Error: LLM not configured — set ANTHROPIC_API_KEY in .env", file=sys.stderr)
@@ -435,10 +435,10 @@ def run_jira_mode(config, component):
         print("Not posted. Ticket text saved above.")
         return 0
 
-    # Extract summary (first non-empty line)
-    lines = [l for l in current_ticket.splitlines() if l.strip()]
-    summary = lines[0].lstrip('#').strip() if lines else 'Build failure: {}'.format(component)
-    body = '\n'.join(lines[1:]).strip()
+    # Summary: use passed value, or fall back to a generic title
+    if not summary:
+        summary = 'Build failure: {}'.format(component)
+    body = current_ticket
 
     jira = JiraClient(
         base_url=config.jira.base_url,
@@ -472,6 +472,7 @@ def main():
     parser.add_argument('--component', help='Component name')
     parser.add_argument('--failure-id', type=int, help='build_failures.id')
     parser.add_argument('--application', default='acme-v2-0')
+    parser.add_argument('--summary', help='Jira issue title (mode=jira). Auto-generated if omitted.')
     args = parser.parse_args()
 
     config = CollectorConfig.from_env()
@@ -479,7 +480,7 @@ def main():
     if args.mode == 'pr':
         return run_pr_mode(config, args.component, args.failure_id, args.application)
     else:
-        return run_jira_mode(config, args.component or '')
+        return run_jira_mode(config, args.component or '', args.summary)
 
 
 if __name__ == '__main__':

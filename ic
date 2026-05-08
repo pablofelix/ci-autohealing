@@ -4776,10 +4776,12 @@ cmd_fix() {
             ;;
         2)
             echo ""
+            local jira_summary="Build failure: ${component} — ${error_type:-unknown} in ${failed_step:-unknown}"
             export_jira "$component" "$export_type" | \
                 python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
                     --mode jira \
-                    --component "$component"
+                    --component "$component" \
+                    --summary "$jira_summary"
             ;;
         3)
             echo ""
