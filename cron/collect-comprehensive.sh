@@ -102,7 +102,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
     if [ -n "$LLM_PROVIDER" ]; then
         echo ""
         echo "========================================================================"
-        echo "[7/7] Running AI analysis on new failures..."
+        echo "[7/8] Running AI analysis on new failures..."
         echo "========================================================================"
         echo ""
         python3.11 analyze_failures.py 2>&1 || {
@@ -110,7 +110,48 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
         }
     else
         echo ""
-        echo "[7/7] Skipping AI analysis (LLM_PROVIDER not configured)"
+        echo "[7/8] Skipping AI analysis (LLM_PROVIDER not configured)"
+    fi
+
+    # Step 7.5: Autonomous conforma fix (optional - requires GITHUB_TOKEN + AUTONOMOUS_MODE=true)
+    # Creates PRs for high-confidence auto-fixable violations without human approval.
+    # Off by default; enable with AUTONOMOUS_MODE=true in .env after manual validation.
+    if [ -n "$GITHUB_TOKEN" ] && [ "${AUTONOMOUS_MODE:-false}" = "true" ]; then
+        echo ""
+        echo "========================================================================"
+        echo "[7.5/8] Running autonomous conforma fix (AUTONOMOUS_MODE=true)..."
+        echo "========================================================================"
+        echo ""
+        python3.11 fixers/auto_fix.py 2>&1 || {
+            echo "Autonomous fix failed (non-critical - continuing)"
+        }
+    fi
+
+    # Step 8: Doc context collection for error patterns
+    # Fetches doc pages for known patterns so next analysis cycle has richer context.
+    # Skipped gracefully when VPN / network is unavailable.
+    echo ""
+    echo "========================================================================"
+    echo "[8/8] Refreshing doc context for error patterns..."
+    echo "========================================================================"
+    echo ""
+    python3.11 collect_doc_context.py 2>&1 || {
+        echo "Doc context collection failed (non-critical - continuing)"
+    }
+
+    # Step 9: Poll Jira comments (requires JIRA_EMAIL + JIRA_TOKEN + LLM_PROVIDER)
+    if [ -n "$JIRA_EMAIL" ] && [ -n "$JIRA_TOKEN" ] && [ -n "$LLM_PROVIDER" ]; then
+        echo ""
+        echo "========================================================================"
+        echo "[9/9] Polling Jira tickets for new comments..."
+        echo "========================================================================"
+        echo ""
+        python3.11 poll_jira_comments.py 2>&1 || {
+            echo "Jira comment polling failed (non-critical - continuing)"
+        }
+    else
+        echo ""
+        echo "[9/9] Skipping Jira comment polling (JIRA_EMAIL, JIRA_TOKEN, or LLM_PROVIDER not configured)"
     fi
 
     echo ""

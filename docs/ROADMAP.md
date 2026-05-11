@@ -1,7 +1,7 @@
 # Roadmap: CI-Autohealing — From Monitoring to Auto-Resolution
 
 **Created:** 2026-04-22
-**Last Updated:** 2026-04-28
+**Last Updated:** 2026-05-11 (session 5)
 
 ## Context
 
@@ -12,19 +12,17 @@ The ci-autohealing project has evolved into a solid failure detection and diagno
 | Phase | Status | Description |
 |-------|--------|-------------|
 | Phase 0 | **Complete** | Cleanup: dead code removal, docs consolidation, tests, ADRs |
-| Phase 1 | **Complete** | AI analysis of failures using Claude (1.1-1.7 complete) |
-| Phase 1.8 | **Complete** | Conforma daily reporting & exception tracking |
-| Phase 2 | Planned | Auto-resolution of build failures via PRs |
-| Phase 3 | Planned | Auto-resolution of Conforma compliance violations |
+| Phase 1 | **Complete** | AI analysis of failures using Claude (1.1-1.9 complete) |
+| Phase 2 | **Complete** | Auto-resolution of build failures via PRs |
+| Phase 3 | **Complete** | Auto-resolution of Conforma compliance violations |
+| Phase 4 | **In Progress** | Hardening: multi-app support, test coverage, Slack API, autonomous mode |
 
 ## Sequencing
 
 ```
-Phase 0 (Cleanup) ──> Phase 1 (AI Analysis) ──┬──> Phase 2 (Build Fixes)
-                                               └──> Phase 3 (Conforma Fixes)
+Phase 0 (Cleanup) ──> Phase 1 (AI Analysis) ──┬──> Phase 2 (Build Fixes) ✓
+                                               └──> Phase 3 (Conforma Fixes) ←─ here
 ```
-
-Phase 2 before Phase 3 because build failures block releases and dependency fixes are more mechanical.
 
 ---
 
@@ -43,17 +41,17 @@ What was done:
 
 ---
 
-## Phase 1: AI Analysis
+## Phase 1: AI Analysis (Complete)
 
 **Goal:** Use Claude API to analyze failures, populate `ai_analysis` table, show analysis in `ic describe`. Analysis only — no PRs, no auto-fixes.
 
-**Status:** **COMPLETE** - All subphases (1.1-1.7) implemented. MCP server (1.7) enables external agents to access Konflux data.
+**Status:** **COMPLETE** - All subphases (1.1-1.8) implemented. MCP server (1.7) enables external agents to access Konflux data.
 
 **Provider:** Claude on Vertex AI (provider-independent architecture allows swapping to direct Anthropic API or other LLMs).
 
 ### 1.1 Build failure analyzer (COMPLETE)
 
-**Files:** 
+**Files:**
 - `collectors/python/analyzers/build_failure_analyzer.py` - Orchestrator
 - `collectors/python/clients/llm_provider.py` - Provider ABC
 - `collectors/python/clients/vertex_ai_provider.py` - Vertex AI adapter
@@ -120,16 +118,8 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 **Part 3: Export to Tickets (`ic export` namespace)**
 - `ic export <num|component> jira` — Complete Jira ticket template
 - `ic export <num|component> jira --clipboard` — Copy to clipboard
+- `ic export <num|component> slack [--jira KEY] [--clipboard]` — Slack message (mrkdwn)
 - Calculated fields: Priority (P1/P2/P3), Risk Level (HIGH/MEDIUM/LOW), Estimated Fix Time
-- Templates for markdown, json, slack (marked for future implementation)
-
-**Files modified:**
-- `ic` — Added ~600 lines for AI commands and export templates
-- `analyze_failures.py` — Added CLI arguments: `--component`, `--limit`, `--force`
-- `analyzers/build_failure_analyzer.py` — Updated `run()` to accept component_filter and force
-- `repositories/ai_analysis_repository.py` — Updated `get_pending_failures()` to support filtering
-
-**Future:** Phase 2+ will add `ic jira` namespace for automated ticket creation via Jira API.
 
 ### 1.5 Langfuse integration (COMPLETE)
 
@@ -155,7 +145,11 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - Policy exception process with JIRA template and MR instructions
 - Fix options: vendor dependency (preferred), approved alternative, request exception
 
-**Future:** Markdown (GitHub Issues), JSON (automation), Slack message formats
+**Slack export (`ic export <N> slack`):**
+- Team handle auto-lookup from `rhoai-component-data.yaml` (cached in `/tmp`, 24h TTL, VPN-graceful)
+- Separate templates for build failures and conforma violations (mrkdwn format)
+- Optional `--jira KEY` to include ticket link, `--clipboard` to copy
+- `parsers/lookup_team.py` — standalone YAML→handle resolver
 
 ### 1.7 MCP Server (COMPLETE)
 
@@ -167,13 +161,6 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - `konflux-mcp-server/src/konflux_mcp/models.py` - Pydantic response models
 - `konflux-mcp-server/src/konflux_mcp/repository_factory.py` - DB connection (no config dependency)
 
-**Architecture:** Application-agnostic, stateless tools
-- Each tool accepts `application` parameter (no config coupling)
-- Supports hybrid pattern:
-  - **Parallel comparison** (read-only): Compare stats, failures across versions
-  - **Sequential fixing** (write ops): Focus on ONE version when creating PRs
-  - **Smart reuse**: Check if fix applies to other versions without context mixing
-
 **7 MCP Tools:**
 1. `list_applications()` - Discover available RHOAI versions
 2. `list_alerts(application)` - Get all alerts (build + Conforma)
@@ -183,33 +170,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 6. `search_failures(application, category, ...)` - Search/filter failures
 7. `get_stats(application)` - Summary stats (pending, analyzed, costs)
 
-**Tool Patterns (documented in tool descriptions):**
-- ✅ Parallel for analysis: `get_stats("v3-4")`, `get_stats("v3-5")` → decide which to fix first
-- ✅ Sequential for fixing: Complete all v3-4 PRs → then move to v3-5
-- ✅ Hybrid check: While fixing v3-4, query v3-5 to check if same fix applies (smart reuse)
-- ❌ Anti-pattern: Don't interleave PRs across versions (context switching nightmare)
-
-**Response Models (Pydantic):**
-- `ApplicationInfo` - Version metadata
-- `FailureSummary` - Brief failure info (lists)
-- `BuildFailureDetails` - Full context (logs, commit diff, Dockerfile, Tekton configs)
-- `ConformaViolationDetails` - Full context (SBOM, policy rules, violation terms)
-- `AnalysisDetails` - AI analysis result
-- `AlertsSummary` - Unified view (build + Conforma)
-- `StatsResponse` - Summary statistics
-
-**Benefits:**
-- No SSH/DB access needed - agents query via MCP protocol
-- Other agents can integrate (not just local `ic` CLI)
-- Enables AI-powered workflows: analyze → compare → fix → PR → test
-- Reuses existing repositories (no duplication)
-- Read-only (no orchestration - analysis stays in Python CLI)
-
 ### 1.8 Conforma Daily Reporting & Exception Tracking (COMPLETE)
-
-**Goal:** Automate daily Conforma violation tracking for DLY Progress standup. Combine DB data, GitHub conforma-reporter exceptions, and GitLab konflux-release-data policy exceptions into a single report.
-
-**Modified:** `ic` — added ~400 lines for reporting, exception cross-referencing, and expiring exception tracking.
 
 **New CLI commands:**
 - `ic conforma report` — Daily report with DLY-ready summary table
@@ -217,140 +178,320 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - `ic conforma report --summary` — Summary only (no per-component detail)
 - `ic conforma report --no-cache` — Force re-fetch from GitHub/GitLab
 
-**New helper functions in `ic`:**
+**Data sources:** Local PostgreSQL + GitHub conforma-reporter exceptions + GitLab konflux-release-data policy files (4 EnterpriseContractPolicy files).
 
-| Function | Purpose |
-|----------|---------|
-| `app_to_reporter_branch()` | Converts `acme-v2-0` to `acme-3.4` branch name |
-| `fetch_conforma_exceptions()` | Fetches exception rules from GitHub conforma-reporter (cached daily) |
-| `fetch_gitlab_exceptions()` | Fetches active exception rules from GitLab policy files (cached daily) |
-| `fetch_expiring_exceptions()` | Fetches expiring exceptions with dates from GitLab (cached daily) |
-| `check_exception_status()` | Cross-references violations against both GitHub and GitLab sources |
-| `find_component_expiry()` | Finds earliest expiring exception date per component |
+**Exception status logic:** `YES` / `PARTIAL (github)` / `PARTIAL (gitlab)` / `NO`
 
-**Data sources cross-referenced:**
-1. **Local PostgreSQL** (`conforma_results` + `ai_analysis` tables) — violation data
-2. **GitHub** `acme-org/conforma-reporter` — per-version branch exception/exclusion YAML (suppresses from CSV report only)
-3. **GitLab** `releng/konflux-release-data` — 4 EnterpriseContractPolicy files (actual Conforma enforcement):
-   - `registry-acme-prod.yaml`, `fbc-acme-prod.yaml`
-   - `registry-acme-stage.yaml`, `fbc-acme-stage.yaml`
-
-**Exception status logic:**
-- `YES` — covered by both GitHub and GitLab
-- `PARTIAL (github)` — suppressed from CSV report but still fires in PipelineRuns
-- `PARTIAL (gitlab)` — policy exception exists but still in reporter CSV
-- `NO` — no exception in either source
-
-**Expiring exceptions:**
-- 21-day window (matches Grafana alerts)
-- Color-coded: red ≤7d ("expiring soon"), yellow ≤14d, normal ≤21d
-- Groups by date with day name
-- Shows already-expired exceptions
-- Per-component expiry date in detailed breakdown
-
-**Report output sections:**
-1. DLY Progress table (copy-paste ready for standup)
-2. Expiring exceptions detail (grouped by date, color-coded)
-3. Already expired exceptions
-4. Detailed breakdown per version (component, violations, exception source, AI status, expiry, action)
-5. Source URLs for manual verification
-
-**Also updated:** `ic get alerts` conforma section — Exception column now shows source (github/gitlab) with wider format.
+**Expiring exceptions:** 21-day window, color-coded (red ≤7d, yellow ≤14d).
 
 ---
 
-## Phase 2: Build Failure Auto-Resolution
+## Phase 2: Build Failure Auto-Resolution (Complete)
 
-**Goal:** Auto-fix common build failures, create PRs. Start narrow, expand.
+**Goal:** Auto-fix common build failures, create PRs via GitHub API. Start narrow, expand.
 
-**Design Decision Pending:** Agent vs Tool approach
-- **Agent approach**: Complex orchestration (analyze → validate → branch → commit → PR → monitor)
-- **Tool approach**: Reusable MCP tool (simpler but less flexible)
-- **Recommendation**: Start with agent, extract tool later after learning what's reusable
-- Agent can use MCP tools (get_failure, get_analysis) within its workflow
+**Note on implementation:** The roadmap originally described a git-clone approach. The actual implementation uses the GitHub Contents API exclusively (no git binary required, no disk cloning). This is simpler, more portable, and works in environments without git credentials configured.
 
-### 2.1 MVP: dependency_issue only
+### 2.1 Fix generator (COMPLETE)
 
-**New file:** `collectors/python/agent.py`
+**File:** `collectors/python/fixers/fix_generator.py`
 
-Workflow:
-1. Query `ai_analysis` where `can_auto_fix = TRUE` and no resolution attempt exists
-2. Clone repo (shallow, specific branch)
-3. Read files identified in `recommended_files`
-4. Call Claude with: error, analysis, file contents — ask for specific diff
-5. Apply diff, create branch `ci-autohealing/<component>/<failure-id>`
-6. Push and create PR via GitHub API
-7. Insert into `resolution_attempts`, update `build_failures.ai_fix_attempted`
+**Two modes:**
+- `--mode pr` — Claude generates JSON fix spec, files fetched from GitHub, diff shown, PR created with `--execute`
+- `--mode jira` — Stdin ticket text, interactive edit loop (LLM-assisted), POST to Jira API
 
-### 2.2 GitHub integration
+**PR workflow:**
+1. Load failure + AI analysis from DB
+2. Fetch recommended files from GitHub (Contents API, no clone)
+3. Call Claude with failure context + file contents → JSON fix spec
+4. Show unified diff (dry-run by default)
+5. With `--execute`: `get_ref_sha` → `create_branch` → `put_file` per file → `create_pull_request`
+6. Record in `resolution_attempts` table
 
-**New file:** `collectors/python/github_client.py`
-- `clone_repo()`, `create_branch()`, `commit_and_push()`, `create_pull_request()`
-- Uses `GITHUB_TOKEN` from `.env`
-- PR template includes: PipelineRun link, AI analysis, what changed, automated fix notice
+### 2.2 GitHub client (COMPLETE)
 
-### 2.3 Fix verification loop
+**File:** `collectors/python/clients/github_client.py`
 
-**New file:** `collectors/python/verify_fixes.py`
-- Check `resolution_attempts` where `status = 'pr_created'`
-- Was PR merged? Did next build succeed?
-- Update `was_successful`, mark failure resolved if fix worked
+**Read operations:** `get_commit`, `get_file_content`, `get_directory_listing`, `get_pr_for_commit`, `get_commit_context`, `get_pull_request`, `check_rate_limit`
 
-### 2.4 Safety controls
+**Write operations:** `create_branch`, `put_file`, `create_pull_request`, `get_ref_sha`, `get_file_sha`
 
-Config in `.env`:
-- `AI_AUTO_FIX_ENABLED=false` (explicit opt-in)
-- `AI_MIN_CONFIDENCE=0.85`
-- `AI_MAX_FIX_ATTEMPTS=3` per failure
-- `AI_AUTO_FIX_CATEGORIES=dependency_issue` (start narrow)
-- `AI_DRY_RUN=true` (generate fixes without pushing)
-- `AI_REQUIRE_APPROVAL=true` (draft PRs)
+### 2.3 Fix verification loop (COMPLETE)
 
-Guardrails: never modify tests, max 3 files / 50 lines per fix, always new branch, 1 fix per component per day
+**File:** `collectors/python/fixers/verify_fixes.py`
 
-### 2.5 Expand categories (after >70% success rate)
+**Cron step 2.5** (after sync_component_status.py, only if `GITHUB_TOKEN` set):
+- Checks `resolution_attempts WHERE pr_merged IS NULL AND status='pr_created'`
+- Fetches PR status from GitHub API
+- If PR merged: checks `build_failures.is_resolved=TRUE AND resolved_at > pr_merged_at`
+- Updates `was_successful`, `verification_notes`, `status` ('success'/'failed'/'abandoned')
+- Idempotent: merged-but-not-yet-resolved stays `pr_merged=NULL` for next cron run
 
-- Phase 2b: `config_error` — missing Dockerfile labels, YAML syntax
-- Phase 2c: `build_error` — missing COPY sources, base image updates
-- Phase 2d: `git_sync_issue` — branch reference corrections
+### 2.4 Resolution tracking (COMPLETE)
 
-### 2.6 CLI
+**File:** `collectors/python/repositories/resolution_attempt_repository.py`
 
-New commands: `ic get fixes`, `ic fix <component>`, `ic fix <component> --dry-run`
+**Table:** `resolution_attempts` — tracks all PR fix attempts for both build and conforma failures.
+- `record_pr_created()` — build failure PR, marks `build_failures.ai_fix_attempted=TRUE`
+- `record_conforma_pr_created()` — conforma PR, marks `conforma_results.ai_fix_attempted=TRUE`
+- `get_pending_verification()` — returns both build and conforma pending attempts
+- `update_verification()` — marks success on the correct parent table
+- `get_all(days=30)` — used by `ic get fixes`, includes `failure_type` column
 
-### 2.7 ADR
+**Schema:** `build_failure_id` nullable, `conforma_result_id` FK added, CHECK constraint enforces exactly one is set. See `db/migrations/005_conforma_resolution.sql`.
 
-`docs/adr/006-auto-fix-safety-controls.md`
+### 2.5 Safety controls (COMPLETE)
+
+- Dry-run by default — `--execute` required to push
+- Interactive confirmation in `ic fix` before pushing
+- `--execute` flag is the explicit opt-in; no autonomous pushing
+- Branch naming: `ci-autohealing/<component>/<failure-id>`
+
+### 2.6 CLI (COMPLETE)
+
+- `ic fix <num|component>` — Interactive triage: AI analysis display → action menu [1-4]
+  - [1] PR dry-run → optional push
+  - [2] Jira ticket (interactive edit loop)
+  - [3] Slack notification
+  - [4] Skip
+- `ic get fixes [--days N] [--all]` — Table of all resolution attempts with status
+- `ic jira link <component> <JIRA-KEY>` — Link a Jira ticket to a failure in DB
+- `ic jira create conforma <component>` — POST conforma violation to Jira (--execute flag)
+- `ic export <N> slack [--jira KEY] [--clipboard]` — Slack message ready to paste
+
+### 1.9 AI Analyzer Hardening + Institutional Memory (COMPLETE)
+
+**Goal:** Make the analyzers more robust under failure conditions, avoid re-analyzing the same unsolvable failures forever, and feed historical knowledge of known errors back into the LLM prompt so repeated failures get better/faster diagnoses.
+
+#### Analysis state machine
+
+**Migration:** `db/migrations/006_analysis_state.sql`
+- `build_failures` + `conforma_results` gain: `ai_attempts INTEGER DEFAULT 0`, `ai_skip_reason TEXT`
+- Partial indexes updated to exclude skipped rows (`ai_skip_reason IS NULL`)
+- `ai_skip_reason` values: `null` (pending), `'no_logs'` (logs never arrived), `'max_retries'` (3 consecutive LLM failures)
+
+**New repository methods** (`ai_analysis_repository.py`):
+- `increment_attempts(build_failure_id|conforma_result_id)` — atomic UPDATE RETURNING, returns new count
+- `mark_skipped(reason, ...)` — sets `ai_skip_reason` + `ai_analyzed=TRUE`
+- `skip_no_logs_timeouts(application, timeout_days=7)` — bulk-marks failures with NULL logs after 7 days
+
+**Analyzer changes** (both `build_failure_analyzer.py` and `conforma_analyzer.py`):
+- `MAX_RETRIES = 3` class constant
+- `run()` calls `skip_no_logs_timeouts()` before fetching pending
+- Each failure: `increment_attempts()` → analyze → on exception: if `attempts >= MAX_RETRIES`, call `mark_skipped('max_retries')`
+- `get_pending_failures()` / `get_pending_conforma_violations()` now exclude skipped rows
+
+**`ic ai status` enhancements:**
+- Separate counts for `Pending`, `No logs yet`, `Skipped (max retries or no-logs timeout)`
+- High confidence vs low confidence split within Analyzed
+
+#### Prompts as Markdown files
+
+**Files created:**
+- `prompts/build_failure_analyzer.md` — YAML frontmatter + full CI/CD troubleshooting system prompt
+- `prompts/conforma_analyzer.md` — compliance specialist prompt with 12-violation catalog
+- `prompts/fix_generator_pr.md` — JSON spec format for PR generation
+- `prompts/fix_generator_jira.md` — Jira editor persona
+
+**Loader:** `collectors/python/prompt_loader.py`
+- Strips YAML frontmatter (`---` ... `---`) automatically
+- Fails fast at import time if prompt file missing (startup-time error, not runtime)
+- Used by all three analyzers: `SYSTEM_PROMPT = load_prompt('build_failure_analyzer')`
+
+**Benefit:** Prompts can be edited by non-developers, version-controlled separately, and tested by reading the Markdown directly.
+
+#### Error pattern library (institutional memory)
+
+**Migration:** `db/migrations/007_error_patterns.sql`
+- New table `error_patterns`: one row per `(failure_type, failure_category)` — coarse-grained for v1
+- Columns: `typical_fix TEXT`, `doc_url TEXT`, `doc_context TEXT` (cached doc excerpt), `occurrence_count`, `avg_confidence` (rolling average), `first/last_seen_at`
+- FK from `ai_analysis.error_pattern_id` to `error_patterns`
+- **Seeded with 17 known patterns** (7 build categories + 10 conforma categories) including `typical_fix` text for each
+
+**Repository:** `collectors/python/repositories/error_pattern_repository.py`
+- `find_or_create(failure_type, failure_category)` — upsert on unique key
+- `record_occurrence(pattern_id, confidence_score)` — increments count, updates rolling avg_confidence
+- `update_doc_context(pattern_id, doc_context)` — stores fetched doc excerpt
+- `get_needing_doc_fetch(stale_days=7)` — patterns with `doc_url` but missing/stale `doc_context`
+- `link_analysis(analysis_id, pattern_id)` — sets `ai_analysis.error_pattern_id`
+
+**LATERAL JOIN in pending queries:** `get_pending_failures()` / `get_pending_conforma_violations()` now join `ai_analysis → error_patterns` to return `pattern_typical_fix`, `pattern_doc_context`, `pattern_name`, `pattern_id` alongside each pending failure — zero extra round-trips.
+
+**Analyzer integration:** After each successful analysis, both analyzers call `find_or_create → record_occurrence → link_analysis`. Before calling the LLM, `_format_pattern_section()` injects a "Known Pattern" section into the prompt when prior fix/doc data exists.
+
+#### Doc context collector
+
+**File:** `collectors/python/collect_doc_context.py`
+- Fetches Konflux (`https://konflux.pages.redhat.com/docs/users/`) and Conforma (`https://conforma.dev/docs/user-guide/`) documentation pages for patterns that have `doc_url` but missing/stale `doc_context`
+- Uses stdlib `urllib.request` + `html.parser` — no external deps
+- Cache: `/tmp/konflux-docs-cache/<md5(url)>.txt`, 7-day TTL
+- VPN-graceful: any network failure → log warning → continue (never blocks analysis)
+- Cron step 8/8 in `collect-comprehensive.sh`
+
+**CLI:** `ic patterns list [--type build|conforma]` — table with frequency, avg confidence, doc status
+**CLI:** `ic patterns show <name>` — full detail: description, typical fix, doc URL, 20-line doc excerpt
+
+#### Bug fix: `sync_component_status.py` phantom failures
+
+**File:** `collectors/python/collectors/status_synchronizer.py`
+
+**Problem:** If `oc get component <name>` failed (component renamed, deleted, or cluster timeout), `run()` skipped the entire component with "Component not found in cluster" — it never called `get_current_status()`, so the failure stayed `is_resolved=FALSE` forever even if all builds had succeeded.
+
+**Fix:** Removed the `continue` guard. `get_current_status()` only needs the component name (queries PipelineRuns by label selector) — `repository_url` is only needed for `record_successful_build()`, which gracefully accepts empty strings. Components without a Component CR now still get their build status checked and resolved if appropriate.
+
+### 2.7 Commit context collection (COMPLETE)
+
+**File:** `collectors/python/collect_commit_context.py`
+
+**Cron step 6** (only if `GITHUB_TOKEN` set): fetches commit diff, Dockerfile, .tekton configs, and associated PR info for each unanalyzed failure. Stored in `build_failures` for richer AI context.
 
 ---
 
-## Phase 3: Conforma Auto-Resolution
+## Phase 3: Conforma Auto-Resolution (In Progress)
 
-**Goal:** Fix Enterprise Contract compliance violations. Different from build failures — these are policy violations, not code bugs.
+**Goal:** Fix Enterprise Contract compliance violations automatically. Separate pipeline from build fixes — different data, different fix strategies, different resolution tracking.
 
-### 3.1 Conforma fix agent
+### 3.1 Schema extension (COMPLETE)
 
-**New file:** `collectors/python/conforma_agent.py`
+**Migration:** `db/migrations/005_conforma_resolution.sql`
+- `conforma_results` gains: `ai_analyzed`, `ai_analysis_id`, `ai_fix_attempted`, `ai_fix_successful`
+- `resolution_attempts` extended: `build_failure_id` made nullable, `conforma_result_id` FK added, CHECK constraint (exactly one set)
+- Index: `idx_ra_conforma`
 
-Priority order by auto-fixability:
-1. **Missing required labels** (95% fixable) — add `LABEL` to Dockerfile
-2. **Deprecated API version** (90% fixable) — update apiVersion in YAML
-3. **Base image from unapproved registry** (60% fixable) — update FROM line
-4. **Missing CVE scan** (low) — usually pipeline config, flag for manual review
+### 3.2 CLI triage flow (COMPLETE)
 
-### 3.2 Schema extension
+**`ic fix <conforma-component>`** — Jira-first sequential flow (separate from build menu):
+1. Jira ticket draft → interactive edit → optional POST
+2. After Jira: "Also generate an automated PR fix?" (offered when `ai_analysis.can_auto_fix=TRUE`)
+3. PR dry-run → "Push to GitHub?" → `--execute`
+4. "Send Slack notification?"
 
-Add to `conforma_results`: `ai_analyzed`, `ai_analysis_id`, `ai_fix_attempted`
-Or create `conforma_analysis` table mirroring `ai_analysis`.
+**PR fix dispatch** — `fix_generator.py` auto-detects the violation category from DB and routes to the correct deterministic fixer. Calling code (ic) only needs `--conforma-id`.
 
-### 3.3 CLI
+**`cmd_fix()` bug fixes applied:**
+- Queries `conforma_results` (not `build_failures`) for conforma type
+- AI analysis lookup uses `conforma_result_id` FK (not `build_failure_id`)
+- Display shows "conforma violation in scenario X (N violations)"
 
-- `ic describe conforma <name>` — add AI analysis showing which violations are fixable
-- `ic fix conforma <name>` — trigger fix attempt
+### 3.3 Conforma fix generator — policy_deprecated_task (COMPLETE)
 
-### 3.4 ADR
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_pr_mode`)
 
-`docs/adr/007-conforma-fix-strategy.md`
+**Deterministic fix (no LLM):**
+1. Load `conforma_results` + AI analysis from DB (`load_conforma_and_analysis`)
+2. Parse `violation_details` JSONB → extract old/new bundle ref pairs (`parse_deprecated_task_fixes`)
+   - Regex: `oci://...@sha256:<digest>` pairs from `solution` field
+3. Fetch all `.tekton/*.yaml` files from GitHub
+4. Replace old refs with new refs (string substitution)
+5. Show unified diff (dry-run), then `--execute` path: branch → push → PR → record attempt
+
+**CLI arg:** `--conforma-id` (parallel to `--failure-id`, mutually exclusive)
+
+### 3.4 Remaining conforma violation categories (In Progress)
+
+#### 3.4.1 `policy_hermetic_build` (COMPLETE)
+
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_hermetic_mode`)
+
+**Fix:** Set `hermetic: "true"` in `.tekton/*.yaml` pipeline params. Deterministic — no LLM call.
+
+**Key design decisions:**
+- Searches `konflux-central` repo first (shared pipeline templates for RHOAI components), then falls back to the component's own repository. This matches the actual codebase structure: RHOAI push pipeline definitions live in `konflux-central`, not in each component repo.
+- File discovery: lists `.tekton/` directory, prefers files whose filename contains the component name, falls back to content search if no name match
+- Regex fix: `(- name: hermetic\n\s+(?:value|default): )(?:"false"|false)` → `"true"` (handles both quoted and unquoted, both `value` and `default`)
+- Category dispatch: `main()` peeks at DB category before calling the right handler — no changes needed to `ic`
+- Offered to user in `ic fix` whenever `ai_analysis.can_auto_fix=TRUE` (not hardcoded to a category name)
+
+#### 3.4.2 `policy_unpinned_task` (COMPLETE)
+
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_unpinned_task_mode`)
+
+**Fix:** Find all floating `quay.io/repo:tag` refs (no `@sha256:`) across `.tekton/*.yaml`, resolve the current digest via quay.io v2 API (`GET /v2/{repo}/manifests/{tag}`, read `Docker-Content-Digest` header), and append `@sha256:<digest>`. Works independently of `violation_details` structure — uses registry API directly.
+
+**Key design decisions:**
+- `_FLOATING_REF_RE` regex with dual negative lookaheads: `(?![a-z0-9._\-])` (boundary) + `(?!@sha256:)` (exclude already-pinned). The boundary assertion prevents backtracking from matching partial tags within already-pinned refs.
+- Searches component's own repo only (task refs live in component repos, not konflux-central)
+- Refs that fail API resolution are left in place with a warning in the PR body
+
+#### 3.4.3 `policy_untrusted_image` (COMPLETE)
+
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_untrusted_image_mode`)
+
+**Fix:** Extract flagged pinned refs from `violation_details` (msg, solution, description fields); re-resolve each tag to the current digest via quay.io v2 API; substitute in both `.tekton/*.yaml` and Containerfile candidates. Uses `_refresh_pinned_ref()` helper.
+
+**Key design decisions:**
+- Searches both `.tekton/` and Containerfile/Dockerfile candidates (unlike unpinned_task which is `.tekton/`-only)
+- `oci://` prefix on refs is preserved when re-pinning
+- Same-digest case (ref already current) returns the old ref unchanged, producing a no-op diff
+
+#### 3.4.4 `policy_sbom_vendor_label` (COMPLETE)
+
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_sbom_vendor_label_mode`)
+
+**Fix:** Insert `LABEL vendor="Red Hat, Inc."` into `Containerfile` after the last existing `LABEL` line, or before `CMD`/`ENTRYPOINT` if no labels exist, or append at end. Idempotent — skips if vendor label already present.
+
+#### 3.4.5 `policy_rpm_repository` (COMPLETE)
+
+**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_rpm_repo_id_mode`)
+
+**Fix:** Replace generic repo section IDs (`[ubi-N-foo-rpms]`) with arch-specific format (`[ubi-N-for-$basearch-foo-rpms]`) in `rpms.in.yaml` and `*.repo` files. Regex-only, no LLM.
+
+#### 3.4.6 Other categories → manual review (implemented behavior)
+
+All other violation categories (`policy_signing_key`, `policy_rpm_repository`, etc.) remain in the Jira-first flow with no auto-fix attempt. The `can_auto_fix` flag in the AI analysis controls whether the PR fix option is offered.
+
+### 3.5 ADR (COMPLETE)
+
+`docs/adr/006-conforma-fix-strategy.md` — documents the separate fix code paths, Jira-first flow rationale, and deterministic vs LLM fix strategy per violation type.
+
+---
+
+---
+
+## Phase 4: Hardening (In Progress)
+
+**Goal:** Remove environmental assumptions, broaden test coverage, add Slack API integration, and move toward autonomous operation.
+
+### 4.1 Multi-application support (COMPLETE)
+
+Remove the hard-wired `acme-v2-0` assumption so the tool works across all RHOAI versions without manual switching.
+
+**Changes:**
+- `ic-config.sh`: Add `KNOWN_APPLICATIONS` variable (replaces hard-coded list buried in `ic`)
+- `ic conforma report`: Read `KNOWN_APPLICATIONS` instead of inline literal
+- `fix_generator.py`: Remove `acme-v2-0` argparse default; derive from first app in DB if `--application` not passed
+- `ic get alerts` / `ic alerts`: Add `--all` flag to show failures across all applications at once, grouped by application
+
+### 4.2 Deterministic fixer test suite (COMPLETE)
+
+55 unit tests across 8 pure functions in `collectors/python/tests/test_fix_generator.py`. Two real production bugs found and fixed:
+- `_FLOATING_REF_RE` backtracking: partial tags within pinned refs were incorrectly matched as floating
+- `apply_hermetic_fix` `\b` boundary: word-boundary fails for quoted `"false"` (non-word char on both sides)
+
+### 4.3 Slack API integration (Blocked — no token)
+
+When a Slack bot token is available, add `ic export <N> slack --send` to post directly to the team's channel instead of clipboard. Currently `export_slack()` generates mrkdwn text for manual paste.
+
+**Prerequisite:** Slack bot token with `chat:write` scope, stored in `.env` as `SLACK_BOT_TOKEN`.
+
+### 4.4 Autonomous mode infrastructure (COMPLETE — disabled by default)
+
+**Files:**
+- `collectors/python/fixers/auto_fix.py` — NEW autonomous runner
+- `cron/collect-comprehensive.sh` — step 7.5 (guarded by `AUTONOMOUS_MODE=true`)
+- `ic-config.sh` — `AUTONOMOUS_MODE` variable (default: false)
+- `collectors/python/config.py` — `AUTO_FIX_MAX_PER_RUN` (3), `AUTO_FIX_MIN_CONFIDENCE` (0.95)
+- `collectors/python/fixers/fix_generator.py` — `attempted_by='ic-fix'` default added to 7 functions
+- `collectors/python/repositories/resolution_attempt_repository.py` — `attempted_by` param in 2 record functions
+
+**Design:**
+- All 5 safety gates must pass: `can_auto_fix=TRUE`, `requires_human_review=FALSE`, `confidence_score ≥ 0.95`, `ai_fix_attempted=FALSE`, no open ci-autohealing branch on GitHub
+- Only conforma fixers — no LLM-generated build failure diffs
+- Writes `attempted_by='autonomous'` to `resolution_attempts` for audit trail
+- Capped at `AUTO_FIX_MAX_PER_RUN=3` per cron invocation
+- `verify_fixes.py` picks up autonomous PRs automatically — no changes needed
+
+**To enable:** Set `AUTONOMOUS_MODE=true` in `.env` after validating manual `ic fix` on at least 5 conforma violations across two application versions.
 
 ---
 
@@ -358,9 +499,27 @@ Or create `conforma_analysis` table mirroring `ai_analysis`.
 
 | File | Purpose |
 |------|---------|
-| `db/schema.sql` | `ai_analysis` and `resolution_attempts` tables already defined |
-| `collectors/python/database.py` | Active Database class |
-| `collectors/python/collect_comprehensive.py` | Primary collector, patterns to follow |
-| `cron/collect-comprehensive.sh` | Orchestration to extend |
-| `ic` | CLI to extend with analysis/fix commands |
-| `.env` | Already has `ANTHROPIC_API_KEY`, `AI_*` config, `GITHUB_TOKEN` placeholders |
+| `db/schema.sql` | Full schema (build_failures, conforma_results, ai_analysis, resolution_attempts, error_patterns) |
+| `db/migrations/` | 003 (conforma AI), 004 (jira_key), 005 (conforma resolution), 006 (analysis state), 007 (error patterns) |
+| `prompts/build_failure_analyzer.md` | Build failure LLM system prompt (Markdown, YAML frontmatter) |
+| `prompts/conforma_analyzer.md` | Conforma violation LLM system prompt with 12-violation catalog |
+| `prompts/fix_generator_pr.md` | PR fix spec generation prompt |
+| `prompts/fix_generator_jira.md` | Jira ticket editor persona |
+| `collectors/python/prompt_loader.py` | Loads prompt Markdown, strips frontmatter |
+| `collectors/python/repositories/error_pattern_repository.py` | Error pattern library CRUD |
+| `collectors/python/repositories/ai_analysis_repository.py` | AI analysis + attempt tracking + LATERAL JOIN for patterns |
+| `collectors/python/collect_doc_context.py` | Fetches doc pages for known error patterns (cron step 8) |
+| `collectors/python/analyzers/build_failure_analyzer.py` | Build failure orchestrator (prompts, state machine, pattern wiring) |
+| `collectors/python/analyzers/conforma_analyzer.py` | Conforma violation orchestrator (same) |
+| `collectors/python/fixers/fix_generator.py` | Build + conforma PR generator and Jira mode |
+| `collectors/python/fixers/verify_fixes.py` | PR merge + build success verification loop |
+| `collectors/python/clients/github_client.py` | GitHub Contents API (read + write) |
+| `collectors/python/repositories/resolution_attempt_repository.py` | Fix attempt tracking |
+| `collectors/python/collect_commit_context.py` | Commit context pre-fetcher |
+| `collectors/python/collectors/status_synchronizer.py` | Component status sync + failure resolution |
+| `cron/collect-comprehensive.sh` | Cron orchestration (steps 1-8) |
+| `ic` | Main CLI (~5500 lines) |
+| `ic-config.sh` | Defaults + COMPONENT_DATA_URL, GITLAB_API_BASE |
+| `ic-queries.sh` | Reusable SQL query functions |
+| `parsers/lookup_team.py` | YAML→Slack team handle resolver |
+| `.env` | ANTHROPIC_API_KEY, GITHUB_TOKEN, JIRA_EMAIL, JIRA_TOKEN, LLM_PROVIDER |
