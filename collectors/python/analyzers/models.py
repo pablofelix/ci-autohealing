@@ -102,6 +102,9 @@ class ConformaAnalysisResult(BaseModel):
         'policy_version_label',
         'policy_fips_check',
         'policy_deprecated_task',
+        'policy_sbom_vendor_label',
+        'policy_cpe_label',
+        'policy_source_image',
         'config_error',
         'infrastructure'
     ] = Field(

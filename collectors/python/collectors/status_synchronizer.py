@@ -345,8 +345,7 @@ class StatusSynchronizer:
             logger.info("[%d/%d] %s", i, len(components), component.name)
 
             if not component.repository_url:
-                logger.warning("Component not found in cluster")
-                continue
+                logger.warning("Component CR not found in cluster — syncing status anyway")
 
             result = self.sync_component(component)
             components_synced += 1

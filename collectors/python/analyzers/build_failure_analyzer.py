@@ -13,9 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import CollectorConfig
 from logger import setup_logger
-from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository
+from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository, ErrorPatternRepository
 from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from prompt_loader import load_prompt
 
 logger = setup_logger(__name__)
 
@@ -79,123 +80,7 @@ ANALYSIS_TOOL = {
 }
 
 
-SYSTEM_PROMPT = """You are a CI/CD troubleshooting specialist analysing Konflux pipeline failures for the RHOAI (Red Hat OpenShift AI) project. Your role is to help the team understand what went wrong and suggest a path forward.
-
-## Tone and Style
-
-Write as a knowledgeable colleague sharing findings with the team — not as an authority issuing verdicts. Use tentative, collaborative language:
-
-- "From what I can see, this appears to be..." rather than "This is caused by..."
-- "Looking at the commit history, there seem to be..." rather than "The commit history shows..."
-- "It might be worth exploring whether..." rather than "You should..."
-- "I could be misreading the history here" when you're not fully certain
-
-Never state root causes as absolute fact. Present your analysis as informed interpretation of the evidence, acknowledging where you might be wrong. Use hedging language naturally: "appears to", "seems to", "could be", "likely", "it looks like".
-
-## Output Format (CRITICAL)
-
-Your `root_cause` and `recommended_fix` fields will be displayed to developers in a terminal. Format them for maximum clarity.
-
-**PLAIN TEXT ONLY — NO MARKDOWN:**
-- Do NOT use markdown headers (#, ##, ###)
-- Do NOT use bold (**text**) or italic (*text*)
-- Do NOT use markdown tables (|col1|col2|)
-- Do NOT use code blocks (```)
-- Do NOT use numbered lists (1., 2., 3.)
-- Use ONLY plain text with dash (-) bullet points
-
-**root_cause formatting:**
-- Start with a 1-sentence summary stating exactly what you observe
-- Follow with 2-4 short paragraphs (2-3 sentences each)
-- IMPORTANT: Separate paragraphs with TWO newlines (\n\n) for visual spacing
-- State only what the evidence directly shows - do not infer or speculate
-- Cite the source for every claim using this format:
-  * For files: "File `.tekton/pipeline.yaml` shows: `path-context: .`"
-  * For logs: "Build logs line 142: `ERROR: cannot find module`"
-  * For diffs: "Commit diff for `file.yaml`: removed line 10 `old value`, added `new value`"
-
-**recommended_fix formatting (CRITICAL - NO NUMBERED LISTS):**
-- MUST use bullet points with dash (-) character
-- NEVER use numbered lists (1., 2., 3., etc.)
-- IMPORTANT: Add blank line (\n\n) between each bullet point for readability
-- Start each bullet with the action verb
-- Include exact file paths, line numbers, or commands
-- Format: "- Action to take. Source: file X line Y shows current value `Z`."
-- Keep each bullet to 2-3 lines maximum
-
-Example recommended_fix format:
-```
-- Update the path-context value. File `.tekton/pipeline.yaml` line 15 shows: `path-context: ./source` which needs to be `path-context: source`.
-
-- Remove the .git suffix from repository URL. File `requirements.txt` references `git+https://example.com/repo.git` but the URL should be `git+https://example.com/repo`.
-
-- Pin the dependency version. Build logs show `ERROR: No matching distribution found for package>=1.0` but file `requirements.txt` line 42 should specify exact version `package==1.2.3`.
-```
-
-**Evidence rules (CRITICAL):**
-- Only state what you directly observe in: commit diff, logs, error messages, configs
-- Do NOT infer intent, speculate about causes, or assume what "might" be wrong
-- Quote exact text when referencing: error messages, config values, code snippets
-- Always cite the source: which file, which line, which log section
-- If evidence is missing, state: "Evidence not available: commit diff not provided"
-
-## What Makes a Good Analysis
-
-DO:
-- Trace the failure back to the specific commit or change that introduced it
-- Explain the chain of causation: what changed → why it broke → what to do about it
-- Reference specific files, line numbers, or config parameters from the commit diff
-- Distinguish between the immediate error and the underlying cause
-- Suggest both a quick fix and a lasting solution when applicable
-- Note related failures across other components if the pattern is similar
-
-DO NOT:
-- Simply restate the error message as the root cause
-- Give generic advice like "check the configuration" without specifics
-- Provide high confidence scores without strong evidence
-- Ignore the commit diff when it's available — it's the most important evidence
-
-## Evidence Priority
-
-1. **Commit diff** (most important) — What actually changed? This usually reveals the cause
-2. **Pipeline/Tekton configs** — How is the build configured? Context paths, Dockerfile locations
-3. **Dockerfile** — Build steps, base images, dependencies
-4. **Build logs** — The error output, stack traces
-5. **Error message** — Useful for classification but not root cause
-
-## Confidence Scoring
-
-- 0.9+ Only when the commit diff clearly shows the breaking change
-- 0.7-0.9 When the evidence strongly suggests a cause but you can't be 100% certain
-- 0.5-0.7 When you have a reasonable hypothesis but limited evidence
-- Below 0.5 When you're largely guessing — be honest about it
-
-## Auto-fix Assessment
-
-Mark `can_auto_fix: true` only when:
-- The fix is a specific, mechanical change (version pin, path correction)
-- You can identify the exact file and line to change
-- No architectural or design judgement is required
-- The change is low-risk and easily reversible
-
-## When to Suggest Human Contact
-
-If your confidence is below 0.6 or you cannot identify a clear root cause:
-- Suggest reaching out to the commit author for context
-- If the failure involves specific files, recommend contacting whoever last modified them
-- Frame it as "it might be worth checking with [author] who made the recent changes to understand the intent"
-- Don't just say "ask the author" — explain WHAT to ask them about (e.g., "ask about the intent behind changing CURDIR to REPO_ROOT")
-
-## Known Konflux/Tekton Patterns
-
-**CONTEXT parameter escapes source directory:**
-- If error says "CONTEXT parameter ($CONTEXT) is invalid because it escapes the source"
-- Check the Tekton config's `path-context` parameter
-- Common cause: Leading `./` prefix (e.g., `./jobs/async-upload` instead of `jobs/async-upload`)
-- Buildah interprets `./` as a path traversal attempt
-- Fix: Remove the `./` prefix from the path-context value in the .tekton/ YAML file
-- This often comes from konflux-central syncs — check the upstream config
-- Confidence should be HIGH (0.9+) if you see this pattern in the Tekton config"""
+SYSTEM_PROMPT = load_prompt('build_failure_analyzer')
 
 
 class BuildFailureAnalyzer:
@@ -220,6 +105,7 @@ class BuildFailureAnalyzer:
         self.config = config
         self.build_repo = build_repo or BuildFailureRepository(db)
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
+        self.pattern_repo = ErrorPatternRepository(db)
 
         # Create LLM provider from config
         if llm is None:
@@ -275,6 +161,9 @@ class BuildFailureAnalyzer:
             failure.get('commit_context')
         )
 
+        # Known-pattern context from previous occurrences of the same failure category
+        pattern_section = self._format_pattern_section(failure)
+
         user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
 
 ## Component
@@ -291,7 +180,7 @@ class BuildFailureAnalyzer:
 - Failed Step: {failed_step}
 - Error Type: {error_type}
 - Error Message: {error_message}
-{commit_context}
+{commit_context}{pattern_section}
 ## Build Logs
 ```
 {logs}
@@ -338,6 +227,7 @@ CRITICAL FORMATTING RULES:
             error_type=failure.get('error_type', 'unknown'),
             error_message=failure.get('error_message', 'unknown'),
             commit_context=commit_context_section,
+            pattern_section=pattern_section,
             logs=logs
         )
 
@@ -424,6 +314,21 @@ CRITICAL FORMATTING RULES:
                 )
 
         return '\n'.join(sections) + '\n'
+
+    def _format_pattern_section(self, failure):
+        # type: (Dict[str, Any],) -> str
+        """Return a prompt section with institutional memory from prior occurrences."""
+        fix = failure.get('pattern_typical_fix')
+        doc = failure.get('pattern_doc_context')
+        name = failure.get('pattern_name', 'prior occurrence')
+        if not fix and not doc:
+            return ""
+        parts = ["\n## Known Pattern: {}\n".format(name)]
+        if fix:
+            parts.append("### Previous Solution\n{}\n".format(fix))
+        if doc:
+            parts.append("### Relevant Documentation\n{}\n".format(doc[:2000]))
+        return '\n'.join(parts)
 
     def parse_analysis_response(self, llm_response):
         # type: (Any,) -> Dict[str, Any]
@@ -533,7 +438,7 @@ CRITICAL FORMATTING RULES:
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
         # Save to database
-        self.ai_repo.insert_analysis(
+        analysis_id = self.ai_repo.insert_analysis(
             build_failure_id=failure['id'],
             model_used=self.llm.model_name(),
             langfuse_trace_id=getattr(trace, 'id', None) if trace else None,
@@ -544,10 +449,18 @@ CRITICAL FORMATTING RULES:
             **analysis
         )
 
+        # Update pattern library with this occurrence
+        pattern = self.pattern_repo.find_or_create('build', analysis['failure_category'])
+        self.pattern_repo.record_occurrence(pattern['id'], analysis['confidence_score'])
+        if analysis_id:
+            self.pattern_repo.link_analysis(analysis_id, pattern['id'])
+
         # Finalize trace
         self.langfuse.end_trace(trace, output=analysis)
 
         return analysis
+
+    MAX_RETRIES = 3
 
     def run(self, limit=5, component_filter=None, force=False):
         # type: (int, Optional[str], bool) -> Dict[str, Any]
@@ -559,7 +472,7 @@ CRITICAL FORMATTING RULES:
             force: If True, re-analyze even if already analyzed
 
         Returns:
-            Dict with stats: analyzed count, duration
+            Dict with stats: analyzed, skipped_new, duration
         """
         start_time = time.time()
 
@@ -572,11 +485,18 @@ CRITICAL FORMATTING RULES:
             logger.info("Force mode: Re-analyzing existing analyses")
         logger.info("=" * 70)
 
+        # Mark failures whose logs never arrived as permanently skipped
+        skipped_new = self.ai_repo.skip_no_logs_timeouts(
+            self.config.k8s.application_name
+        )
+        if skipped_new:
+            logger.info("Marked %d no-logs failures as skipped (timeout)", skipped_new)
+
         pending = self.get_pending_failures(limit=limit, component_filter=component_filter, force=force)
 
         if not pending:
             logger.info("No pending failures to analyze")
-            return {'analyzed': 0, 'duration': 0}
+            return {'analyzed': 0, 'skipped_new': skipped_new, 'duration': 0}
 
         logger.info("Found %d pending failures", len(pending))
 
@@ -585,7 +505,11 @@ CRITICAL FORMATTING RULES:
             logger.info("[%d/%d] %s", i, len(pending), failure['component_name'])
             logger.info("PipelineRun: %s", failure['pipelinerun_name'])
 
+            attempts = 0
             try:
+                attempts = self.ai_repo.increment_attempts(
+                    build_failure_id=failure['id']
+                )
                 analysis = self.analyze_failure(failure)
                 analyzed += 1
 
@@ -597,8 +521,16 @@ CRITICAL FORMATTING RULES:
                 logger.info("")
 
             except Exception as e:
-                logger.error("Analysis failed for %s: %s",
-                           failure['component_name'], e)
+                logger.error("Analysis failed for %s (attempt %d): %s",
+                             failure['component_name'], attempts, e)
+                if attempts >= self.MAX_RETRIES:
+                    self.ai_repo.mark_skipped(
+                        'max_retries', build_failure_id=failure['id']
+                    )
+                    logger.warning(
+                        "Skipping %s permanently after %d failed attempts",
+                        failure['component_name'], self.MAX_RETRIES,
+                    )
 
         # Flush Langfuse events
         self.langfuse.flush()
@@ -611,4 +543,4 @@ CRITICAL FORMATTING RULES:
         logger.info("Analyzed: %d/%d failures", analyzed, len(pending))
         logger.info("Duration: %.1fs", duration)
 
-        return {'analyzed': analyzed, 'duration': duration}
+        return {'analyzed': analyzed, 'skipped_new': skipped_new, 'duration': duration}

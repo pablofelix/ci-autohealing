@@ -1,641 +1,255 @@
-# CI Auto-Healing System
+# CI Auto-Healing
 
-**Production-ready system for monitoring and diagnosing Konflux CI/CD pipeline failures**
-
----
-
-## 🏗️ Repository Structure (Gitflow)
-
-This repository uses **Gitflow** workflow:
-
-- **`main`**: Production-ready releases (currently empty - not yet released)
-- **`develop`**: Active development branch with current working code
-- **`outdated`**: Archived old files and deprecated code for reference
+Monitors Konflux CI/CD pipeline failures, diagnoses root causes with AI, generates fixes, and manages Jira communication — all from the command line.
 
 ---
 
-## 🚀 Quick Start
+## End-to-end flow
+
+```
+Konflux pipeline fails
+        │
+        ▼  every 20 min (cron)
+┌───────────────────┐
+│  Data collection  │  collect_comprehensive.py → build_failures / conforma_results
+└───────────────────┘
+        │
+        ▼  same cron run
+┌───────────────────┐
+│   AI analysis     │  analyze_failures.py / analyze_conforma.py
+│                   │  → root cause, category, can_auto_fix flag
+└───────────────────┘
+        │
+        ▼  you
+┌───────────────────┐
+│   ic CLI          │  ic get alerts  →  ic 1  →  ic fix 1
+└───────────────────┘
+        │
+        ├──► Auto PR     ic fix 1 → [1] PR → review diff → push → GitHub PR
+        │                Verified next cron: PR merged + build green → marked resolved
+        │
+        ├──► Jira        ic fix 1 → [2] Jira → edit loop → POST ticket
+        │
+        └──► Slack       ic fix 1 → [3] Slack message → clipboard → paste in channel
+
+Jira reply monitoring (separate cron step 9):
+        poll_jira_comments.py → notify-send → ic jira inbox → ic jira inbox refine N
+```
+
+---
+
+## What is implemented
+
+### Data collection
+
+Cron script `cron/collect-comprehensive.sh` runs every 20 minutes with 9 steps:
+
+- Step 1 — `collect_comprehensive.py`: Tekton PipelineRun failures from KubeArchive + Kubernetes API
+- Step 2 — `sync_component_status.py`: marks failures resolved when builds pass
+- Step 2.5 — `fixers/verify_fixes.py`: checks if auto-fix PRs merged and builds recovered (requires `GITHUB_TOKEN`)
+- Step 3 — `check_sync_status.py`: updates sync status cache
+- Step 4 — `check_conforma_status.py`: Conforma (Enterprise Contract) test results
+- Step 5 — `collect_conforma.py`: full violation details per component
+- Step 6 — `collect_commit_context.py`: commit diff, Dockerfile, .tekton/ configs from GitHub (requires `GITHUB_TOKEN`)
+- Step 7 — `analyze_failures.py` + `analyze_conforma.py`: AI root cause analysis (requires `LLM_PROVIDER`)
+- Step 8 — `collect_doc_context.py`: fetches Konflux/Conforma docs for known error patterns
+- Step 9 — `poll_jira_comments.py`: polls Jira tickets for new comments, drafts AI replies, fires desktop notifications (requires `JIRA_EMAIL` + `JIRA_TOKEN` + `LLM_PROVIDER`)
+
+### AI analysis
+
+Both build failures and Conforma violations go through an LLM (Claude on Vertex AI or direct Anthropic API):
+
+Build failures are classified into: `dependency_issue`, `build_error`, `test_failure`, `resource_limit`, `config_error`, `git_sync_issue`, `infrastructure`.
+
+Conforma violations are classified into: `policy_hermetic_build`, `policy_unpinned_task`, `policy_untrusted_image`, `policy_deprecated_task`, `policy_signing_key`, and others.
+
+Each analysis produces: `root_cause`, `failure_category`, `confidence_score`, `recommended_fix`, `can_auto_fix`. The `can_auto_fix` flag controls whether `ic fix` offers a PR.
+
+State machine: failures with no logs after 7 days are marked `ai_skip_reason='no_logs'`. Failures that fail analysis 3 times are marked `ai_skip_reason='max_retries'`. Neither is retried.
+
+Institutional memory: an `error_patterns` table stores per-category `typical_fix` and cached documentation excerpts. These are injected into the LLM prompt on re-analysis.
+
+### ic CLI — main commands
 
 ```bash
-# Switch to develop branch to see active code
-git checkout develop
+# See what is failing
+ic get alerts                        # build failures + conforma violations, unified
+ic get components                    # components with active build failures
+ic get conforma                      # conforma violation summary
 
-# See archived old code
-git checkout outdated
+# Inspect a failure
+ic 1                                 # describe component #1 (shortcut)
+ic describe component <name>         # full build failure details
+ic describe conforma <name>          # conforma violation details
+ic why <name>                        # AI root cause summary
+
+# Triage and fix
+ic fix 1                             # interactive: AI analysis → action menu
+ic fix <component>                   # same, by name
+
+# Jira integration
+ic get jira                          # list linked tickets with live status
+ic jira inbox                        # unreviewed Jira comments with AI drafts
+ic jira inbox refine <N>             # refine draft N via AI conversation
+ic jira inbox done <N>               # mark item N reviewed after posting
+
+# Track fix attempts
+ic get fixes                         # table of PR fix attempts and outcomes
+ic get fixes --all                   # all time
+
+# AI management
+ic ai status                         # pending / analyzed / skipped counts
+ic ai stats                          # breakdown by category and date
+ic ai analyze <name>                 # trigger analysis for one component
+
+# Export
+ic export <N> jira                   # Jira ticket template (dry-run)
+ic export <N> slack [--jira KEY]     # Slack mrkdwn message, ready to paste
+ic export <N> --clipboard            # copy to clipboard instead of stdout
+
+# Conforma reporting
+ic conforma report                   # daily standup table
+ic conforma report 3.4               # filter by version
+
+# Error pattern library
+ic patterns list                     # known error patterns with frequency
+ic patterns show <name>              # full detail + doc excerpt
+```
+
+### Fix generation — what can be auto-fixed
+
+Auto-fix creates a branch, commits the change, and opens a GitHub PR. Dry-run by default; `--execute` required to push. The fix type is dispatched from the AI analysis `failure_category` — `ic` only passes the failure ID.
+
+**`policy_deprecated_task`** (conforma) — replaces old task bundle refs with pinned digests extracted from `violation_details.solution`. Targets the component's `.tekton/` directory.
+
+**`policy_hermetic_build`** (conforma) — sets `hermetic: "true"` in `.tekton/*.yaml` pipeline params. Targets `konflux-central` (shared RHOAI pipeline templates) first, then the component repo as fallback.
+
+**General build failures** — Claude generates a JSON fix spec (files + changes), fetched from GitHub, shown as diff, pushed with `--execute`.
+
+### Jira comment monitoring
+
+`poll_jira_comments.py` runs in cron step 9. For each Jira ticket linked in `build_failures` or `conforma_results` where `is_resolved=FALSE`:
+
+- fetches comments from Jira REST API
+- skips comments already in `jira_comment_drafts` (watermark: `UNIQUE(jira_key, comment_id)`)
+- skips comments posted by the bot account itself
+- calls LLM (system prompt: `prompts/jira_reply_drafter.md`) with full failure context
+- inserts draft into `jira_comment_drafts`
+- fires `notify-send` desktop notification
+
+`ic jira inbox` shows unreviewed items with the original comment (fetched live) and the AI draft.
+
+`ic jira inbox refine N` opens an interactive refinement loop: you give feedback, the LLM revises, repeat until satisfied. On exit, if at least one revision was made, a second LLM call (system prompt: `prompts/jira_prompt_analyzer.md`) checks whether your feedback reveals a systematic style preference and proposes an addition to `jira_reply_drafter.md` for your approval.
+
+### MCP server
+
+`konflux-mcp-server/` exposes 7 tools for external AI agents (Claude Desktop, etc.):
+
+- `list_applications()`, `list_alerts(application)`, `get_failure(component, application)`
+- `get_violation(component, application)`, `get_analysis(component, application, type)`
+- `search_failures(...)`, `get_stats(application)`
+
+---
+
+## What is left to build
+
+**Phase 3.4.2 — `policy_unpinned_task` auto-fixer**
+
+Task bundle refs use floating tags (`quay.io/.../task:0.3`) instead of pinned digests. Fix: resolve current digest via quay.io REST API (`GET /v2/<repo>/manifests/<tag>`, read `Docker-Content-Digest` header), append `@sha256:<digest>` in `.tekton/*.yaml`.
+
+Open question: whether `violation_details.solution` already contains the pinned ref (as `policy_deprecated_task` does) or only the unpinned ref. Needs verification against live data before implementing.
+
+**Phase 3.4.3 — `policy_untrusted_image` auto-fixer**
+
+Dockerfile `FROM` lines use non-approved registries. Fix: replace with the approved alternative from `violation_details.solution`. Different target from unpinned task (Dockerfile, not `.tekton/`).
+
+**Phase 3.5 — ADR 007: conforma fix strategy**
+
+`docs/adr/007-conforma-fix-strategy.md` — document the separate-pipelines decision, Jira-first flow rationale, and deterministic-vs-LLM per violation type.
+
+**DB migration 008 — apply to activate Jira inbox**
+
+`db/migrations/008_jira_comment_drafts.sql` creates the `jira_comment_drafts` table. Has been written; needs to be applied before `ic jira inbox` and `poll_jira_comments.py` can run.
+
+```bash
+docker exec <db-container> psql -U postgres -d konflux_monitoring \
+  -f /path/to/db/migrations/008_jira_comment_drafts.sql
 ```
 
 ---
 
-## 📋 What's in Each Branch
-
-### `develop` Branch (Active Development)
-
-**Core System**:
-- `collectors/python/` - Python data collectors (Kubernetes, KubeArchive, Unified)
-- `cron/` - Automated collection scripts
-- `db/` - Database schema and setup
-- `ic` - CLI tool for querying and analyzing failures
-
-**Documentation**:
-- `AUTOMATIC_SYNC.md` - Automatic synchronization system
-- `MULTI_API_SYSTEM.md` - Multi-API collection architecture
-- `IMPROVED_DIAGNOSTICS.md` - Enhanced diagnostic features
-- `IC_API_DESIGN.md` - API-style CLI design
-- `DEVOPS_ANALYSIS.md` - DevOps analysis and recommendations
-
-**Configuration**:
-- `.env.example` - Environment variables template
-- `docker-compose.yml` - Database container setup
-- `requirements.txt` - Python dependencies
-- `.gitignore` - Files to ignore
-
-### `outdated` Branch (Archive)
-
-Old versions and deprecated files:
-- Previous collector implementations
-- Old shell scripts
-- Deprecated documentation
-- Test files no longer used
-
----
-
-## 🎯 System Overview
-
-### What It Does
-
-1. **Collects** failure data from Konflux CI/CD pipelines using multiple APIs
-2. **Analyzes** failures with commit info, error messages, and TaskRun details  
-3. **Synchronizes** component status (marks resolved when fixed)
-4. **Provides CLI** for querying, analyzing, and diagnosing failures
-
-### Architecture
-
-```
-┌─────────────────────────────────────────┐
-│  Konflux CI/CD (Tekton Pipelines)       │
-│  - Components build on push/PR          │
-│  - PipelineRuns execute                 │
-│  - Some fail, some succeed              │
-└─────────────────────────────────────────┘
-                ↓
-┌─────────────────────────────────────────┐
-│  Data Collection (Python)                │
-│  ├─ Kubernetes API (current data)       │
-│  ├─ KubeArchive API (archived data)     │
-│  └─ OC Pods (logs fallback)             │
-└─────────────────────────────────────────┘
-                ↓
-┌─────────────────────────────────────────┐
-│  Database (PostgreSQL)                   │
-│  - build_failures table                  │
-│  - Stores metadata, logs, commits        │
-└─────────────────────────────────────────┘
-                ↓
-┌─────────────────────────────────────────┐
-│  CLI Tool (ic command)                   │
-│  - Query failures                        │
-│  - Analyze components                    │
-│  - Get logs, commits, errors             │
-└─────────────────────────────────────────┘
-```
-
-### Key Features
-
-✅ **Multi-API Collection**: Uses 3 different APIs for maximum data coverage  
-✅ **AI Analysis**: Claude-powered root cause analysis and fix recommendations  
-✅ **Conforma Support**: Policy compliance violation tracking and analysis  
-✅ **MCP Server**: Expose data to external AI agents (Claude Desktop, GitHub Copilot, etc.)  
-✅ **Automatic Sync**: Runs every 15 minutes via cron  
-✅ **Status Tracking**: Distinguishes "currently failing" vs "historical failures"  
-✅ **Comprehensive Metadata**: Commit SHA, URLs, error summaries, TaskRun details  
-✅ **API-style CLI**: Field selectors, output formats, filters, AI commands  
-✅ **100% Metadata Coverage**: Even without logs, provides diagnostic info
-│                  │    │  - Track in Langfuse         │
-└──────────────────┘    └──────────────────────────────┘
-```
-
-## 📋 Prerequisites
-
-- Python 3.9+
-- PostgreSQL 12+ (same instance as Langfuse)
-- OpenShift CLI (`oc`)
-- Claude Code CLI (for `/ci-build` skill)
-- Active OpenShift session
-
-## 🚀 Quick Start
-
-### 1. Clone and Setup
+## Environment variables
 
 ```bash
-cd ~/claude/ci-autohealing
-chmod +x setup.sh
-./setup.sh
-```
-
-The setup script will:
-- Check prerequisites
-- Create Python virtual environment
-- Install dependencies
-- Create PostgreSQL database and schema
-- Install Claude Code skill
-- Configure environment
-
-### 2. Configure Environment
-
-Edit `.env` file:
-
-```bash
-# Database (same as Langfuse)
+# Required always
 DB_HOST=localhost
-DB_PASSWORD=your_password
+DB_PORT=5433
+DB_USER=postgres
+DB_PASSWORD=admin
+DB_NAME=konflux_monitoring
 
-# Anthropic
-ANTHROPIC_API_KEY=sk-ant-your-key
+# Required for Kubernetes data collection
+NAMESPACE=NAMESPACE_PLACEHOLDER
+APPLICATION_NAME=acme-v2-0
 
-# Langfuse
-LANGFUSE_PUBLIC_KEY=pk-lf-your-key
-LANGFUSE_SECRET_KEY=sk-lf-your-key
+# Required for AI analysis and Jira reply drafting
+LLM_PROVIDER=vertex_ai            # or: anthropic
+ANTHROPIC_VERTEX_PROJECT_ID=...   # Vertex AI (GCP ADC)
+ANTHROPIC_API_KEY=...             # Direct Anthropic API
+
+# Required for commit context and PR creation
+GITHUB_TOKEN=...
+
+# Required for Jira ticket creation and comment monitoring
+JIRA_EMAIL=you@redhat.com
+JIRA_TOKEN=...
+JIRA_URL=https://JIRA_HOST
+JIRA_PROJECT=RHOAIENG
 ```
 
-### 3. Test Scanner
+---
+
+## Setup
 
 ```bash
-source venv/bin/activate
-python3 collectors/scanner.py --mode trigger
-```
+# Start database
+./db-start.sh
 
-You should see:
-```
-Scanning 8 components...
-━━━━━━━━━━━━━━━━━━ 100% • 8/8 • 0:00:15
+# Apply all migrations
+for f in db/migrations/*.sql; do
+    docker exec <db-container> psql -U postgres -d konflux_monitoring -f /workspace/$f
+done
 
-Scan Results
-Scan ID: f47ac10b-58cc-4372-a567-0e02b2c3d479
-Duration: 15.3s
+# Install Python deps
+pip install -r requirements.txt
 
-┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
-┃ Metric              ┃ Count ┃
-┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
-│ Components Scanned  │ 8     │
-│ Total Failures      │ 3     │
-│ New Failures        │ 1     │
-└─────────────────────┴───────┘
-```
-
-## 💻 Usage
-
-### Quick Data Collection (Shell Scripts)
-
-#### Collect Failed PipelineRuns
-```bash
-./collectors/collect-simple.sh
-```
-
-Fast collector that gathers failed PipelineRuns from Konflux using `kubectl tekton` and `oc` commands.
-
-#### Fetch Logs
-```bash
-# From active Kubernetes pods (<8 hours old)
-./collectors/fetch-logs-from-pods.sh
-
-# From KubeArchive API (older failures)
-./collectors/fetch-logs-kubearchive.sh
-```
-
-### CLI Tool: `ic` (Infrastructure/CI)
-
-Query build failures and component health:
-
-```bash
-# Build status
-./ic build status                    # Overall health summary
-./ic build failures --limit 20       # List failures
-./ic build get <pipelinerun>         # Get details
-./ic build logs <pipelinerun>        # View logs
-./ic build recent --limit 10         # Recent failures
-
-# Component health
-./ic component list                  # List all components
-./ic component get <name>            # Component details
-./ic component failures <name>       # Component failures
-
-# Statistics
-./ic stats                          # Database stats
-./ic stats daily                    # Failures by day
-
-# Database
-./ic db status                      # Check connection
-./ic db query "<sql>"               # Custom query
-```
-
-See [README-CLI.md](README-CLI.md) for complete CLI documentation.
-
-### Automatic Log Collection
-
-Install cron job to collect logs every 2 hours:
-
-```bash
+# Install cron job (every 20 min)
 ./cron/install-cron.sh
+
+# Verify
+ic stats
 ```
 
-This ensures logs are captured before pods are deleted.
-
-### Scanner Modes (Python)
-
-#### Trigger Mode (One-time Scan)
-```bash
-python3 collectors/scanner.py --mode trigger
-```
-
-Runs a single scan and exits. Good for:
-- Manual checks
-- Cron jobs
-- CI/CD integration
-
-#### Daemon Mode (Continuous)
-```bash
-python3 collectors/scanner.py --mode daemon --interval 300
-```
-
-Runs continuously, scanning every N seconds. Good for:
-- Always-on monitoring
-- Real-time failure detection
-
-#### Component Mode (Specific Components)
-```bash
-python3 collectors/scanner.py --mode component \
-  --components odh-trustyai-nemo-guardrails-server-v3-4
-```
-
-Scan only specific components.
-
-### Claude Code Skill: `/ci-build`
-
-From Claude Code, you can use:
-
-#### Show Dashboard
-```
-/ci-build
-```
-Shows overview of all failures, component health, and AI metrics.
-
-#### Trigger Scan
-```
-/ci-build scan
-```
-Runs scanner and reports new failures.
-
-#### Analyze Component
-```
-/ci-build odh-trustyai-nemo-guardrails-server-v3-4
-```
-Deep analysis of specific component's latest failure.
-
-#### Auto-Fix
-```
-/ci-build fix odh-trustyai-nemo-guardrails-server-v3-4
-```
-Analyze failure and create PR with fix (if confidence > 0.8).
-
-#### Check Status
-```
-/ci-build status
-```
-Show all pending fixes and their status.
-
-### Direct Database Queries
-
-```bash
-# Connect to database
-psql -h localhost -U postgres -d konflux_monitoring
-
-# Show active failures
-SELECT * FROM active_failures;
-
-# Show component health
-SELECT * FROM component_health ORDER BY health_score ASC;
-
-# Show AI performance
-SELECT * FROM ai_performance;
-```
-
-### Python API (for custom scripts)
-
-```python
-from db.database import Database
-
-db = Database()
-
-# Get unresolved failures
-failures = db.get_unresolved_failures(limit=10)
-
-# Get failures needing analysis
-to_analyze = db.get_failures_needing_analysis(limit=5)
-
-# Get component health
-health = db.get_component_health('odh-trustyai-v3-4')
-```
-
-## 📊 Database Schema
-
-### Core Tables
-
-**build_failures**: All build failures
-- component_name, pipelinerun_name
-- commit info (SHA, message, URL)
-- error details, logs
-- resolution tracking
-
-**ai_analysis**: AI diagnosis of failures
-- root_cause, failure_category
-- confidence_score
-- recommended_fix
-- Langfuse trace IDs
-
-**resolution_attempts**: Fix attempts (AI or manual)
-- attempt_number, strategy
-- PR info (URL, branch, commits)
-- success tracking
-
-**component_health**: Aggregated health metrics
-- success_rate, consecutive_failures
-- AI fix statistics
-- health_score (0-100)
-
-### Views
-
-**active_failures**: Currently unresolved failures
-**component_metrics**: Health metrics per component
-**ai_performance**: AI success rates and costs
-
-## 🤖 AI Remediation
-
-### How It Works
-
-1. **Detection**: Scanner finds new failure
-2. **Triage**: Classify failure type (dependency, test, build, etc)
-3. **Analysis**: Claude analyzes logs + code to find root cause
-4. **Solution**: Generate fix with confidence score
-5. **Decision**: Auto-fix if confidence > threshold
-6. **PR Creation**: Create PR with fix + explanation
-7. **Verification**: Monitor next build for success
-8. **Learning**: Track outcome for future improvements
-
-### Auto-Fix Categories
-
-Currently auto-fixable with high confidence:
-- **dependency_issue**: Version conflicts, missing packages
-- **syntax_error**: Code syntax problems
-- **config_error**: YAML/JSON configuration issues
-
-Requires human review:
-- **test_failure**: Failed tests (may indicate real bugs)
-- **resource_limit**: OOM, timeout (needs capacity planning)
-- **infrastructure**: Platform issues
-
-### Confidence Scoring
-
-AI provides confidence (0.0-1.0) based on:
-- Error message clarity (0.3)
-- Code change simplicity (0.3)
-- Pattern recognition (0.2)
-- Test coverage (0.2)
-
-Auto-fix only happens if confidence ≥ 0.8 (configurable).
-
-## 📈 Dashboards (Grafana)
-
-### Setup Grafana Connection
-
-1. Add PostgreSQL datasource:
-```yaml
-apiVersion: 1
-datasources:
-  - name: Konflux Monitoring
-    type: postgres
-    url: localhost:5432
-    database: konflux_monitoring
-    user: postgres
-    secureJsonData:
-      password: your_password
-```
-
-2. Import dashboards from `dashboards/`:
-   - `failure_overview.json` - Build failures overview
-   - `component_health.json` - Component health matrix
-   - `ai_performance.json` - AI metrics and ROI
-
-### Key Metrics
-
-- **MTTR** (Mean Time To Repair): How fast failures are fixed
-- **Fix Success Rate**: % of AI fixes that work
-- **Component Health Score**: 0-100 per component
-- **Failure Trends**: Daily/weekly failure counts
-- **Cost Per Fix**: AI token usage and costs
-
-## 🔧 Configuration
-
-### Scanner Configuration
-
-In `.env`:
-```bash
-# How often to scan (daemon mode)
-SCANNER_INTERVAL=300  # 5 minutes
-
-# How far back to look
-SCANNER_LOOKBACK_HOURS=48
-
-# Components file (or empty for all)
-COMPONENTS_FILE=/path/to/components.txt
-
-# Max PRs per scan (rate limiting)
-SCANNER_MAX_PRS_PER_RUN=50
-```
-
-### AI Configuration
-
-```bash
-# Enable auto-fix
-AI_AUTO_FIX_ENABLED=false  # Set to true when ready
-
-# Minimum confidence for auto-fix
-AI_MIN_CONFIDENCE=0.8
-
-# Max attempts per failure
-AI_MAX_FIX_ATTEMPTS=3
-
-# Auto-fixable categories
-AI_AUTO_FIX_CATEGORIES=dependency_issue,syntax_error,config_error
-```
-
-## 🎓 Examples
-
-### Example 1: Analyze Recent Failure
-
-```bash
-# From Claude Code
-/ci-build odh-trustyai-nemo-guardrails-server-v3-4
-```
-
-Output:
-```
-╔═══════════════════════════════════════════════════════════╗
-║  FAILURE ANALYSIS                                         ║
-╠═══════════════════════════════════════════════════════════╣
-Component: odh-trustyai-nemo-guardrails-server-v3-4
-Commit: 5df4295 - "Merge upstream/main"
-Failed Task: build-container
-Failed: 4 hours ago
-
-ROOT CAUSE:
-  Category: dependency_issue
-  Confidence: 0.92
-
-  Package 'nvidia-ml-py==12.535.77' not found.
-  Available version is 12.535.161.
-  Likely typo from upstream merge.
-
-PROPOSED FIX:
-  File: requirements.txt:42
-  Change: nvidia-ml-py==12.535.77 → 12.535.161
-
-Would you like me to create a PR with this fix?
-```
-
-### Example 2: Dashboard View
-
-```bash
-/ci-build
-```
-
-Output:
-```
-╔═══════════════════════════════════════════════════════╗
-║         CI/CD BUILD HEALTH DASHBOARD                  ║
-╠═══════════════════════════════════════════════════════╣
-║ Active Failures: 7                                    ║
-║ New (24h): 3                                          ║
-║ Critical Components: 2                                ║
-║ AI Fix Success Rate: 73%                              ║
-╚═══════════════════════════════════════════════════════╝
-
-Critical Components:
-  • odh-trustyai-nemo-guardrails-server-v3-4 (3 failures)
-  • odh-feature-server-v3-4 (2 failures)
-```
-
-### Example 3: Daemon Mode
-
-```bash
-python3 collectors/scanner.py --mode daemon --interval 300
-```
-
-Output:
-```
-Daemon mode started - scanning every 300s
-Press Ctrl+C to stop
-
-═══ Scan #1 at 2026-04-16 12:00:00 ═══
-Scanning 8 components... ✓
-
-Scan Results
-Components Scanned: 8
-New Failures: 1
-
-Next scan in 300s...
-```
-
-## 🐛 Troubleshooting
-
-### Scanner can't find components
-```bash
-# Check you're logged into OpenShift
-oc whoami
-
-# Check namespace
-oc project NAMESPACE_PLACEHOLDER
-
-# List components manually
-oc get components -n NAMESPACE_PLACEHOLDER
-```
-
-### Database connection fails
-```bash
-# Test connection
-psql -h localhost -U postgres -d konflux_monitoring -c '\dt'
-
-# Check credentials in .env
-cat .env | grep DB_
-```
-
-### Skill not working in Claude Code
-```bash
-# Check skill is installed
-ls ~/.claude/skills/ci-build.skill.md
-
-# Reinstall skill
-cp skills/ci-build.skill.md ~/.claude/skills/
-```
-
-## 📚 Project Structure
-
-```
-ci-autohealing/
-├── README.md                        # This file
-├── GETTING-STARTED.md              # Setup guide
-├── README-CLI.md                   # CLI documentation
-├── ic                              # CLI tool executable
-├── db-start.sh                     # Database management
-├── db-stop.sh
-├── db/
-│   ├── schema.sql                  # PostgreSQL schema
-│   ├── migrate.py                  # Migration script
-│   └── database.py                 # Database operations
-├── collectors/
-│   ├── collect-simple.sh           # Fast shell-based collector
-│   ├── fetch-logs-from-pods.sh     # Log collection from pods
-│   ├── fetch-logs-kubearchive.sh   # Log collection from KubeArchive
-│   └── scanner.py                  # Python scanner (daemon/trigger)
-├── cron/
-│   ├── install-cron.sh            # Install cron job
-│   ├── uninstall-cron.sh          # Uninstall cron job
-│   └── collect-logs.sh            # Cron job script
-├── show-dashboard.sh              # Quick summary view
-├── show-component-web.sh          # Component details with links
-├── ai-remediation/
-│   ├── analyzer.py                # AI failure analysis
-│   └── fixer.py                   # AI fix generation
-├── api/
-│   └── main.py                    # FastAPI REST API
-├── skills/
-│   └── ci-build.skill.md          # Claude Code skill
-├── agents/
-│   └── ci-troubleshooter.agent.md # Agent definition
-├── dashboards/
-│   └── grafana/                   # Grafana dashboard JSONs
-└── logs/
-    └── cron/                      # Cron execution logs
-```
-
-## 🚧 Roadmap
-
-- [ ] **Phase 1**: Database + Scanner (✓ Current)
-- [ ] **Phase 2**: AI Analysis Engine
-- [ ] **Phase 3**: Auto-Fix PR Creation
-- [ ] **Phase 4**: Grafana Dashboards
-- [ ] **Phase 5**: Webhook Integration
-- [ ] **Phase 6**: Slack Notifications
-
-## 📝 License
-
-Internal tool for Red Hat RHOAI team.
-
-## 🤝 Contributing
-
-Contact: @operator
-
-## 🔗 Related
-
-- [Langfuse](http://localhost:3000) - Observability dashboard
-- [Konflux UI](https://console.redhat.com/preview/application-pipeline) - Build pipeline UI
-- [Claude Code Docs](https://docs.anthropic.com/claude/docs) - Claude Code documentation
+---
+
+## Key files
+
+| Path | Purpose |
+|------|---------|
+| `ic` | Main CLI (~5600 lines) |
+| `cron/collect-comprehensive.sh` | Cron orchestrator (9 steps) |
+| `collectors/python/analyzers/build_failure_analyzer.py` | Build failure LLM orchestrator |
+| `collectors/python/analyzers/conforma_analyzer.py` | Conforma violation LLM orchestrator |
+| `collectors/python/fixers/fix_generator.py` | PR + Jira fix generator |
+| `collectors/python/fixers/verify_fixes.py` | Fix verification loop |
+| `collectors/python/poll_jira_comments.py` | Jira comment polling + draft generation |
+| `collectors/python/jira_refine.py` | Interactive draft refinement + meta-learning |
+| `collectors/python/clients/jira_client.py` | Jira REST API client |
+| `collectors/python/clients/github_client.py` | GitHub Contents API client |
+| `collectors/python/clients/llm_provider.py` | LLM provider interface (Vertex AI / Anthropic) |
+| `collectors/python/repositories/` | All DB repository classes |
+| `prompts/*.md` | LLM system prompts (editable without code changes) |
+| `parsers/` | Standalone Python parsers called from bash |
+| `db/migrations/` | Schema migrations (001-008) |
+| `konflux-mcp-server/` | MCP server for external AI agent access |
+| `.env` | Local secrets (not committed) |

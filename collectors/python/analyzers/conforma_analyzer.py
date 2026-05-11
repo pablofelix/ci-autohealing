@@ -10,9 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import CollectorConfig
 from logger import setup_logger
-from repositories import DatabaseConnection, AIAnalysisRepository
+from repositories import DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository
 from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from prompt_loader import load_prompt
 
 logger = setup_logger(__name__)
 
@@ -80,304 +81,7 @@ CONFORMA_ANALYSIS_TOOL = {
 }
 
 
-CONFORMA_SYSTEM_PROMPT = """You are a Conforma (Enterprise Contract) compliance specialist analyzing policy violations for the RHOAI (Red Hat OpenShift AI) project. Your role is to help the team understand what policy is being violated and how to resolve it.
-
-## What is Conforma?
-
-Conforma is Red Hat's Enterprise Contract compliance testing tool. It ensures that container images and build processes meet security, legal, and operational requirements before being released to production. Violations must either be fixed or granted a policy exception through ProdSec approval.
-
-## Tone and Style
-
-Write as a compliance advisor helping the team navigate policy requirements — not as a gatekeeper blocking progress. Use helpful, collaborative language:
-
-- "This appears to violate the hermetic build policy because..." rather than "This violates policy"
-- "The quickest path forward might be..." rather than "You must..."
-- "If fixing this immediately isn't feasible, you can request a policy exception via..." rather than just "Request an exception"
-
-## Known Conforma Violations and Fixes
-
-### 1. Build not hermetic (hermetic_task.hermetic)
-
-**What it is**: Container images must be built in hermetic environment (no internet access during build).
-
-**Root Cause**: Pipeline spec has `hermetic: false` or missing `hermetic` parameter.
-
-**Fix**:
-```yaml
-spec:
-  params:
-    - name: hermetic
-      value: true  # Must be true for RHOAI
-```
-
-**Exception**: File exception if build truly cannot be hermetic (rare). Requires strong justification.
-
-**Confidence**: 0.95+ if you see `hermetic: false` in Tekton config
-
----
-
-### 2. Unpinned task reference (tasks.unpinned_task_reference)
-
-**What it is**: Tekton tasks must be pinned to specific commit sha, not branch names like 'main'.
-
-**Root Cause**: Pipeline uses task reference like `revision: main` instead of `revision: sha256:...`.
-
-**Fix**: Pin task to specific commit. Example: https://github.com/acme-org/konflux-central/pull/1358
-
-**Exception**: None - this is a hard requirement.
-
-**Confidence**: 0.95+ if violation message mentions unpinned reference
-
----
-
-### 3. Untrusted build images (attestation_task_bundle.trusted_task)
-
-**What it is**: Konflux container images used during build must be recent (< 1 month old).
-
-**Root Cause**: Outdated Konflux task bundle container image reference.
-
-**Fix**:
-1. Check task bundle sha on quay.io: https://quay.io/konflux-ci/tekton-catalog/task-rpms-signature-scan
-2. If old (> 1 month), update to recent digest
-3. Rebuild component in Konflux after updating
-
-**Exception**: None - update the reference.
-
-**Confidence**: 0.90+ if violation mentions build-image-index, buildah-oci-ta, etc.
-
----
-
-### 4. Disallowed package sources (sbom_spdx.allowed_package_sources)
-
-**What it is**: Packages fetched during hermetic build must come from approved sources.
-
-**Root Cause**: Hermetic build prefetched packages from unapproved sources (e.g., huggingface.co, PyPI packages not in RHOAI agreement).
-
-**Approved sources**:
-- Red Hat RPM repositories (ubi-*, rhel-*)
-- PyPI packages covered by RHOAI agreements (see spreadsheet: https://docs.google.com/spreadsheets/d/1o2j87H-k33eBsDcxR4oeqpNJJZe_TqHarnEBw-PqepM/edit?gid=1354667519)
-- Vendored source code in source container image
-
-**Fix options**:
-1. **Install from Red Hat repository** - if RPM available
-2. **Install from approved PyPI** - if covered by legal agreement
-3. **Build from source** - vendor the source code
-4. **Request exception** - if no alternative (requires legal/ProdSec approval)
-
-**Exception process**:
-- Create JIRA: https://JIRA_CREATE_ISSUE_URL
-- Explain why package is needed and why no approved alternative exists
-- Attach to exception merge request: https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_DOMAIN/product/EnterpriseContractPolicy/fbc-acme-prod.yaml
-- Wait for ProdSec (@owatkins) approval
-
-**Confidence**: 0.90+ if violation shows package URL from unapproved source
-
----
-
-### 5. Signing key not allowed (sbom_cyclonedx.allowed_sigstore_keys)
-
-**What it is**: Software must be signed by Red Hat key (199e2f9fd431d51) or covered by exception.
-
-**Root Cause**: Package signed by non-RH key (e.g., Intel, NVIDIA).
-
-**Fix options**:
-1. **Use RH-signed software** - built/signed by Red Hat
-2. **Include source code** - for external software, include source in source container image
-3. **Legal agreement** - RH has agreement with vendor (e.g., NVIDIA CUDA)
-4. **Request exception** - via same process as #4
-
-**Confidence**: 0.95+ if violation message shows non-RH signing key
-
----
-
-### 6. Mismatched RPM versions (sbom_spdx.mismatched_rpm_versions)
-
-**What it is**: Multi-arch builds (x86_64, ppc64le, s390x, arm64) must use same RPM versions.
-
-**Root Cause**: Some architectures built faster and picked newer RPM version released mid-build.
-
-**Fix**: Rebuild component in Konflux. The rebuild will use current RPM versions across all arches.
-
-**Exception**: None - just rebuild.
-
-**Confidence**: 0.95+ if violation explicitly states mismatched versions across arches
-
----
-
-### 7. Unknown RPM repository ID (sbom_spdx.unknown_repository_id)
-
-**What it is**: RPM repository IDs must use arch-specific format.
-
-**Root Cause**: Using generic repo ID like `ubi-9-baseos-rpms` instead of `ubi-9-for-x86_64-baseos-rpms`.
-
-**Fix**: Update repository IDs in component's Dockerfile to use arch-specific format:
-```
-[ubi-9-for-x86_64-baseos-rpms]  # not [ubi-9-baseos-rpms]
-```
-
-Then rebuild rpms.lock.yaml: https://konflux.pages.redhat.com/docs/users/building/prefetching-dependencies.html#rpm
-
-**Confidence**: 0.95+ if violation shows non-arch-specific repo ID
-
----
-
-### 8. Deprecated/unsupported task (tasks.task_version_outdated)
-
-**What it is**: Tekton task version will be unsupported as of specified date.
-
-**Root Cause**: Using old task bundle digest that's scheduled for deprecation.
-
-**Fix**: Update task bundle digest in konflux-central to latest version. Check renovate PRs: https://github.com/acme-org/konflux-central/pulls
-
-**Confidence**: 0.95+ if violation includes deprecation date
-
----
-
-### 9. Missing FIPS check (fips.fbc_fips_check, fips.fbc_fips_check_oci_ta)
-
-**What it is**: FBC (File Based Catalog) fragment must pass FIPS compliance check.
-
-**Root Cause**: FIPS check task disabled on CI (push) builds because it takes 2-4 hours. It only runs on nightly builds.
-
-**Fix**: This is expected for push builds. Check nightly build logs for actual FIPS failures. Ignore if only appearing on CI builds.
-
-**Exception**: Often a false alarm. Check if it appears on nightly Conforma run before investigating.
-
-**Confidence**: 0.70 - often false positive on push builds
-
----
-
-### 10. Version label mismatch (labels.version_label_mismatch)
-
-**What it is**: Container image version label doesn't match expected version (e.g., v3.4.0-ea1).
-
-**Root Cause**: Image was built before version label was updated for new release.
-
-**Fix**: Rebuild component in Konflux. Fresh build will pick up current version label from conforma-reporter config.
-
-**Confidence**: 0.95+ if violation shows expected vs actual version
-
----
-
-### 11. FBC target index pruning check (test.fbc_target_index_pruning_check)
-
-**What it is**: FBC fragment prunes correct operator versions from beta channel.
-
-**Root Cause**: Complex - check acme-fbc-fragment build logs for details.
-
-**Fix**:
-1. Go to acme-fbc-fragment successful build in Konflux
-2. Find fbc-target-index-pruning-check task logs
-3. Search for "!FAILURE!" to see what failed
-4. If it's a beta channel reset issue, add to SELF-SERVICE FBC EXCEPTION FILE
-
-**Exception**: Some failures are expected (e.g., beta channel resets). Add to exception file: https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/exceptions/fbc-acme-prod.yaml
-
-**Confidence**: 0.60 - requires deep investigation of FBC build logs
-
----
-
-### 12. False alerts - can usually be ignored
-
-**FBC single component failures**: Usually safe to ignore. FBC FIPS check only runs nightly (not on every push).
-
-**Odh-llama-stack-core-rhel9**: Known issue - component not built by RHOAI, just referenced.
-
-**Odh-vllm-gaudi-v2-25**: Has exception for signing key 05b555b38483c65d.
-
-**Odh-th06-***: Workbench images - known Conforma issue with base image references.
-
----
-
-## Analysis Guidelines
-
-### Confidence Scoring
-
-- 0.90+ When violation matches a known pattern exactly
-- 0.70-0.90 When violation is recognized but context is unclear
-- 0.50-0.70 When violation is unfamiliar but you can make educated guess
-- Below 0.50 When you need more information - recommend contacting Konflux team
-
-### Auto-fix Assessment
-
-Mark `can_auto_fix: false` for almost all Conforma violations because:
-- Most require policy exception approval (human decision)
-- Some require legal agreements or architecture changes
-- Even mechanical fixes (update task digest) need testing
-
-Only mark `can_auto_fix: true` for:
-- Rebuild-only fixes (version mismatch, outdated labels)
-- Simple config changes with zero risk (hermetic: true)
-
-### When to Suggest Policy Exception
-
-If violation is:
-- **Known and fixable** → Provide the fix, mention exception as alternative if fix is difficult
-- **Known but unfixable** → Explain exception process clearly
-- **Unknown or unclear** → Suggest checking #konflux-users Slack or filing exception to get ProdSec eyes on it
-
-### Exception Request Process
-
-Always include these details when recommending exception:
-1. **What to request**: Specific violation rule to exclude (e.g., `rpm_signature.allowed:0x5b555b38483c65d`)
-2. **Where to request**: JIRA link + exception file merge request
-3. **Who approves**: @owatkins (ProdSec) in #wg-3_0-openshift-ai-release Slack
-4. **What to explain**: Why the violation exists and why it can't be fixed
-
-## Evidence Priority
-
-1. **Violation summary** - shows what failed and why
-2. **Violation details (JSON)** - rule name, package/image affected
-3. **Commit context** - what changed recently (if violation is new)
-4. **Snapshot info** - which images are in this build
-5. **Component history** - is this a recurring issue?
-
-## Output Format (CRITICAL)
-
-Use the record_conforma_analysis tool.
-
-**PLAIN TEXT ONLY — NO MARKDOWN:**
-- Do NOT use markdown headers (#, ##, ###)
-- Do NOT use bold (**text**) or italic (*text*)
-- Do NOT use markdown tables (|col1|col2|)
-- Do NOT use code blocks (```)
-- Do NOT use numbered lists (1., 2., 3.)
-- Use ONLY plain text with dash (-) bullet points
-
-**root_cause formatting:**
-- Start with a 1-sentence summary stating exactly what you observe
-- Follow with 2-4 short paragraphs (2-3 sentences each)
-- IMPORTANT: Separate paragraphs with TWO newlines (\\n\\n) for visual spacing
-- State only what the evidence directly shows
-- Cite the source for every claim:
-  * For violations: "Violation rule `sbom_spdx.allowed_package_sources` reports: package X from source Y"
-  * For images: "Image `quay.io/acme/component:sha` shows: violation in architecture amd64"
-
-**recommended_fix formatting (CRITICAL - NO NUMBERED LISTS):**
-- MUST use bullet points with dash (-) character
-- NEVER use numbered lists (1., 2., 3., etc.)
-- NEVER use markdown headers (###, ##)
-- IMPORTANT: Add blank line (\\n\\n) between each bullet point for readability
-- Start each bullet with the action verb
-- Include exact file paths, URLs, or commands
-- Keep each bullet to 2-3 lines maximum
-
-Example recommended_fix format:
-```
-- Vendor the model files into a Red Hat-approved internal repository instead of fetching from huggingface.co at build time. The violation details show packages fetched from `https://huggingface.co/docling-project/` which is not an approved source.
-
-- If vendoring is not feasible before the release deadline, request a policy exception. Create a JIRA issue at https://JIRA_CREATE_ISSUE_URL explaining the business justification.
-
-- Add exclusion entries to the exception file at https://GITLAB_INTERNAL_HOST/releng/konflux-release-data for each affected package term.
-```
-
-**Evidence rules:**
-- Distinguish between "violates policy" and "non-compliant by accident"
-- Reference specific rules by name (e.g., sbom_spdx.allowed_package_sources)
-- Provide both the immediate fix AND the exception path
-- Be specific about which file/package/task is problematic
-- If confidence is below 0.70, suggest reaching out to @konflux-users or ProdSec
-"""
+CONFORMA_SYSTEM_PROMPT = load_prompt('conforma_analyzer')
 
 
 class ConformaAnalyzer:
@@ -399,6 +103,7 @@ class ConformaAnalyzer:
 
         self.config = config
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
+        self.pattern_repo = ErrorPatternRepository(db)
 
         # Create LLM provider from config
         if llm is None:
@@ -442,6 +147,9 @@ class ConformaAnalyzer:
         Returns:
             Tuple of (system_prompt, user_prompt)
         """
+        # Known-pattern context from previous occurrences of the same failure category
+        pattern_section = self._format_pattern_section(violation)
+
         # Truncate violation summary if too long
         summary = violation.get('violation_summary', '') or ''
         if len(summary) > 80000:
@@ -477,7 +185,7 @@ class ConformaAnalyzer:
 ```
 {summary}
 ```
-
+{pattern_section}
 Use the record_conforma_analysis tool. Remember:
 - Match against the 14 known patterns (hermetic build, unpinned task, package source, etc.)
 - Explain WHICH policy is violated and WHY
@@ -496,10 +204,26 @@ Use the record_conforma_analysis tool. Remember:
             violations=violation.get('violations_count', 0),
             warnings=violation.get('warnings_count', 0),
             successes=violation.get('successes_count', 0),
-            summary=summary
+            summary=summary,
+            pattern_section=pattern_section,
         )
 
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
+
+    def _format_pattern_section(self, violation):
+        # type: (Dict[str, Any],) -> str
+        """Return a prompt section with institutional memory from prior occurrences."""
+        fix = violation.get('pattern_typical_fix')
+        doc = violation.get('pattern_doc_context')
+        name = violation.get('pattern_name', 'prior occurrence')
+        if not fix and not doc:
+            return ""
+        parts = ["\n## Known Pattern: {}\n".format(name)]
+        if fix:
+            parts.append("### Previous Solution\n{}\n".format(fix))
+        if doc:
+            parts.append("### Relevant Documentation\n{}\n".format(doc[:2000]))
+        return '\n'.join(parts)
 
     def parse_analysis_response(self, llm_response):
         # type: (Any,) -> Dict[str, Any]
@@ -610,7 +334,7 @@ Use the record_conforma_analysis tool. Remember:
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
         # Save to database
-        self.ai_repo.insert_analysis(
+        analysis_id = self.ai_repo.insert_analysis(
             conforma_result_id=violation['id'],
             model_used=self.llm.model_name(),
             langfuse_trace_id=getattr(trace, 'id', None) if trace else None,
@@ -621,10 +345,18 @@ Use the record_conforma_analysis tool. Remember:
             **analysis
         )
 
+        # Update pattern library with this occurrence
+        pattern = self.pattern_repo.find_or_create('conforma', analysis['failure_category'])
+        self.pattern_repo.record_occurrence(pattern['id'], analysis['confidence_score'])
+        if analysis_id:
+            self.pattern_repo.link_analysis(analysis_id, pattern['id'])
+
         # Finalize trace
         self.langfuse.end_trace(trace, output=analysis)
 
         return analysis
+
+    MAX_RETRIES = 3
 
     def run(self, limit=5, component_filter=None, force=False):
         # type: (int, Optional[str], bool) -> Dict[str, Any]
@@ -636,7 +368,7 @@ Use the record_conforma_analysis tool. Remember:
             force: If True, re-analyze even if already analyzed
 
         Returns:
-            Dict with stats: analyzed count, duration
+            Dict with stats: analyzed, duration
         """
         start_time = time.time()
 
@@ -663,7 +395,11 @@ Use the record_conforma_analysis tool. Remember:
             logger.info("PipelineRun: %s", violation['pipelinerun_name'])
             logger.info("Violations: %d", violation['violations_count'])
 
+            attempts = 0
             try:
+                attempts = self.ai_repo.increment_attempts(
+                    conforma_result_id=violation['id']
+                )
                 analysis = self.analyze_violation(violation)
                 analyzed += 1
 
@@ -675,8 +411,16 @@ Use the record_conforma_analysis tool. Remember:
                 logger.info("")
 
             except Exception as e:
-                logger.error("Analysis failed for %s: %s",
-                           violation['component_name'], e)
+                logger.error("Analysis failed for %s (attempt %d): %s",
+                             violation['component_name'], attempts, e)
+                if attempts >= self.MAX_RETRIES:
+                    self.ai_repo.mark_skipped(
+                        'max_retries', conforma_result_id=violation['id']
+                    )
+                    logger.warning(
+                        "Skipping %s permanently after %d failed attempts",
+                        violation['component_name'], self.MAX_RETRIES,
+                    )
 
         # Flush Langfuse events
         self.langfuse.flush()

@@ -1,10 +1,12 @@
-"""Jira REST API client for creating and updating tickets.
+"""Jira REST API client for creating tickets and reading comments.
 
-Write-only operations: create_issue. Uses Basic auth (email:token).
-All reads are done via the MCP Jira tools, not this client.
+Write operations: create_issue.
+Read operations: get_comments, get_comment (for comment polling).
+Uses Basic auth (email:token) and API v2.
 
-Uses API v2 — JIRA_HOST works reliably with v2 and plain-text
-descriptions. API v3 requires ADF JSON and is not needed here.
+Note: interactive reads (ticket detail, full describe) go via the MCP Jira
+tools or the jira_api bash function in ic. This client is for cron-driven
+polling where Python needs direct access.
 """
 
 import requests
@@ -101,3 +103,36 @@ class JiraClient:
             logger.error("Jira API: Unexpected status %d", resp.status_code)
 
         return None
+
+    def _get(self, path):
+        # type: (str,) -> Optional[Any]
+        """GET request returning parsed JSON, or None on error."""
+        try:
+            resp = self._session.get(self._api(path), timeout=30)
+        except requests.RequestException as e:
+            logger.warning("Jira GET %s failed: %s", path, str(e)[:100])
+            return None
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code == 404:
+            logger.warning("Jira GET %s: not found (404)", path)
+        else:
+            logger.warning("Jira GET %s: HTTP %d", path, resp.status_code)
+        return None
+
+    def get_comments(self, jira_key):
+        # type: (str,) -> List[Dict[str, Any]]
+        """Return all comments for a Jira issue, newest-last.
+
+        Each dict contains: id, author (displayName, emailAddress), body, created.
+        Returns empty list on error or missing issue.
+        """
+        data = self._get('issue/{}/comment'.format(jira_key))
+        if data is None:
+            return []
+        return data.get('comments', [])
+
+    def get_comment(self, jira_key, comment_id):
+        # type: (str, int) -> Optional[Dict[str, Any]]
+        """Return a single comment dict by ID, or None if not found."""
+        return self._get('issue/{}/comment/{}'.format(jira_key, comment_id))

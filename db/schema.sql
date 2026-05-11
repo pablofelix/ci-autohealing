@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS build_failures (
     -- AI Processing
     ai_analyzed BOOLEAN DEFAULT FALSE,
     ai_analysis_id INTEGER,  -- FK to ai_analysis
+    ai_attempts INTEGER DEFAULT 0,
+    ai_skip_reason TEXT,  -- null | 'no_logs' | 'max_retries'
     ai_fix_attempted BOOLEAN DEFAULT FALSE,
     ai_fix_successful BOOLEAN,
 
@@ -91,12 +93,35 @@ CREATE INDEX IF NOT EXISTS idx_bf_resolved ON build_failures(is_resolved);
 CREATE INDEX IF NOT EXISTS idx_bf_completion_time ON build_failures(build_completion_time DESC);
 CREATE INDEX IF NOT EXISTS idx_bf_error_type ON build_failures(error_type);
 CREATE INDEX IF NOT EXISTS idx_bf_ai_pending ON build_failures(ai_analyzed, is_resolved)
-    WHERE NOT ai_analyzed AND NOT is_resolved;
+    WHERE NOT ai_analyzed AND NOT is_resolved AND ai_skip_reason IS NULL;
 CREATE INDEX IF NOT EXISTS idx_bf_jira ON build_failures(jira_key) WHERE jira_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_bf_created_at ON build_failures(created_at DESC);
 
 -- ============================================================================
--- 2. AI ANALYSIS - AI diagnosis of each failure
+-- 2. ERROR PATTERNS - Known failure patterns with solutions and doc references
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS error_patterns (
+    id                SERIAL PRIMARY KEY,
+    failure_type      VARCHAR(20)  NOT NULL CHECK (failure_type IN ('build', 'conforma')),
+    failure_category  VARCHAR(100) NOT NULL,
+    pattern_name      VARCHAR(200) NOT NULL,
+    description       TEXT,
+    typical_fix       TEXT,          -- solution that has worked in past occurrences
+    doc_url           TEXT,          -- primary documentation page for this pattern
+    doc_context       TEXT,          -- cached excerpt from doc_url (~3000 chars)
+    doc_fetched_at    TIMESTAMP,
+    occurrence_count  INTEGER DEFAULT 0,
+    avg_confidence    FLOAT,
+    first_seen_at     TIMESTAMP DEFAULT NOW(),
+    last_seen_at      TIMESTAMP DEFAULT NOW(),
+    created_by        VARCHAR(20) DEFAULT 'auto',  -- 'auto' | 'manual' | 'seeded'
+    UNIQUE(failure_type, failure_category)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ep_type_cat ON error_patterns(failure_type, failure_category);
+
+-- ============================================================================
+-- 3. AI ANALYSIS - AI diagnosis of each failure
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS ai_analysis (
     id SERIAL PRIMARY KEY,
@@ -131,6 +156,9 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
     -- Full AI Response
     analysis_json JSONB,  -- Full structured response from AI
 
+    -- Pattern reference
+    error_pattern_id INTEGER REFERENCES error_patterns(id) ON DELETE SET NULL,
+
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -146,6 +174,7 @@ CREATE TABLE IF NOT EXISTS resolution_attempts (
     id SERIAL PRIMARY KEY,
     uuid UUID DEFAULT uuid_generate_v4() UNIQUE,
     build_failure_id INTEGER REFERENCES build_failures(id) ON DELETE CASCADE,
+    conforma_result_id INTEGER REFERENCES conforma_results(id) ON DELETE CASCADE,
     ai_analysis_id INTEGER REFERENCES ai_analysis(id) ON DELETE SET NULL,
 
     -- Attempt Info
@@ -195,6 +224,7 @@ CREATE TABLE IF NOT EXISTS resolution_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ra_build_failure ON resolution_attempts(build_failure_id);
+CREATE INDEX IF NOT EXISTS idx_ra_conforma ON resolution_attempts(conforma_result_id);
 CREATE INDEX IF NOT EXISTS idx_ra_status ON resolution_attempts(status);
 CREATE INDEX IF NOT EXISTS idx_ra_successful ON resolution_attempts(was_successful);
 CREATE INDEX IF NOT EXISTS idx_ra_attempted_by ON resolution_attempts(attempted_by);
@@ -603,11 +633,19 @@ CREATE TABLE IF NOT EXISTS conforma_results (
     is_resolved BOOLEAN DEFAULT FALSE,
     resolved_at TIMESTAMP,
     jira_key VARCHAR(50),
+    ai_analyzed BOOLEAN DEFAULT FALSE,
+    ai_analysis_id INTEGER REFERENCES ai_analysis(id) ON DELETE SET NULL,
+    ai_attempts INTEGER DEFAULT 0,
+    ai_skip_reason TEXT,  -- null | 'no_logs' | 'max_retries'
+    ai_fix_attempted BOOLEAN DEFAULT FALSE,
+    ai_fix_successful BOOLEAN DEFAULT FALSE,
     UNIQUE(pipelinerun_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_conforma_app_component ON conforma_results(application, component_name);
 CREATE INDEX IF NOT EXISTS idx_conforma_unresolved ON conforma_results(application) WHERE is_resolved = FALSE;
+CREATE INDEX IF NOT EXISTS idx_conforma_ai_pending ON conforma_results(ai_analyzed, is_resolved)
+    WHERE NOT ai_analyzed AND NOT is_resolved AND ai_skip_reason IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conforma_jira ON conforma_results(jira_key) WHERE jira_key IS NOT NULL;
 
 -- ============================================================================
