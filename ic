@@ -491,6 +491,7 @@ ${BOLD}COMMANDS:${NC}
     ic get components                        List all failing components
     ic get component <name>                  Get component summary
     ic get alerts                            Unified view: builds + Conforma
+    ic get alerts --all                      Alerts across all applications
     ic get alerts --date <date>              Alerts on a specific date
     ic get alerts --from <date> --to <date>  Changes between two dates
     ic get exceptions                        Policy exceptions expiring/expired
@@ -2022,14 +2023,19 @@ cmd_ai_status() {
     section_header "AI Analysis Status"
     echo ""
 
-    # Build failures stats
-    local build_pending=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    # Build failures state breakdown
+    local build_pending=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local build_no_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NULL AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local build_skipped=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_skip_reason IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
     local build_analyzed=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+    local build_low_conf=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
     local build_autofixable=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
 
-    # Conforma violations stats
-    local conforma_pending=$(sql "SELECT COUNT(*) FROM conforma_results WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND violation_summary IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    # Conforma violations state breakdown
+    local conforma_pending=$(sql "SELECT COUNT(*) FROM conforma_results WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND violation_summary IS NOT NULL AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local conforma_skipped=$(sql "SELECT COUNT(*) FROM conforma_results WHERE ai_skip_reason IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
     local conforma_analyzed=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '$APPLICATION_NAME' AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
+    local conforma_low_conf=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '$APPLICATION_NAME' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
     local conforma_autofixable=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '$APPLICATION_NAME' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
 
     # Total cost (both types)
@@ -2042,26 +2048,39 @@ cmd_ai_status() {
           AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
 
     echo -e "${BOLD}Build Failures:${NC}"
-    printf "  Pending:      %s failures awaiting analysis\n" "${build_pending:-0}"
-    printf "  Analyzed:     %s failures (last 30 days)\n" "${build_analyzed:-0}"
-
+    printf "  Pending:        %s awaiting analysis\n" "${build_pending:-0}"
+    if [ "${build_no_logs:-0}" -gt 0 ]; then
+        printf "  No logs yet:    %s (waiting for commit context collector)\n" "${build_no_logs:-0}"
+    fi
+    if [ "${build_skipped:-0}" -gt 0 ]; then
+        printf "  Skipped:        %s (max retries or no-logs timeout)\n" "${build_skipped:-0}"
+    fi
+    printf "  Analyzed:       %s (last 30 days)\n" "${build_analyzed:-0}"
     if [ "${build_analyzed:-0}" -gt 0 ]; then
+        local build_high=$((build_analyzed - build_low_conf))
+        printf "    High conf (>=70%%): %s\n" "${build_high:-0}"
+        if [ "${build_low_conf:-0}" -gt 0 ]; then
+            printf "    Low conf  (<70%%):  %s  <- needs human review\n" "${build_low_conf:-0}"
+        fi
         local build_pct=$((build_autofixable * 100 / build_analyzed))
-        printf "  Auto-fixable: %s failures (%s%%)\n" "${build_autofixable:-0}" "$build_pct"
-    else
-        printf "  Auto-fixable: 0 failures\n"
+        printf "  Auto-fixable:   %s (%s%%)\n" "${build_autofixable:-0}" "$build_pct"
     fi
 
     echo ""
     echo -e "${BOLD}Conforma Violations:${NC}"
-    printf "  Pending:      %s violations awaiting analysis\n" "${conforma_pending:-0}"
-    printf "  Analyzed:     %s violations (last 30 days)\n" "${conforma_analyzed:-0}"
-
+    printf "  Pending:        %s awaiting analysis\n" "${conforma_pending:-0}"
+    if [ "${conforma_skipped:-0}" -gt 0 ]; then
+        printf "  Skipped:        %s (max retries)\n" "${conforma_skipped:-0}"
+    fi
+    printf "  Analyzed:       %s (last 30 days)\n" "${conforma_analyzed:-0}"
     if [ "${conforma_analyzed:-0}" -gt 0 ]; then
+        local conforma_high=$((conforma_analyzed - conforma_low_conf))
+        printf "    High conf (>=70%%): %s\n" "${conforma_high:-0}"
+        if [ "${conforma_low_conf:-0}" -gt 0 ]; then
+            printf "    Low conf  (<70%%):  %s  <- needs human review\n" "${conforma_low_conf:-0}"
+        fi
         local conforma_pct=$((conforma_autofixable * 100 / conforma_analyzed))
-        printf "  Auto-fixable: %s violations (%s%%)\n" "${conforma_autofixable:-0}" "$conforma_pct"
-    else
-        printf "  Auto-fixable: 0 violations\n"
+        printf "  Auto-fixable:   %s (%s%%)\n" "${conforma_autofixable:-0}" "$conforma_pct"
     fi
 
     echo ""
@@ -2175,6 +2194,126 @@ cmd_ai_stats() {
     echo -e "${BOLD}Token Usage (last 30 days):${NC}"
     printf "  Total tokens: %s\n" "${total_tokens:-0}"
     printf "  Avg per analysis: %s tokens\n" "${avg_tokens:-0}"
+    echo ""
+}
+
+cmd_patterns() {
+    local subcmd="${1:-list}"
+    shift || true
+    case "$subcmd" in
+        list) cmd_patterns_list "$@" ;;
+        show) cmd_patterns_show "$@" ;;
+        *) echo "Usage: ic patterns <list|show> [--type build|conforma] [pattern_name]" ;;
+    esac
+}
+
+cmd_patterns_list() {
+    local type_filter=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --type) type_filter="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    local where="TRUE"
+    if [ -n "$type_filter" ]; then
+        where="failure_type = '$type_filter'"
+    fi
+
+    section_header "Error Pattern Library"
+    echo ""
+    sql_table "
+        SELECT
+            failure_type   AS \"Type\",
+            failure_category AS \"Category\",
+            occurrence_count AS \"Seen\",
+            CASE
+                WHEN avg_confidence IS NULL THEN '  —  '
+                ELSE ROUND(avg_confidence * 100)::text || '%'
+            END AS \"Avg Conf\",
+            CASE
+                WHEN doc_context IS NOT NULL THEN 'yes'
+                ELSE 'no '
+            END AS \"Doc\",
+            CASE
+                WHEN last_seen_at IS NULL THEN '—'
+                ELSE TO_CHAR(last_seen_at, 'YYYY-MM-DD')
+            END AS \"Last Seen\",
+            LEFT(pattern_name, 40) AS \"Pattern\"
+        FROM error_patterns
+        WHERE $where
+        ORDER BY occurrence_count DESC, failure_type, failure_category;
+    "
+    echo ""
+    local total
+    total=$(sql "SELECT COUNT(*) FROM error_patterns WHERE $where;" 2>/dev/null)
+    printf "  %s patterns total. Run 'ic patterns show <pattern_name>' for details.\n" "${total:-0}"
+    echo ""
+}
+
+cmd_patterns_show() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo "Usage: ic patterns show <pattern_name>"
+        return 1
+    fi
+
+    local row
+    row=$(sql "SELECT id, failure_type, failure_category, pattern_name, description, typical_fix, doc_url, doc_context, doc_fetched_at, occurrence_count, avg_confidence, first_seen_at, last_seen_at, created_by FROM error_patterns WHERE pattern_name = '$name' OR failure_category = '$name' LIMIT 1;" 2>/dev/null)
+    if [ -z "$row" ]; then
+        echo "Pattern not found: $name"
+        echo "Run 'ic patterns list' to see all patterns."
+        return 1
+    fi
+
+    local id type category pname description typical_fix doc_url doc_context doc_fetched_at occurrences avg_conf first_seen last_seen created_by
+    IFS='|' read -r id type category pname description typical_fix doc_url doc_context doc_fetched_at occurrences avg_conf first_seen last_seen created_by <<< "$row"
+
+    section_header "Pattern: $pname"
+    echo ""
+    printf "  Type:          %s\n" "$type"
+    printf "  Category:      %s\n" "$category"
+    printf "  Created by:    %s\n" "$created_by"
+    printf "  Occurrences:   %s\n" "${occurrences:-0}"
+    if [ -n "$avg_conf" ]; then
+        printf "  Avg confidence: %s%%\n" "$(echo "$avg_conf * 100" | bc -l 2>/dev/null | cut -d. -f1)"
+    fi
+    printf "  First seen:    %s\n" "${first_seen:-—}"
+    printf "  Last seen:     %s\n" "${last_seen:-—}"
+    echo ""
+
+    if [ -n "$description" ]; then
+        echo -e "${BOLD}Description:${NC}"
+        echo "$description" | fold -s -w 80 | sed 's/^/  /'
+        echo ""
+    fi
+
+    if [ -n "$typical_fix" ]; then
+        echo -e "${BOLD}Typical Fix:${NC}"
+        echo "$typical_fix" | fold -s -w 80 | sed 's/^/  /'
+        echo ""
+    fi
+
+    if [ -n "$doc_url" ]; then
+        printf "  Doc URL:       %s\n" "$doc_url"
+        if [ -n "$doc_fetched_at" ]; then
+            printf "  Doc fetched:   %s\n" "$doc_fetched_at"
+        else
+            echo "  Doc context:   not yet fetched (run collect_doc_context.py)"
+        fi
+    fi
+
+    if [ -n "$doc_context" ]; then
+        echo ""
+        echo -e "${BOLD}Documentation Excerpt:${NC}"
+        echo "$doc_context" | head -20 | fold -s -w 80 | sed 's/^/  /'
+        local doc_lines
+        doc_lines=$(echo "$doc_context" | wc -l)
+        if [ "$doc_lines" -gt 20 ]; then
+            echo "  ... (truncated, ${doc_lines} lines total)"
+        fi
+    fi
     echo ""
 }
 
@@ -3264,10 +3403,12 @@ cmd_get_alerts() {
     local target_date=""
     local from_date=""
     local to_date=""
+    local show_all=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --refresh|-r) refresh=true; shift ;;
+            --all) show_all=true; shift ;;
             --date)
                 shift
                 target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
@@ -3298,6 +3439,34 @@ cmd_get_alerts() {
     if [ -n "$from_date" ]; then
         [ -z "$to_date" ] && to_date=$(date '+%Y-%m-%d')
         cmd_get_alerts_range "$from_date" "$to_date"
+        return
+    fi
+
+    if [ "$show_all" = true ]; then
+        local _all_apps
+        _all_apps=$(sql "
+            SELECT application FROM (
+                SELECT DISTINCT application FROM build_failures   WHERE is_resolved = FALSE
+                UNION
+                SELECT DISTINCT application FROM conforma_results WHERE is_resolved = FALSE
+            ) combined ORDER BY application;
+        " 2>/dev/null)
+        if [ -z "$_all_apps" ]; then
+            echo -e "${GREEN}No active alerts in any application.${NC}"
+            return
+        fi
+        local _saved_app="$APPLICATION_NAME"
+        while IFS= read -r _app; do
+            [ -z "$_app" ] && continue
+            APPLICATION_NAME="$_app"
+            section_header "Alerts — ${_app}"
+            echo ""
+            local _bc
+            _bc=$(sql_count_failing_builds)
+            display_alerts_build_failures "[]"
+            display_alerts_conforma_failures "${_bc:-0}"
+        done <<< "$_all_apps"
+        APPLICATION_NAME="$_saved_app"
         return
     fi
 
@@ -3353,6 +3522,7 @@ cmd_get_alerts() {
     echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --date yesterday' to see past alerts"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --all' to show alerts across all applications"
     echo ""
 }
 
@@ -4010,8 +4180,8 @@ cmd_conforma_report() {
         return
     fi
 
-    # Known versions to always show (even if no data)
-    local known_versions="acme-v2-0 acme-v2-1-ea-1"
+    # Known versions to always show (even if no data) — set in ic-config.sh or .env
+    local known_versions="$KNOWN_APPLICATIONS"
     local all_versions
     all_versions=$(echo -e "${apps}\n${known_versions}" | tr ' ' '\n' | sort -u | grep -v '^$')
 
@@ -4625,10 +4795,124 @@ cmd_conforma_history() {
 # JIRA COMMANDS
 # ============================================================================
 
+cmd_jira_inbox() {
+    local subcmd="${1:-}"
+
+    # Interactive refinement via LLM conversation
+    if [ "$subcmd" = "refine" ]; then
+        local idx="${2:-}"
+        if [[ ! "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -lt 1 ]; then
+            echo -e "${RED}Usage: ic jira inbox refine <N>${NC}"
+            return 1
+        fi
+        local target
+        target=$(sql "SELECT jira_key, comment_id FROM jira_comment_drafts WHERE reviewed_at IS NULL ORDER BY created_at ASC LIMIT 1 OFFSET $((idx-1))")
+        if [ -z "$target" ]; then
+            echo -e "${RED}Error: No item #$idx in inbox${NC}"
+            return 1
+        fi
+        local jira_key comment_id
+        jira_key=$(echo "$target" | cut -d'|' -f1 | xargs)
+        comment_id=$(echo "$target" | cut -d'|' -f2 | xargs)
+        python3.11 "$SCRIPT_DIR/collectors/python/jira_refine.py" "$jira_key" "$comment_id"
+        return
+    fi
+
+    # Mark an item as reviewed by its 1-based index in the unreviewed list
+    if [ "$subcmd" = "done" ] || [ "$subcmd" = "mark-reviewed" ]; then
+        local idx="${2:-}"
+        if [[ ! "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -lt 1 ]; then
+            echo -e "${RED}Usage: ic jira inbox done <N>${NC}"
+            return 1
+        fi
+        local target
+        target=$(sql "SELECT jira_key, comment_id FROM jira_comment_drafts WHERE reviewed_at IS NULL ORDER BY created_at ASC LIMIT 1 OFFSET $((idx-1))")
+        if [ -z "$target" ]; then
+            echo -e "${RED}Error: No item #$idx in inbox${NC}"
+            return 1
+        fi
+        local jira_key comment_id
+        jira_key=$(echo "$target" | cut -d'|' -f1 | xargs)
+        comment_id=$(echo "$target" | cut -d'|' -f2 | xargs)
+        sql "UPDATE jira_comment_drafts SET reviewed_at = NOW() WHERE jira_key = '$jira_key' AND comment_id = $comment_id" >/dev/null
+        echo -e "${GREEN}✓ Marked reviewed: $jira_key comment #$comment_id${NC}"
+        return
+    fi
+
+    local count
+    count=$(sql "SELECT COUNT(*) FROM jira_comment_drafts WHERE reviewed_at IS NULL")
+    count="${count:-0}"
+
+    if [ "$count" = "0" ]; then
+        echo -e "Jira inbox is empty — no unreviewed comments."
+        return
+    fi
+
+    section_header "Jira Comment Inbox"
+    echo -e "${BOLD}${count} unreviewed comment(s) pending your reply${NC}"
+    echo ""
+
+    local drafts_list
+    drafts_list=$(sql "SELECT jira_key, comment_id, TO_CHAR(created_at, 'DD Mon HH24:MI') FROM jira_comment_drafts WHERE reviewed_at IS NULL ORDER BY created_at ASC")
+
+    local idx=0
+    while IFS='|' read -r jira_key comment_id received_at; do
+        idx=$((idx+1))
+        jira_key=$(echo "$jira_key" | xargs)
+        comment_id=$(echo "$comment_id" | xargs)
+        received_at=$(echo "$received_at" | xargs)
+        [ -z "$jira_key" ] && continue
+
+        local author="Unknown" body="[Comment not available]"
+        local comment_info
+        comment_info=$(jira_api GET "/rest/api/2/issue/$jira_key/comment/$comment_id" 2>/dev/null)
+        if [ -n "$comment_info" ] && ! echo "$comment_info" | grep -q '"errorMessages"'; then
+            author=$(echo "$comment_info" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('author', {}).get('displayName', 'Unknown'))
+except Exception:
+    print('Unknown')
+" 2>/dev/null)
+            body=$(echo "$comment_info" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    b = d.get('body', '').strip()
+    print(b[:600] + ('...' if len(b) > 600 else ''))
+except Exception:
+    print('[unavailable]')
+" 2>/dev/null)
+        fi
+
+        local draft
+        draft=$(sql "SELECT draft_response FROM jira_comment_drafts WHERE jira_key = '$jira_key' AND comment_id = $comment_id")
+
+        echo -e "  ${BOLD}[$idx]${NC} ${CYAN}${jira_key}${NC}  ·  ${received_at}  ·  from ${BOLD}${author}${NC}"
+        echo ""
+        echo -e "  ${BOLD}Comment:${NC}"
+        echo "$body" | fold -s -w 72 | sed 's/^/    /'
+        echo ""
+        echo -e "  ${BOLD}Draft reply:${NC}"
+        echo "$draft" | fold -s -w 72 | sed 's/^/    /'
+        echo ""
+        echo -e "  ${CYAN}→ ic jira inbox refine $idx${NC}  ·  ${CYAN}ic jira inbox done $idx${NC}  ·  ${CYAN}ic describe jira $jira_key${NC}"
+        echo "  ────────────────────────────────────────────────────────────────"
+        echo ""
+    done <<< "$drafts_list"
+
+    echo -e "${CYAN}Tip:${NC} Copy the draft, personalise it, post it on the ticket, then mark done."
+    echo ""
+}
+
 cmd_jira_help() {
     echo -e "${BOLD}Jira Integration${NC}"
     echo ""
     echo "  ic get jira [JIRA-KEY]                List linked tickets with live status"
+    echo "  ic jira inbox                         Show unreviewed comments with AI drafts"
+    echo "  ic jira inbox refine <N>              Refine draft N via AI conversation"
+    echo "  ic jira inbox done <N>                Mark inbox item N as reviewed"
     echo "  ic describe jira <JIRA-KEY>           Show full ticket details and comments"
     echo "  ic describe jira <JIRA-KEY> --full    Show without truncation"
     echo "  ic jira link <component> <JIRA-KEY>   Link a ticket to a component"
@@ -4748,36 +5032,64 @@ cmd_fix() {
 
     # Fetch failure_id and basic info
     local fix_data
-    fix_data=$(sql "
-        SELECT b.id, b.error_type, b.failed_step_name,
-               TO_CHAR(b.first_detected_at, 'YYYY-MM-DD'),
-               EXTRACT(DAY FROM NOW() - b.first_detected_at)::int,
-               (SELECT COUNT(*) FROM build_failures WHERE component_name = b.component_name AND is_resolved = FALSE)
-        FROM build_failures b
-        WHERE b.component_name = '$component'
-          AND b.application = '$APPLICATION_NAME'
-          AND b.is_resolved = FALSE
-        ORDER BY b.last_updated_at DESC
-        LIMIT 1;
-    " 2>/dev/null)
+    if [ "$export_type" = "build" ]; then
+        fix_data=$(sql "
+            SELECT b.id, b.error_type, b.failed_step_name,
+                   TO_CHAR(b.first_detected_at, 'YYYY-MM-DD'),
+                   EXTRACT(DAY FROM NOW() - b.first_detected_at)::int,
+                   (SELECT COUNT(*) FROM build_failures WHERE component_name = b.component_name AND is_resolved = FALSE),
+                   COALESCE(b.jira_key, '')
+            FROM build_failures b
+            WHERE b.component_name = '$component'
+              AND b.application = '$APPLICATION_NAME'
+              AND b.is_resolved = FALSE
+            ORDER BY b.last_updated_at DESC
+            LIMIT 1;
+        " 2>/dev/null)
+    else
+        fix_data=$(sql "
+            SELECT cr.id, cr.scenario, cr.violations_count::text,
+                   TO_CHAR(cr.first_detected_at, 'YYYY-MM-DD'),
+                   EXTRACT(DAY FROM NOW() - cr.first_detected_at)::int,
+                   cr.violations_count,
+                   COALESCE(cr.jira_key, '')
+            FROM conforma_results cr
+            WHERE cr.component_name = '$component'
+              AND cr.application = '$APPLICATION_NAME'
+              AND cr.is_resolved = FALSE
+            ORDER BY cr.last_updated_at DESC
+            LIMIT 1;
+        " 2>/dev/null)
+    fi
 
     local data_line
     data_line=$(echo "$fix_data" | tr '\n' ' ' | sed 's/  */ /g')
-    IFS='|' read -r failure_id error_type failed_step first_seen days_failing occurrences <<< "$data_line"
+    IFS='|' read -r failure_id error_type failed_step first_seen days_failing occurrences linked_jira <<< "$data_line"
     failure_id=$(trim "$failure_id"); error_type=$(trim "$error_type")
     failed_step=$(trim "$failed_step"); days_failing=$(trim "$days_failing")
-    occurrences=$(trim "$occurrences")
+    occurrences=$(trim "$occurrences"); linked_jira=$(trim "$linked_jira")
 
     # Fetch AI analysis recommendation
     local ai_data
-    ai_data=$(sql "
-        SELECT failure_category, ROUND(confidence_score * 100)::int,
-               can_auto_fix, requires_human_review, recommended_fix
-        FROM ai_analysis
-        WHERE build_failure_id = $failure_id
-        ORDER BY created_at DESC
-        LIMIT 1;
-    " 2>/dev/null)
+    if [ "$export_type" = "build" ]; then
+        ai_data=$(sql "
+            SELECT failure_category, ROUND(confidence_score * 100)::int,
+                   can_auto_fix, requires_human_review, recommended_fix
+            FROM ai_analysis
+            WHERE build_failure_id = $failure_id
+            ORDER BY created_at DESC
+            LIMIT 1;
+        " 2>/dev/null)
+    else
+        ai_data=$(sql "
+            SELECT failure_category, ROUND(confidence_score * 100)::int,
+                   can_auto_fix, requires_human_review, recommended_fix
+            FROM ai_analysis
+            WHERE conforma_result_id = $failure_id
+            ORDER BY created_at DESC
+            LIMIT 1;
+        " 2>/dev/null)
+    fi
 
     local ai_line
     ai_line=$(echo "$ai_data" | tr '\n' ' ' | sed 's/  */ /g')
@@ -4788,7 +5100,11 @@ cmd_fix() {
     # Display header
     section_header "Fix Triage — ${component}"
     echo -e "${BOLD}Type:${NC}    ${export_type}"
-    echo -e "${BOLD}Error:${NC}   ${error_type:-unknown} at step ${failed_step:-unknown}"
+    if [ "$export_type" = "build" ]; then
+        echo -e "${BOLD}Error:${NC}   ${error_type:-unknown} at step ${failed_step:-unknown}"
+    else
+        echo -e "${BOLD}Error:${NC}   conforma violation in scenario '${error_type:-unknown}' (${failed_step:-0} violations)"
+    fi
     echo -e "${BOLD}Age:${NC}     ${days_failing:-?} days (${occurrences:-?} occurrence(s))"
     echo ""
 
@@ -4814,60 +5130,116 @@ cmd_fix() {
     fi
     echo ""
 
-    # Action menu
-    echo -e "${BOLD}What do you want to do?${NC}"
-    echo "  [1] Generate PR fix (dry-run — shows diff, no push)"
-    echo "  [2] Create Jira ticket (review + edit before posting)"
-    echo "  [3] Send Slack notification"
-    echo "  [4] Skip"
-    echo ""
-    printf "Choice [1-4]: "
-    read -r choice
-
-    case "$choice" in
-        1)
-            echo ""
+    if [ "$export_type" = "conforma" ]; then
+        # Conforma: Jira-first sequential flow
+        echo -e "${BOLD}Action: Create Jira ticket${NC}"
+        echo "(Conforma violations route to Jira for tracking. PR fix offered after.)"
+        echo ""
+        local jira_summary="Conforma violation: ${component} — ${error_type:-unknown} scenario (${failed_step:-0} violations)"
+        export_jira "$component" "$export_type" | \
             python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
-                --mode pr \
+                --mode jira \
                 --component "$component" \
-                --failure-id "$failure_id" \
-                --application "$APPLICATION_NAME"
-            local pr_exit=$?
-            if [ $pr_exit -eq 0 ]; then
+                --summary "$jira_summary"
+        local jira_exit=$?
+
+        # After Jira, offer automated PR fix when AI marks it auto-fixable
+        if [ $jira_exit -eq 0 ] && ([ "$ai_can_fix" = "t" ] || [ "$ai_can_fix" = "true" ]); then
+            echo ""
+            printf "Also generate an automated PR fix? (category: ${ai_category:-unknown}) [y/N]: "
+            read -r pr_choice
+            if [ "$pr_choice" = "y" ] || [ "$pr_choice" = "Y" ]; then
                 echo ""
-                printf "Create this PR on GitHub? [y/N]: "
-                read -r push_choice
-                if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
-                    python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
-                        --mode pr \
-                        --component "$component" \
-                        --failure-id "$failure_id" \
-                        --application "$APPLICATION_NAME" \
-                        --execute
+                python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                    --mode pr \
+                    --component "$component" \
+                    --conforma-id "$failure_id" \
+                    --application "$APPLICATION_NAME"
+                local pr_exit=$?
+                if [ $pr_exit -eq 0 ]; then
+                    echo ""
+                    printf "Push this PR to GitHub? [y/N]: "
+                    read -r push_choice
+                    if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
+                        python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                            --mode pr \
+                            --component "$component" \
+                            --conforma-id "$failure_id" \
+                            --application "$APPLICATION_NAME" \
+                            --execute
+                    fi
                 fi
             fi
-            ;;
-        2)
+        fi
+
+        # Offer Slack after Jira
+        echo ""
+        printf "Send Slack notification? [y/N]: "
+        read -r slack_choice
+        if [ "$slack_choice" = "y" ] || [ "$slack_choice" = "Y" ]; then
             echo ""
-            local jira_summary="Build failure: ${component} — ${error_type:-unknown} in ${failed_step:-unknown}"
-            export_jira "$component" "$export_type" | \
+            local slack_args=()
+            [ -n "$linked_jira" ] && slack_args+=(--jira "$linked_jira")
+            export_slack "$component" "$export_type" "${slack_args[@]}"
+        fi
+    else
+        # Build failures: menu [1-4]
+        echo -e "${BOLD}What do you want to do?${NC}"
+        echo "  [1] Generate PR fix (dry-run — shows diff, no push)"
+        echo "  [2] Create Jira ticket (review + edit before posting)"
+        echo "  [3] Send Slack notification"
+        echo "  [4] Skip"
+        echo ""
+        printf "Choice [1-4]: "
+        read -r choice
+
+        case "$choice" in
+            1)
+                echo ""
                 python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
-                    --mode jira \
+                    --mode pr \
                     --component "$component" \
-                    --summary "$jira_summary"
-            ;;
-        3)
-            echo ""
-            export_slack "$component" "$export_type"
-            ;;
-        4|"")
-            echo "Skipped."
-            ;;
-        *)
-            echo -e "${RED}Invalid choice.${NC}"
-            return 1
-            ;;
-    esac
+                    --failure-id "$failure_id" \
+                    --application "$APPLICATION_NAME"
+                local pr_exit=$?
+                if [ $pr_exit -eq 0 ]; then
+                    echo ""
+                    printf "Create this PR on GitHub? [y/N]: "
+                    read -r push_choice
+                    if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
+                        python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                            --mode pr \
+                            --component "$component" \
+                            --failure-id "$failure_id" \
+                            --application "$APPLICATION_NAME" \
+                            --execute
+                    fi
+                fi
+                ;;
+            2)
+                echo ""
+                local jira_summary="Build failure: ${component} — ${error_type:-unknown} in ${failed_step:-unknown}"
+                export_jira "$component" "$export_type" | \
+                    python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                        --mode jira \
+                        --component "$component" \
+                        --summary "$jira_summary"
+                ;;
+            3)
+                echo ""
+                local slack_args=()
+                [ -n "$linked_jira" ] && slack_args+=(--jira "$linked_jira")
+                export_slack "$component" "$export_type" "${slack_args[@]}"
+                ;;
+            4|"")
+                echo "Skipped."
+                ;;
+            *)
+                echo -e "${RED}Invalid choice.${NC}"
+                return 1
+                ;;
+        esac
+    fi
 }
 
 cmd_jira_link() {
@@ -4958,6 +5330,13 @@ cmd_get_jira() {
         printf "  %-18s %-15s %-22s %-32s %-10s %-10s %s\n" "$jira_key" "$status" "$assignee" "$comp_name" "$source" "$updated" "$comments"
     done
 
+    local inbox_count
+    inbox_count=$(sql "SELECT COUNT(*) FROM jira_comment_drafts WHERE reviewed_at IS NULL" 2>/dev/null)
+    inbox_count="${inbox_count:-0}"
+    if [ "$inbox_count" -gt 0 ] 2>/dev/null; then
+        echo ""
+        echo -e "  ${BOLD}${inbox_count} unreviewed comment(s) in inbox${NC}  →  ${CYAN}ic jira inbox${NC}"
+    fi
     echo ""
 }
 
@@ -5283,6 +5662,10 @@ case "${1:-}" in
         shift
         cmd_ai "$@"
         ;;
+    patterns)
+        shift
+        cmd_patterns "$@"
+        ;;
     export)
         shift
         cmd_export "$@"
@@ -5291,6 +5674,7 @@ case "${1:-}" in
         shift
         case "${1:-}" in
             create) shift; cmd_jira_create "$@" ;;
+            inbox)  shift; cmd_jira_inbox "$@" ;;
             link)   shift; cmd_jira_link "$@" ;;
             status) cmd_get_jira ;;
             *)      cmd_jira_help ;;

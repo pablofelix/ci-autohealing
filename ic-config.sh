@@ -5,6 +5,13 @@
 
 : "${NAMESPACE:=NAMESPACE_PLACEHOLDER}"
 : "${APPLICATION_NAME:=acme-v2-0}"
+# Space-separated list of applications to show in conforma report even when no DB data exists.
+# Override via .env or environment if running a different release train.
+: "${KNOWN_APPLICATIONS:=acme-v2-0 acme-v2-1-ea-1}"
+# Autonomous mode: set to "true" in .env to enable automatic PR creation for
+# conforma violations during cron step 7.5. Off by default — enable only after
+# manual ic fix validation confirms the fixers are working correctly.
+: "${AUTONOMOUS_MODE:=false}"
 : "${DB_CONTAINER:=ci-autohealing-db}"
 : "${DB_NAME:=konflux_monitoring}"
 : "${DB_USER:=postgres}"

@@ -71,6 +71,8 @@ class CollectorConfig:
     github_token: Optional[str] = None
     jira: Optional[JiraConfig] = None
     components_file: Optional[Path] = None
+    auto_fix_max_per_run: int = 3
+    auto_fix_min_confidence: float = 0.95
 
     @classmethod
     def from_env(cls, env_path: Optional[Path] = None) -> 'CollectorConfig':
@@ -160,5 +162,7 @@ class CollectorConfig:
             llm=llm_config,
             github_token=github_token,
             jira=jira_config,
-            components_file=components_file
+            components_file=components_file,
+            auto_fix_max_per_run=int(os.getenv('AUTO_FIX_MAX_PER_RUN', '3')),
+            auto_fix_min_confidence=float(os.getenv('AUTO_FIX_MIN_CONFIDENCE', '0.95')),
         )
