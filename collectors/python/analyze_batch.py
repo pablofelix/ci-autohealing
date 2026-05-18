@@ -72,14 +72,15 @@ def main():
             result = service.run_batch()
 
             # Exit code based on queue depth
-            if result.total_pending > 100:
-                logger.warning("Queue depth high: %d pending", result.total_pending)
+            total_pending = result.build_pending + result.conforma_pending
+            if total_pending > 100:
+                logger.warning("Queue depth high: %d pending", total_pending)
                 return 2  # Warning status
-            elif result.total_pending == 0:
+            elif total_pending == 0:
                 logger.info("Queue cleared - no pending failures")
                 return 0
             else:
-                logger.info("Batch complete - %d pending", result.total_pending)
+                logger.info("Batch complete - %d pending", total_pending)
                 return 0
 
     except KeyboardInterrupt:

@@ -28,11 +28,33 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Helper functions
+_db_available=
+_db_error_shown=
+_check_db() {
+    if [ -z "$_db_available" ]; then
+        if docker exec "$DB_CONTAINER" pg_isready -q 2>/dev/null; then
+            _db_available=1
+        else
+            _db_available=0
+        fi
+    fi
+    if [ "$_db_available" = "0" ] && [ -z "$_db_error_shown" ]; then
+        _db_error_shown=1
+        echo "" >&2
+        echo -e "${RED}Error: database is not running (${DB_CONTAINER})${NC}" >&2
+        echo -e "${CYAN}Start it: docker start ${DB_CONTAINER}${NC}" >&2
+        echo "" >&2
+    fi
+    [ "$_db_available" = "1" ]
+}
+
 sql() {
+    _check_db || return 1
     docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "$1" 2>/dev/null
 }
 
 sql_table() {
+    _check_db || return 1
     docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "$1" 2>/dev/null | grep -v "Emulate Docker"
 }
 
@@ -139,7 +161,7 @@ fetch_gitlab_policy_yaml() {
     fi
 }
 
-# Fetch active (non-expired) exception rule names from GitLab policy files
+# Fetch active (non-expired) exception rule names (K8s API primary, GitLab fallback)
 # Returns newline-separated rule names (value field before ":")
 fetch_gitlab_exceptions() {
     local cache_dir="/tmp/ic-conforma-cache"
@@ -152,6 +174,15 @@ fetch_gitlab_exceptions() {
         return
     fi
 
+    # Try K8s API first (faster, covers all 6 policies)
+    local k8s_data
+    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        echo "$k8s_data" | jq -r '.exceptions[].value' | cut -d: -f1 | sort -u | tee "$cache_file"
+        return
+    fi
+
+    # Fallback to GitLab
     local all_yaml
     all_yaml=$(fetch_gitlab_policy_yaml)
     [ -z "$all_yaml" ] && return
@@ -210,8 +241,209 @@ check_exception_status() {
     fi
 }
 
-# Fetch expiring Conforma exceptions from GitLab konflux-release-data
-# Returns deduplicated lines: days_left|effectiveUntil|value|imageUrl|reference
+# Extract EC policy name from a conforma scenario
+# conforma-registry-acme-prod-v3-4-single-component → registry-acme-prod
+extract_policy_from_scenario() {
+    local scenario="$1"
+    local its_cache="/tmp/ic-its-cache/scenarios-${APPLICATION_NAME}"
+    if [ -f "$its_cache" ]; then
+        local policy
+        policy=$(grep "^${scenario}|" "$its_cache" 2>/dev/null | cut -d'|' -f2)
+        if [ -n "$policy" ]; then
+            echo "$policy"
+            return
+        fi
+    fi
+    echo "$scenario" | sed 's/^conforma-//; s/-v[0-9].*$//'
+}
+
+refresh_its_cache() {
+    local cache_dir="/tmp/ic-its-cache"
+    local cache_file="${cache_dir}/scenarios-${APPLICATION_NAME}"
+    mkdir -p "$cache_dir"
+    local its_json
+    its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$APPLICATION_NAME" 2>/dev/null || true)
+    [ -z "$its_json" ] && return 1
+    echo "$its_json" | jq -r '.scenarios[] | select(.policy_ref != "") | "\(.name)|\(.policy_ref | split("/") | last)|\(if .is_disabled then "disabled" else "active" end)"' > "$cache_file" 2>/dev/null
+}
+
+# Fetch full K8s exception data (cached daily)
+# Returns pipe-delimited: value|source_policy|gitlab_link
+fetch_k8s_exceptions_full() {
+    local cache_dir="/tmp/ic-conforma-cache"
+    local cache_file="${cache_dir}/k8s-exc-full-$(date +%Y%m%d)"
+
+    mkdir -p "$cache_dir"
+
+    if [ -f "$cache_file" ] && [ "${CONFORMA_NO_CACHE:-false}" != "true" ]; then
+        cat "$cache_file"
+        return
+    fi
+
+    local k8s_data
+    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        echo "$k8s_data" | jq -r '.exceptions[] | "\(.value)|\(.source_policy)|\(.gitlab_link)|\(.reference // "")"' | tee "$cache_file"
+        return
+    fi
+
+    echo ""
+}
+
+# Enhanced exception matching with policy-aware and cross-policy checks
+# Args: violation_summary, gh_exceptions (newline list), k8s_full_exceptions (4-field pipe: value|policy|gl_link|reference)
+# Optional: scenario (to filter to specific policy)
+# Returns: status|jira_ref|gitlab_link (pipe-delimited)
+exc_matches_rule() {
+    local exc_list="$1"
+    local rule="$2"
+    [ -z "$exc_list" ] && return 1
+    local category="${rule%%.*}"
+    echo "$exc_list" | grep -q "^${rule}[:|]" && return 0
+    echo "$exc_list" | grep -q "^${category}[|]" && return 0
+    return 1
+}
+
+exc_find_match() {
+    local exc_list="$1"
+    local rule="$2"
+    [ -z "$exc_list" ] && return
+    local category="${rule%%.*}"
+    echo "$exc_list" | grep -E "^${rule}[:|]|^${category}[|]" | head -1
+}
+
+map_rule_to_category() {
+    case "${1%%.*}" in
+        cve)                   echo "CVE" ;;
+        base_image_registries) echo "Base Image" ;;
+        trusted_task)          echo "Trusted Task" ;;
+        sbom_spdx)             echo "SBOM" ;;
+        rpm_repos)             echo "RPM" ;;
+        not_useful)            echo "Deprecated" ;;
+        slsa_provenance_available) echo "SLSA" ;;
+        java)                  echo "Java" ;;
+        labels)                echo "Labels" ;;
+        *)                     echo "Other" ;;
+    esac
+}
+
+categorize_violation_summary() {
+    local vsummary="$1"
+    [ -z "$vsummary" ] && return
+    local rules
+    rules=$(echo "$vsummary" | grep -oP '(?<=[✕✗] \[Violation\] )[a-z_]+\.[a-z_]+' 2>/dev/null | sort -u)
+    [ -z "$rules" ] && return
+
+    declare -A cat_counts
+    while IFS= read -r rule; do
+        [ -z "$rule" ] && continue
+        local cat
+        cat=$(map_rule_to_category "$rule")
+        cat_counts[$cat]=$(( ${cat_counts[$cat]:-0} + 1 ))
+    done <<< "$rules"
+
+    local result=""
+    for cat in $(echo "${!cat_counts[@]}" | tr ' ' '\n' | sort); do
+        [ -n "$result" ] && result="${result}  "
+        result="${result}${cat}:${cat_counts[$cat]}"
+    done
+    echo "$result"
+}
+
+check_exception_status_v2() {
+    local violation_summary="$1"
+    local gh_exceptions="$2"
+    local k8s_full="${3:-}"
+    local scenario="${4:-}"
+
+    local _EXC_JIRA_REF=""
+    local _EXC_GL_LINK=""
+
+    local rules
+    rules=$(echo "$violation_summary" | grep -oP '(?<=[✕✗] \[Violation\] )[a-z_]+\.[a-z_]+' 2>/dev/null | sort -u)
+    [ -z "$rules" ] && echo "UNKNOWN||" && return
+
+    local policy=""
+    [ -n "$scenario" ] && policy=$(extract_policy_from_scenario "$scenario")
+
+    local total=0
+    local gh_covered=0
+    local k8s_covered=0
+    local k8s_other_covered=0
+    local other_policies=""
+    while IFS= read -r rule; do
+        [ -z "$rule" ] && continue
+        total=$((total + 1))
+
+        if [ -n "$gh_exceptions" ] && echo "$gh_exceptions" | grep -q "^${rule}"; then
+            gh_covered=$((gh_covered + 1))
+        fi
+
+        if [ -n "$k8s_full" ]; then
+            local matched=false
+            local filtered_exc="$k8s_full"
+            [ -n "$policy" ] && filtered_exc=$(echo "$k8s_full" | grep "|${policy}|" || true)
+
+            if exc_matches_rule "$filtered_exc" "$rule"; then
+                matched=true
+                if [ -z "$_EXC_JIRA_REF" ]; then
+                    local m_line
+                    m_line=$(exc_find_match "$filtered_exc" "$rule")
+                    _EXC_JIRA_REF=$(echo "$m_line" | cut -d'|' -f4)
+                    _EXC_GL_LINK=$(echo "$m_line" | cut -d'|' -f3)
+                fi
+            fi
+            [ "$matched" = true ] && k8s_covered=$((k8s_covered + 1))
+
+            if [ "$matched" = false ] && [ -n "$policy" ]; then
+                local other_exc
+                other_exc=$(echo "$k8s_full" | grep -v "|${policy}|" || true)
+                if exc_matches_rule "$other_exc" "$rule"; then
+                    k8s_other_covered=$((k8s_other_covered + 1))
+                    local other_match
+                    other_match=$(exc_find_match "$other_exc" "$rule")
+                    local op
+                    op=$(echo "$other_match" | cut -d'|' -f2 | sed 's/registry-rhoai-chart-/ch-/; s/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+                    if [ -n "$op" ] && [ -z "$other_policies" ]; then
+                        other_policies="$op"
+                    fi
+                    if [ -z "$_EXC_JIRA_REF" ]; then
+                        _EXC_JIRA_REF=$(echo "$other_match" | cut -d'|' -f4)
+                        _EXC_GL_LINK=$(echo "$other_match" | cut -d'|' -f3)
+                    fi
+                fi
+            fi
+        fi
+    done <<< "$rules"
+
+    [ "$total" -eq 0 ] && echo "UNKNOWN||" && return
+
+    local gh_full=false k8s_full_match=false
+    [ "$gh_covered" -eq "$total" ] && gh_full=true
+    [ "$k8s_covered" -eq "$total" ] && k8s_full_match=true
+
+    local status=""
+    if [ "$gh_full" = true ] && [ "$k8s_full_match" = true ]; then
+        status="YES"
+    elif [ "$gh_full" = true ] && [ "$k8s_full_match" = false ]; then
+        status="PARTIAL (github)"
+    elif [ "$k8s_full_match" = true ] && [ "$gh_full" = false ]; then
+        status="YES (policy)"
+    elif [ "$gh_covered" -gt 0 ] || [ "$k8s_covered" -gt 0 ]; then
+        local sources=""
+        [ "$gh_covered" -gt 0 ] && sources="github"
+        [ "$k8s_covered" -gt 0 ] && { [ -n "$sources" ] && sources="${sources}+policy" || sources="policy"; }
+        status="PARTIAL (${sources})"
+    elif [ "$k8s_other_covered" -gt 0 ]; then
+        status="NO (in ${other_policies})"
+    else
+        status="NO"
+    fi
+    echo "${status}|${_EXC_JIRA_REF}|${_EXC_GL_LINK}"
+}
+
+# Fetch expiring Conforma exceptions (K8s API primary, GitLab fallback)
+# Returns deduplicated lines: days_left|effectiveUntil|value|imageUrl|reference|source|gitlab_link
 fetch_expiring_exceptions() {
     local days_window="${1:-21}"
     local cache_dir="/tmp/ic-conforma-cache"
@@ -224,6 +456,15 @@ fetch_expiring_exceptions() {
         return
     fi
 
+    # Try K8s API first (faster, covers all 6 policies)
+    local k8s_data
+    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action expiring --name-filter rhoai --days "$days_window" 2>/dev/null || true)
+    if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        echo "$k8s_data" | jq -r '.exceptions[] | "\(.days_left)|\(.effectiveUntil[:10])|\(.value)|\(.imageUrl // "")|\(.reference // "")|\(.source_policy)|\(.gitlab_link)"' | tee "$cache_file"
+        return
+    fi
+
+    # Fallback to GitLab
     local all_yaml
     all_yaml=$(fetch_gitlab_policy_yaml)
     [ -z "$all_yaml" ] && return
@@ -253,18 +494,16 @@ find_component_expiry() {
     local earliest_date=""
     local earliest_days=999999
 
-    while IFS='|' read -r days_left eff_until value image_url reference; do
+    while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
         [ -z "$days_left" ] && continue
         [ "$days_left" -lt 0 ] && continue
 
-        # Extract the base rule from the exception value (before any ":" detail)
         local exc_rule="${value%%:*}"
 
         local matched=false
         while IFS= read -r rule; do
             [ -z "$rule" ] && continue
             if [ "$rule" = "$exc_rule" ]; then
-                # Rule matches — check if image also matches (or exception is global)
                 if [ -z "$image_url" ]; then
                     matched=true
                     break
@@ -484,6 +723,7 @@ ${BOLD}RESOURCES:${NC}
   ${CYAN}pipelineruns, pr${NC}     PipelineRun failures
   ${CYAN}failures${NC}             Build failures (alias for pipelineruns)
   ${CYAN}apps${NC}                 Available applications (versions)
+  ${CYAN}releases${NC}             Release CRs (push to stage/prod status)
 
 ${BOLD}COMMANDS:${NC}
 
@@ -495,7 +735,11 @@ ${BOLD}COMMANDS:${NC}
     ic get alerts --date <date>              Alerts on a specific date
     ic get alerts --from <date> --to <date>  Changes between two dates
     ic get exceptions                        Policy exceptions expiring/expired
-    ic get conforma                          Conforma test failures
+    ic get bindings                          RPA → EC policy mappings
+    ic get conforma [--current|--future|--all]  Conforma test failures
+                                             --current: Current policy (blocking, default)
+                                             --future: Future policy (informational)
+                                             --all: Both current and future
 
   ${CYAN}report <resource>${NC}
     ic report build                          Daily build failures standup table
@@ -524,6 +768,19 @@ ${BOLD}COMMANDS:${NC}
                                              (e.g., "ic 1" for component #1)
                                              --log: Show complete logs
 
+  ${CYAN}Releases:${NC}
+    ic get releases                          List recent Release CRs by epoch
+    ic get releases --stage                  Stage releases only
+    ic get releases --prod                   Prod releases only
+    ic get releases --limit 10               Show more release groups
+    ic describe release <name>               Release CR details + error diagnosis
+    ic describe release <name> --logs        Include pipeline failure logs
+    ic release status                        Process checklist (latest epoch)
+    ic release status <epoch>                Checklist for specific epoch
+    ic release status --verbose              Include Konflux UI links per step
+    ic release diff <epoch1> <epoch2>        Compare snapshots between releases
+    ic release verify <name>                 Check image availability in target registry (Pyxis)
+
   ${CYAN}Configuration:${NC}
     ic config                                Show current configuration
     ic config set-app <app-name>             Set application version
@@ -550,11 +807,32 @@ ${BOLD}COMMANDS:${NC}
     ic get fixes                             List recent PR fix attempts and outcomes
     ic get fixes --all                       All fix attempts (no date limit)
 
+  ${CYAN}Scenarios:${NC}
+    ic scenarios                             List ITS scenarios for current app
+    ic scenarios --active                    Only active scenarios
+    ic scenarios --disabled                  Only disabled scenarios
+    ic scenarios --gaps                      Detect missing scenarios across apps
+    ic scenarios --all                       All apps in namespace
+    ic scenarios --app <name>                Scenarios for specific app
+
+  ${CYAN}Component Health:${NC}
+    ic components health                     All components with build/conforma status
+    ic conforma categories                   Violation categories across components
+
   ${CYAN}AI Analysis:${NC}
     ic ai analyze <num|component>            Analyze failure with AI
     ic ai analyze --all                      Analyze all pending failures
+    ic ai analyze release <name>             Analyze a failed release
+    ic ai analyze scenarios [app]            Proactive ITS scenario analysis
     ic ai status                             Show AI analysis summary
     ic ai stats                              Detailed AI statistics
+
+  ${CYAN}Batch Analysis (Manual):${NC}
+    cd collectors/python
+    ./analyze_batch.py --estimate            Show queue depth (no API calls)
+    ./analyze_batch.py --limit 20            Analyze 20 failures (15 build + 5 conforma)
+    ./analyze_batch.py --limit 50            Larger batch (37 build + 13 conforma)
+                                             ${YELLOW}Note: Uses Anthropic API - manual execution recommended${NC}
 
   ${CYAN}Export to Tickets:${NC}
     ic export <num|component> jira           Export to Jira format
@@ -644,6 +922,7 @@ trigger_background_sync() {
 
 # GET commands
 cmd_get_components() {
+    _check_db || return 1
     local refresh=false
     [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
 
@@ -869,6 +1148,7 @@ cmd_get_component() {
 }
 
 cmd_get_pipelineruns() {
+    _check_db || return 1
     local limit="${1:-20}"
 
     section_header "Recent PipelineRun Failures"
@@ -1829,6 +2109,8 @@ cmd_ai() {
             echo "Commands:"
             echo "  analyze <num|component>  Analyze a specific failure"
             echo "  analyze --all            Analyze all pending failures"
+            echo "  analyze release <name>   Analyze a failed release"
+            echo "  analyze scenarios [app]  Analyze ITS scenario config"
             echo "  status                   Show analysis summary"
             echo "  stats                    Show detailed statistics"
             echo ""
@@ -1836,6 +2118,9 @@ cmd_ai() {
             echo "  ic ai analyze 1                         # Analyze alert #1"
             echo "  ic ai analyze component acme-automl-v3-4 # Analyze specific component"
             echo "  ic ai analyze --all                     # Analyze all pending"
+            echo "  ic ai analyze release acme-v2-0-prod-1778657574"
+            echo "  ic ai analyze scenarios                 # Analyze current app ITS"
+            echo "  ic ai analyze scenarios acme-v2-0      # Analyze specific app ITS"
             echo "  ic ai status                            # Show summary"
             return 1
             ;;
@@ -1853,6 +2138,7 @@ cmd_ai_analyze() {
         echo -e "${RED}Error: Missing argument${NC}"
         echo "Usage: ic ai analyze <num|component> [--force]"
         echo "       ic ai analyze conforma <component> [--force]"
+        echo "       ic ai analyze release <name> [--force]"
         echo "       ic ai analyze --all"
         return 1
     fi
@@ -1861,6 +2147,25 @@ cmd_ai_analyze() {
     if [ "$1" = "--all" ]; then
         target="all"
         shift
+    elif [ "$1" = "release" ]; then
+        analysis_type="release"
+        shift
+        local release_name="$1"
+        shift
+        # Parse remaining flags for release
+        local release_force=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --force) release_force="--force"; shift ;;
+                *) shift ;;
+            esac
+        done
+        cmd_ai_analyze_release "$release_name" "$release_force"
+        return $?
+    elif [ "$1" = "scenarios" ] || [ "$1" = "its" ]; then
+        shift
+        cmd_ai_analyze_scenarios "$@"
+        return $?
     elif [ "$1" = "conforma" ]; then
         analysis_type="conforma"
         shift
@@ -2017,6 +2322,232 @@ cmd_ai_analyze() {
         echo ""
         python3.11 analyze_conforma.py --component "$component"
     fi
+}
+
+cmd_ai_analyze_release() {
+    local release_name="$1"
+    local force_flag="${2:-}"
+
+    if [ -z "$release_name" ]; then
+        echo -e "${RED}Error: Missing release name${NC}"
+        echo "Usage: ic ai analyze release <release-name> [--force]"
+        echo ""
+        echo "Example: ic ai analyze release acme-v2-0-prod-1778657574"
+        return 1
+    fi
+
+    # Check if LLM is configured
+    if [ -z "$LLM_PROVIDER" ] && [ -z "$ANTHROPIC_VERTEX_PROJECT_ID" ]; then
+        echo -e "${RED}Error: LLM not configured${NC}"
+        echo ""
+        echo "Set LLM provider in .env or environment:"
+        echo "  export LLM_PROVIDER=vertex_ai"
+        echo "  export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id"
+        return 1
+    fi
+
+    echo -e "${CYAN}Analyzing release: $release_name${NC}"
+    echo ""
+
+    cd "$SCRIPT_DIR/collectors/python" || return 1
+
+    # Capture stderr (logs) separately from stdout (JSON)
+    local log_file
+    log_file=$(mktemp)
+    local output
+    output=$(python3.11 analyze_release.py --release "$release_name" --namespace "$NAMESPACE" $force_flag 2>"$log_file")
+    local exit_code=$?
+
+    # Show log progress lines to user
+    if [ -s "$log_file" ]; then
+        grep -E "Collecting|Fetching|Got|Analyzing" "$log_file" | sed 's/^.*INFO - /  /' || true
+        echo ""
+    fi
+
+    if [ $exit_code -ne 0 ]; then
+        echo -e "${RED}Analysis failed${NC}"
+        cat "$log_file" | tail -10
+        rm -f "$log_file"
+        return 1
+    fi
+    rm -f "$log_file"
+
+    # Parse JSON output from Python
+    local json_output
+    json_output=$(printf '%s\n' "$output" | python3.11 -c "
+import sys, json
+data = json.load(sys.stdin)
+
+status = data.get('status', '')
+if status == 'not_failed':
+    print('NOT_FAILED')
+    sys.exit(0)
+if status == 'error':
+    print('ERROR: ' + data.get('error', 'unknown'))
+    sys.exit(1)
+
+print('Category:       ' + data.get('failure_category', 'unknown'))
+confidence = data.get('confidence_score', 0)
+print('Confidence:     {}%'.format(int(float(confidence) * 100)))
+owner = data.get('owner_team', '')
+if owner:
+    print('Owner:          ' + owner)
+print()
+print('Root Cause:')
+for line in data.get('root_cause', '').split('\n'):
+    print('  ' + line)
+print()
+print('Recommended Fix:')
+for line in data.get('recommended_fix', '').split('\n'):
+    print('  ' + line)
+
+files = data.get('recommended_files', [])
+if files:
+    print()
+    print('Files to modify:')
+    for f in files:
+        print('  ' + f)
+
+images = data.get('affected_images', [])
+if images:
+    print()
+    print('Affected Images:')
+    for img in images:
+        print('  - ' + img)
+
+print()
+can_fix = data.get('can_auto_fix', False)
+print('Can Auto-Fix:   ' + ('YES' if can_fix else 'NO'))
+review = data.get('requires_human_review', True)
+print('Requires Review: ' + ('YES' if review else 'NO'))
+" 2>/dev/null)
+
+    if [ $? -ne 0 ]; then
+        # Fallback: show raw Python output (includes logger lines)
+        echo "$output"
+        return 0
+    fi
+
+    if [ "$json_output" = "NOT_FAILED" ]; then
+        echo -e "${GREEN}Release has not failed — nothing to analyze${NC}"
+        return 0
+    fi
+
+    if [[ "$json_output" == ERROR:* ]]; then
+        echo -e "${RED}${json_output}${NC}"
+        return 1
+    fi
+
+    section_header "AI Analysis"
+    echo ""
+    echo "$json_output"
+}
+
+cmd_ai_analyze_scenarios() {
+    local app_arg=""
+    local ns_arg="--namespace $NAMESPACE"
+    local analyze_all=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)  analyze_all=true; shift ;;
+            --app)  app_arg="--app $2"; shift 2 ;;
+            *)
+                # If arg looks like a scenario name, warn the user
+                if [[ "$1" == conforma-* ]] || [[ "$1" == *-single-component ]] || [[ "$1" == *-enterprise-contract ]]; then
+                    echo -e "${YELLOW}\"$1\" looks like a scenario name, not an application.${NC}"
+                    echo -e "${CYAN}This command analyzes all scenarios for an application.${NC}"
+                    echo ""
+                    echo "Usage: ic ai analyze scenarios [--app <app-name>]"
+                    echo "       ic ai analyze scenarios              # current app ($APPLICATION_NAME)"
+                    echo "       ic ai analyze scenarios --app acme-v2-0"
+                    return 1
+                fi
+                app_arg="--app $1"; shift ;;
+        esac
+    done
+
+    # Default to current application unless --all
+    if [ -z "$app_arg" ] && ! $analyze_all; then
+        app_arg="--app $APPLICATION_NAME"
+    fi
+
+    # Check if LLM is configured
+    if [ -z "$LLM_PROVIDER" ] && [ -z "$ANTHROPIC_VERTEX_PROJECT_ID" ]; then
+        echo -e "${RED}Error: LLM not configured${NC}"
+        echo ""
+        echo "Set LLM provider in .env or environment:"
+        echo "  export LLM_PROVIDER=vertex_ai"
+        echo "  export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id"
+        return 1
+    fi
+
+    echo -e "${CYAN}Analyzing ITS scenario configuration: ${app_arg#--app }${NC}"
+    echo ""
+
+    cd "$SCRIPT_DIR/collectors/python" || return 1
+
+    local log_file
+    log_file=$(mktemp)
+    local output
+    output=$(python3.11 analyze_scenarios.py $app_arg $ns_arg 2>"$log_file")
+    local exit_code=$?
+
+    if [ -s "$log_file" ]; then
+        grep -E "Fetching|Found|Analysis complete|Severity" "$log_file" | sed 's/^.*INFO - /  /' || true
+        echo ""
+    fi
+
+    if [ $exit_code -ne 0 ]; then
+        echo -e "${RED}Analysis failed${NC}"
+        tail -10 "$log_file"
+        rm -f "$log_file"
+        return 1
+    fi
+    rm -f "$log_file"
+
+    local json_output
+    json_output=$(printf '%s\n' "$output" | python3.11 -c "
+import sys, json
+data = json.load(sys.stdin)
+
+if not data.get('analyzed'):
+    print('No scenarios found to analyze')
+    sys.exit(0)
+
+a = data.get('analysis', {})
+severity = a.get('severity', 'info').upper()
+issues = a.get('issues_count', 0)
+conf = int(a.get('confidence_score', 0) * 100)
+model = data.get('model', 'unknown')
+cost = data.get('cost_usd', 0)
+count = data.get('scenarios_count', 0)
+
+print('Scenarios:      {}'.format(count))
+print('Severity:       {}'.format(severity))
+print('Issues Found:   {}'.format(issues))
+print('Confidence:     {}%'.format(conf))
+print('Model:          {}'.format(model))
+print('Cost:           \${:.4f}'.format(cost))
+print()
+print('Findings:')
+for line in a.get('findings', '').split('\n'):
+    print('  ' + line)
+print()
+print('Recommendations:')
+for line in a.get('recommendations', '').split('\n'):
+    print('  ' + line)
+" 2>/dev/null)
+
+    if [ $? -ne 0 ]; then
+        echo "$output"
+        return 0
+    fi
+
+    section_header "AI Scenario Analysis"
+    echo ""
+    echo "$json_output"
+    echo ""
 }
 
 cmd_ai_status() {
@@ -3078,10 +3609,40 @@ export_slack() {
 
 # GET CONFORMA - Conforma test failures
 cmd_get_conforma() {
+    _check_db || return 1
     local refresh=false
-    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
+    local filter_mode="current"  # current | future | all
 
-    section_header "Conforma Test Failures"
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --refresh|-r) refresh=true; shift ;;
+            --future) filter_mode="future"; shift ;;
+            --all) filter_mode="all"; shift ;;
+            --current) filter_mode="current"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local header_suffix=""
+    local filter_clause=""
+
+    case "$filter_mode" in
+        current)
+            header_suffix=" ${CYAN}(Blocking - Current Policy)${NC}"
+            filter_clause="AND is_future = FALSE"
+            ;;
+        future)
+            header_suffix=" ${YELLOW}(Informational - Future Policy)${NC}"
+            filter_clause="AND is_future = TRUE"
+            ;;
+        all)
+            header_suffix=" ${CYAN}(All: Current + Future)${NC}"
+            filter_clause=""
+            ;;
+    esac
+
+    section_header "Conforma Test Failures${header_suffix}"
     echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
     echo ""
 
@@ -3092,12 +3653,15 @@ cmd_get_conforma() {
         cd "$SCRIPT_DIR"
     fi
 
-    local count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE;" 2>/dev/null)
+    local count=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE ${filter_clause};" 2>/dev/null)
 
     if [ "${count:-0}" = "0" ]; then
         echo -e "${GREEN}✓ No Conforma failures${NC}"
         echo ""
-        echo -e "${CYAN}Tip:${NC} Use 'ic get conforma --refresh' to check for new failures"
+        if [ "$filter_mode" = "current" ]; then
+            echo -e "${CYAN}Tip:${NC} Use 'ic conforma --future' to see future policy violations"
+        fi
+        echo -e "${CYAN}Tip:${NC} Use 'ic conforma --refresh' to check for new failures"
         return
     fi
 
@@ -3113,6 +3677,7 @@ cmd_get_conforma() {
              WHEN scenario LIKE 'conforma-custom-%' THEN 'custom'
              WHEN scenario LIKE '%-chart-%' THEN 'chart'
              ELSE '-' END as \"Type\",
+        CASE WHEN is_future THEN 'future' ELSE 'current' END as \"Policy\",
         violations_count as \"Violations\",
         warnings_count as \"Warnings\",
         successes_count as \"OK\",
@@ -3121,11 +3686,16 @@ cmd_get_conforma() {
     FROM conforma_results
     WHERE application = '$APPLICATION_NAME'
       AND is_resolved = FALSE
+      ${filter_clause}
     ORDER BY violations_count DESC;
     "
     echo ""
 
     echo -e "${CYAN}Tip:${NC} Use 'ic describe conforma <component>' for violation details"
+    if [ "$filter_mode" = "current" ]; then
+        echo -e "${CYAN}Tip:${NC} Use 'ic conforma --future' to see future policy violations"
+        echo -e "${CYAN}Tip:${NC} Use 'ic conforma --all' to see both current and future"
+    fi
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts' to see builds + Conforma in one view"
     echo ""
 }
@@ -3179,10 +3749,10 @@ display_alerts_conforma_failures() {
     local offset="${1:-0}"
     local conforma_count=$(sql "
         SELECT COUNT(*) FROM (
-            SELECT DISTINCT ON (component_name) component_name
+            SELECT DISTINCT ON (component_name, scenario) component_name
             FROM conforma_results
             WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
-            ORDER BY component_name, last_updated_at DESC
+            ORDER BY component_name, scenario, last_updated_at DESC
         ) sub;
     " 2>/dev/null)
 
@@ -3193,21 +3763,21 @@ display_alerts_conforma_failures() {
     else
         local exceptions=""
         exceptions=$(fetch_conforma_exceptions "$APPLICATION_NAME" 2>/dev/null)
-        local gl_exc=""
-        gl_exc=$(fetch_gitlab_exceptions 2>/dev/null)
+        local k8s_exc_full=""
+        k8s_exc_full=$(fetch_k8s_exceptions_full 2>/dev/null)
         local expiring_data=""
         expiring_data=$(fetch_expiring_exceptions 21 2>/dev/null)
 
         local comp_rows
         comp_rows=$(sql "
         WITH latest_conforma AS (
-            SELECT DISTINCT ON (component_name)
+            SELECT DISTINCT ON (component_name, scenario)
                 component_name, scenario, violations_count, warnings_count, first_detected_at,
                 COALESCE(jira_key, '') as jira_key
             FROM conforma_results
             WHERE application = '$APPLICATION_NAME'
               AND is_resolved = FALSE
-            ORDER BY component_name, last_updated_at DESC
+            ORDER BY component_name, scenario, last_updated_at DESC
         )
         SELECT component_name, scenario, violations_count, warnings_count,
                TO_CHAR(first_detected_at, 'DD Mon'), jira_key
@@ -3215,8 +3785,8 @@ display_alerts_conforma_failures() {
         ORDER BY violations_count DESC;
         " 2>/dev/null)
 
-        printf "  %-4s %-45s %-7s %10s %10s %-28s %-6s %-16s\n" "#" "Component" "Type" "Violations" "Warnings" "Exception" "Since" "JIRA"
-        printf "  %-4s %-45s %-7s %10s %10s %-28s %-6s %-16s\n" "---" "$(printf '%0.s-' {1..45})" "-------" "----------" "----------" "----------------------------" "------" "----------------"
+        printf "  %-4s %-40s %-9s %6s %6s %-22s %-6s %s\n" "#" "Component" "Policy" "Viol" "Warn" "Exception" "Since" "JIRA"
+        printf "  %-4s %-40s %-9s %6s %6s %-22s %-6s %s\n" "---" "$(printf '%0.s-' {1..40})" "---------" "------" "------" "----------------------" "------" "--------"
 
         local row_num=0
         echo "$comp_rows" | while IFS='|' read -r c_name c_scenario c_viol c_warn c_since c_jira; do
@@ -3230,18 +3800,27 @@ display_alerts_conforma_failures() {
 
             row_num=$((row_num + 1))
             local display_num=$((row_num + offset))
-            local c_type
-            c_type=$(conforma_scenario_label "$c_scenario")
+
+            local policy_name
+            policy_name=$(extract_policy_from_scenario "$c_scenario")
+            local policy_label
+            policy_label=$(echo "$policy_name" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
 
             local exc_status="-"
+            local exc_jira_ref=""
+            local exc_gl_link=""
             local vsummary=""
-            if [ -n "$exceptions" ] || [ -n "$gl_exc" ]; then
-                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$c_name' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
-                exc_status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exc")
+            if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$c_name' AND scenario = '$c_scenario' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                local exc_result
+                exc_result=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$c_scenario")
+                exc_status=$(echo "$exc_result" | cut -d'|' -f1)
+                exc_jira_ref=$(echo "$exc_result" | cut -d'|' -f2)
+                exc_gl_link=$(echo "$exc_result" | cut -d'|' -f3)
             fi
 
             local exc_display="$exc_status"
-            if [ -n "$expiring_data" ] && [ "$exc_status" != "NO" ] && [ "$exc_status" != "-" ] && [ "$exc_status" != "UNKNOWN" ]; then
+            if [ -n "$expiring_data" ] && [[ "$exc_status" != NO* ]] && [ "$exc_status" != "-" ] && [ "$exc_status" != "UNKNOWN" ]; then
                 local expiry_info
                 expiry_info=$(find_component_expiry "$c_name" "$vsummary" "$expiring_data")
                 if [ "$expiry_info" != "-" ]; then
@@ -3251,15 +3830,39 @@ display_alerts_conforma_failures() {
 
             local exc_color="$NC"
             case "$exc_status" in
-                YES) exc_color="$GREEN" ;;
+                YES*) exc_color="$GREEN" ;;
+                NO\ \(in*) exc_color="$YELLOW" ;;
                 NO) exc_color="$RED" ;;
                 PARTIAL*) exc_color="$YELLOW" ;;
             esac
 
-            printf "  %-4s %-45s %-7s %10s %10s " "$display_num" "${c_name:0:45}" "$c_type" "$c_viol" "$c_warn"
-            echo -ne "${exc_color}$(printf '%-28s' "$exc_display")${NC} "
+            local display_jira="${c_jira:--}"
+            if [ -n "$exc_jira_ref" ] && [ "$exc_jira_ref" != "config.exclude (permanent)" ]; then
+                local jira_key
+                jira_key=$(echo "$exc_jira_ref" | grep -oP '[A-Z]+-\d+' | tail -1)
+                [ -n "$jira_key" ] && [ "$display_jira" = "-" ] && display_jira="$jira_key"
+            fi
+
+            printf "  %-4s %-40s %-9s %6s %6s " "$display_num" "${c_name:0:40}" "$policy_label" "$c_viol" "$c_warn"
+            echo -ne "${exc_color}$(printf '%-22s' "${exc_display:0:22}")${NC} "
             printf "%-6s " "$c_since"
-            echo "${c_jira:--}"
+            echo "$display_jira"
+
+            # Show GitLab link for known EC policies (skip custom scenarios)
+            local gl_link=""
+            [[ "$exc_gl_link" == http* ]] && gl_link="$exc_gl_link"
+            if [ -z "$gl_link" ] && [ -n "$policy_name" ] && echo "$policy_name" | grep -q 'rhoai'; then
+                gl_link="https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/${policy_name}.yaml"
+            fi
+            if [ -n "$gl_link" ]; then
+                echo -e "       ${CYAN}↳ ${gl_link}${NC}"
+            fi
+
+            local categories=""
+            [ -n "$vsummary" ] && categories=$(categorize_violation_summary "$vsummary")
+            if [ -n "$categories" ]; then
+                echo -e "       ${CYAN}↳ ${categories}${NC}"
+            fi
         done
     fi
     echo ""
@@ -3311,6 +3914,96 @@ display_alerts_in_progress() {
     fi
 }
 
+display_alerts_release_failures() {
+    local offset="${1:-0}"
+
+    if ! oc whoami -t &>/dev/null; then
+        echo -e "${BOLD}Release Failures:${NC}"
+        echo -e "  ${YELLOW}(oc login required)${NC}"
+        echo ""
+        return
+    fi
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$RELENG_NAMESPACE" -o json 2>/dev/null)
+
+    if [ -z "$releases_json" ] || [ "$(echo "$releases_json" | jq '.items | length' 2>/dev/null)" = "0" ]; then
+        return
+    fi
+
+    local app_version="${APPLICATION_NAME#rhoai-}"
+    local now_epoch
+    now_epoch=$(date +%s)
+
+    # Filter to current app's releases, then find failed or stuck ones
+    local failed_releases
+    failed_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" --argjson now "$now_epoch" '
+        [.items[]
+         | select(.spec.releasePlan | contains($ver))
+         | {
+             name: .metadata.name,
+             plan: .spec.releasePlan,
+             created: .metadata.creationTimestamp,
+             released_status: ([.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"),
+             released_reason: ([.status.conditions[]? | select(.type == "Released")] | .[0] | .reason // "Unknown"),
+             error_msg: ([.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")] | .[0] | .message // ""),
+             managed_reason: ([.status.conditions[]? | select(.type == "ManagedPipelineProcessed")] | .[0] | .reason // "Unknown"),
+             age_hours: ((.metadata.creationTimestamp | sub("\\.[0-9]+"; "") | strptime("%Y-%m-%dT%H:%M:%S%Z") | mktime) as $ts | if $ts then ($now - $ts) / 3600 else 0 end)
+           }
+         | select(
+             (.released_status == "False") or
+             (.released_status == "Unknown" and .age_hours > 24)
+           )
+        ] | sort_by(.created) | reverse
+    ' 2>/dev/null)
+
+    local release_count
+    release_count=$(echo "$failed_releases" | jq 'length' 2>/dev/null || echo "0")
+
+    echo -e "${BOLD}Release Failures (${release_count}):${NC}"
+
+    if [ "$release_count" = "0" ]; then
+        echo -e "  ${GREEN}✓ No release failures${NC}"
+    else
+        printf "  %-4s %-44s %-14s %-6s  %s\n" "#" "Release" "Type" "Target" "Status"
+        printf "  %-4s %-44s %-14s %-6s  %s\n" "---" "$(printf '%0.s-' {1..44})" "--------------" "------" "----------"
+
+        while IFS= read -r rel; do
+            offset=$((offset + 1))
+            local name plan released_status error_msg age_hours managed_reason
+            name=$(echo "$rel" | jq -r '.name')
+            plan=$(echo "$rel" | jq -r '.plan')
+            released_status=$(echo "$rel" | jq -r '.released_status')
+            error_msg=$(echo "$rel" | jq -r '.error_msg')
+            age_hours=$(echo "$rel" | jq -r '.age_hours | floor')
+            managed_reason=$(echo "$rel" | jq -r '.managed_reason')
+
+            local classification target type
+            classification=$(_release_classify "$plan")
+            target=$(echo "$classification" | cut -d'|' -f1)
+            type=$(echo "$classification" | cut -d'|' -f2)
+            local type_label
+            type_label=$(_release_type_label "$type")
+            local target_label
+            target_label=$(echo "$target" | sed 's/stage/Stage/;s/prod/Prod/')
+
+            local status_display
+            if [ "$released_status" = "False" ]; then
+                local short_err=""
+                [ -n "$error_msg" ] && short_err=" ($(echo "$error_msg" | grep -oP 'task \K[^ :]+' | head -1))"
+                [ -z "$short_err" ] && [ -n "$error_msg" ] && short_err=" (${error_msg:0:30})"
+                status_display="${RED}✗ Failed${NC}${short_err}"
+            else
+                status_display="${YELLOW}◌ Stuck ${age_hours}h${NC}"
+            fi
+
+            printf "  %-4s %-44s %-14s %-6s  " "$offset" "${name:0:44}" "$type_label" "$target_label"
+            echo -e "$status_display"
+        done < <(echo "$failed_releases" | jq -c '.[]' 2>/dev/null)
+    fi
+    echo ""
+}
+
 display_alerts_exception_row() {
     local days_left="$1" eff_until="$2" value="$3" image_url="$4" reference="$5" source="$6" gl_link="$7"
     local max_value_len="${8:-45}" max_comp_len="${9:-30}"
@@ -3346,14 +4039,28 @@ display_alerts_expiring_exceptions() {
     local expired_count
     expired_count=$(echo "$all_exceptions" | awk -F'|' '$1 < -1 && $1 != ""' | wc -l)
 
+    # Batch query: violation counts per rule (for impact column)
+    local impact_data=""
+    impact_data=$(sql "
+        WITH extracted AS (
+            SELECT component_name,
+                   (regexp_matches(violation_summary, '(?<=[✕✗] \[Violation\] )([a-z_]+\.[a-z_]+)', 'g'))[1] as rule
+            FROM conforma_results
+            WHERE application = '${APPLICATION_NAME}' AND is_resolved = FALSE
+              AND violation_summary IS NOT NULL
+        )
+        SELECT rule, COUNT(DISTINCT component_name), COUNT(*)
+        FROM extracted GROUP BY rule;
+    " 2>/dev/null)
+
     if [ -n "$expiring_soon" ]; then
         local exp_count
         exp_count=$(echo "$expiring_soon" | wc -l)
         local expired_msg=""
         [ "$expired_count" -gt 0 ] && expired_msg=" ${RED}(${expired_count} already expired)${NC}"
         echo -e "${BOLD}${YELLOW}⚠ Expiring Exceptions — next 10 days (${exp_count}):${NC}${expired_msg}"
-        printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "Days" "Expires" "Source" "Rule" "Component" "JIRA"
-        printf "  %-6s %-12s %-8s %-45s %-30s %s\n" "------" "------------" "--------" "$(printf '%0.s-' {1..45})" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..16})"
+        printf "  %-6s %-12s %-8s %-38s %-22s %-12s %s\n" "Days" "Expires" "Source" "Rule" "Component" "JIRA" "Impact"
+        printf "  %-6s %-12s %-8s %-38s %-22s %-12s %s\n" "------" "------------" "--------" "$(printf '%0.s-' {1..38})" "$(printf '%0.s-' {1..22})" "$(printf '%0.s-' {1..12})" "$(printf '%0.s-' {1..20})"
         echo "$expiring_soon" | while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
             [ -z "$days_left" ] && continue
             local day_color="$NC"
@@ -3366,10 +4073,25 @@ display_alerts_expiring_exceptions() {
                 day_color="$YELLOW"
             fi
             local parsed
-            parsed=$(display_alerts_exception_row "$days_left" "$eff_until" "$value" "$image_url" "$reference" "$source" "$gl_link")
+            parsed=$(display_alerts_exception_row "$days_left" "$eff_until" "$value" "$image_url" "$reference" "$source" "$gl_link" 22)
             IFS='|' read -r src_label comp_short jira_key row_gl_link <<< "$parsed"
+
+            # Look up impact: match rule from exception value against violation data
+            local impact_label="-"
+            if [ -n "$impact_data" ]; then
+                local exc_rule="${value%%:*}"
+                local match_line
+                match_line=$(echo "$impact_data" | grep "^ *${exc_rule} *|" | head -1)
+                if [ -n "$match_line" ]; then
+                    local ic_comps ic_viols
+                    ic_comps=$(echo "$match_line" | cut -d'|' -f2 | tr -d ' ')
+                    ic_viols=$(echo "$match_line" | cut -d'|' -f3 | tr -d ' ')
+                    impact_label="${ic_comps}c/${ic_viols}v"
+                fi
+            fi
+
             echo -ne "  ${day_color}$(printf '%-6s' "$day_label")${NC} "
-            printf "%-12s %-8s %-45s %-30s %s\n" "$eff_until" "$src_label" "${value:0:45}" "$comp_short" "$jira_key"
+            printf "%-12s %-8s %-38s %-22s %-12s %s\n" "$eff_until" "$src_label" "${value:0:38}" "${comp_short:0:22}" "$jira_key" "$impact_label"
             [ -n "$row_gl_link" ] && echo -e "         ${CYAN}↳ ${row_gl_link}${NC}"
         done
         echo ""
@@ -3399,6 +4121,7 @@ display_alerts_expiring_exceptions() {
 
 # GET ALERTS - unified view of build failures + conforma
 cmd_get_alerts() {
+    _check_db || return 1
     local refresh=false
     local target_date=""
     local from_date=""
@@ -3512,6 +4235,9 @@ cmd_get_alerts() {
     " 2>/dev/null)
     display_alerts_conforma_failures "${build_count:-0}"
 
+    local release_count=0
+    display_alerts_release_failures "$((${build_count:-0} + ${conforma_count:-0}))"
+
     local running_count=0
     display_alerts_in_progress
 
@@ -3530,8 +4256,45 @@ cmd_get_alerts() {
 cmd_get_exceptions() {
     section_header "Policy Exceptions — ${APPLICATION_NAME}"
     display_alerts_expiring_exceptions
-    echo -e "${CYAN}Tip:${NC} Exceptions are fetched from GitLab policy files (cached daily)"
+    echo -e "${CYAN}Tip:${NC} Exceptions fetched from K8s API (6 policies, cached daily)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts' for build failures and Conforma violations"
+    echo ""
+}
+
+cmd_get_bindings() {
+    section_header "RPA → EC Policy Bindings (rhoai)"
+
+    local bindings_json
+    bindings_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action bindings --name-filter rhoai 2>/dev/null || true)
+
+    if [ -z "$bindings_json" ] || ! echo "$bindings_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        echo -e "${RED}Error: Could not fetch RPA bindings (oc login required)${NC}"
+        echo ""
+        return 1
+    fi
+
+    local count
+    count=$(echo "$bindings_json" | jq '.bindings | length')
+    local policies_count
+    policies_count=$(echo "$bindings_json" | jq '.policies_count')
+
+    echo -e "${CYAN}${policies_count} EC policies, ${count} bound RPAs${NC}"
+    echo ""
+    printf "  %-55s %-30s %s\n" "RPA" "Policy" "Application(s)"
+    printf "  %-55s %-30s %s\n" "$(printf '%0.s-' {1..55})" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..30})"
+
+    echo "$bindings_json" | jq -r '.bindings[] | "\(.rpa_name)\t\(.policy)\t\(.application)"' | while IFS=$'\t' read -r rpa policy app; do
+        local rpa_short="${rpa:0:55}"
+        if echo "$app" | grep -q ','; then
+            local n
+            n=$(echo "$app" | tr ',' '\n' | wc -l)
+            app="${n} apps"
+        fi
+        printf "  %-55s %-30s %s\n" "$rpa_short" "$policy" "${app:0:30}"
+    done
+
+    echo ""
+    echo -e "${CYAN}Tip:${NC} Data from K8s API (namespace: releng-tenant)"
     echo ""
 }
 
@@ -4221,9 +4984,9 @@ cmd_conforma_report() {
     printf "%-32s %-40s %s\n" "ITEM" "CURRENT STATUS" "NEXT STEPS"
     printf "%-32s %-40s %s\n" "----" "--------------" "----------"
 
-    # Fetch GitLab exceptions once (shared across all versions)
-    local gl_exceptions
-    gl_exceptions=$(fetch_gitlab_exceptions 2>/dev/null)
+    # Fetch K8s EC policy exceptions once (shared across all versions)
+    local k8s_exc_full
+    k8s_exc_full=$(fetch_k8s_exceptions_full 2>/dev/null)
 
     # Track totals for summary
     local total_needs_jira=0
@@ -4253,7 +5016,7 @@ cmd_conforma_report() {
         local exceptions
         exceptions=$(fetch_conforma_exceptions "$app" 2>/dev/null)
         local exception_available=true
-        [ -z "$exceptions" ] && [ -z "$gl_exceptions" ] && exception_available=false
+        [ -z "$exceptions" ] && [ -z "$k8s_exc_full" ] && exception_available=false
 
         # Count excepted vs not
         local excepted_count=0
@@ -4262,17 +5025,19 @@ cmd_conforma_report() {
 
         if [ "$exception_available" = true ]; then
             local comp_list
-            comp_list=$(sql "SELECT DISTINCT component_name FROM conforma_results WHERE application = '${app}' AND is_resolved = FALSE;" 2>/dev/null)
-            while IFS= read -r comp_name; do
+            comp_list=$(sql "SELECT DISTINCT ON (component_name) component_name, scenario FROM conforma_results WHERE application = '${app}' AND is_resolved = FALSE ORDER BY component_name, last_updated_at DESC;" 2>/dev/null)
+            while IFS='|' read -r comp_name comp_scenario; do
+                comp_name=$(trim "$comp_name")
+                comp_scenario=$(trim "$comp_scenario")
                 [ -z "$comp_name" ] && continue
                 local vsummary
                 vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '${comp_name}' AND application = '${app}' AND is_resolved = FALSE LIMIT 1;" 2>/dev/null)
                 local status
-                status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exceptions")
+                status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$comp_scenario" | cut -d'|' -f1)
                 case "$status" in
-                    YES) excepted_count=$((excepted_count + 1)) ;;
+                    YES*) excepted_count=$((excepted_count + 1)) ;;
                     PARTIAL*) partial_count=$((partial_count + 1)); needs_jira_count=$((needs_jira_count + 1)) ;;
-                    NO|UNKNOWN) needs_jira_count=$((needs_jira_count + 1)) ;;
+                    NO*|UNKNOWN) needs_jira_count=$((needs_jira_count + 1)) ;;
                 esac
             done <<< "$comp_list"
         fi
@@ -4314,12 +5079,25 @@ cmd_conforma_report() {
     fi
     echo ""
 
+    # Batch impact query for expiring exceptions
+    local report_impact_data=""
+    report_impact_data=$(sql "
+        WITH extracted AS (
+            SELECT component_name,
+                   (regexp_matches(violation_summary, '(?<=[✕✗] \[Violation\] )([a-z_]+\.[a-z_]+)', 'g'))[1] as rule
+            FROM conforma_results
+            WHERE is_resolved = FALSE AND violation_summary IS NOT NULL
+        )
+        SELECT rule, COUNT(DISTINCT component_name), COUNT(*)
+        FROM extracted GROUP BY rule;
+    " 2>/dev/null)
+
     # Show expiring exceptions detail
     if [ -n "$expiring_soon" ] && [ "$exp_soon_count" -gt 0 ]; then
         echo -e "${BOLD}EXPIRING EXCEPTIONS (within 3 weeks):${NC}"
         echo ""
         local prev_date=""
-        while IFS='|' read -r days_left eff_until value image_url reference; do
+        while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
             [ -z "$days_left" ] && continue
             local date_label=""
             if [ "$eff_until" != "$prev_date" ]; then
@@ -4339,9 +5117,24 @@ cmd_conforma_report() {
             if [ ${#display_value} -gt 70 ]; then
                 display_value="${display_value:0:67}..."
             fi
-            echo "    - $display_value"
+
+            local impact_info=""
+            if [ -n "$report_impact_data" ]; then
+                local exc_rule="${value%%:*}"
+                local match_line
+                match_line=$(echo "$report_impact_data" | grep "^ *${exc_rule} *|" | head -1)
+                if [ -n "$match_line" ]; then
+                    local ic_comps ic_viols
+                    ic_comps=$(echo "$match_line" | cut -d'|' -f2 | tr -d ' ')
+                    ic_viols=$(echo "$match_line" | cut -d'|' -f3 | tr -d ' ')
+                    impact_info=" → ${ic_comps} components, ${ic_viols} violations"
+                fi
+            fi
+
+            echo "    - ${display_value}${impact_info}"
             [ -n "$image_url" ] && echo "      image: $image_url"
             [ -n "$reference" ] && echo "      ref: $reference"
+            [ -n "$gl_link" ] && echo -e "      ${CYAN}↳ ${gl_link}${NC}"
         done <<< "$expiring_soon"
         echo ""
     fi
@@ -4349,7 +5142,7 @@ cmd_conforma_report() {
     if [ -n "$expired" ] && [ "$exp_expired_count" -gt 0 ]; then
         echo -e "${BOLD}ALREADY EXPIRED:${NC}"
         echo ""
-        while IFS='|' read -r days_left eff_until value image_url reference; do
+        while IFS='|' read -r days_left eff_until value image_url reference source gl_link; do
             [ -z "$days_left" ] && continue
             local display_value="$value"
             if [ ${#display_value} -gt 70 ]; then
@@ -4357,6 +5150,7 @@ cmd_conforma_report() {
             fi
             echo -e "  ${RED}${eff_until} (${days_left#-}d ago)${NC}  $display_value"
             [ -n "$reference" ] && echo "      ref: $reference"
+            [ -n "$gl_link" ] && echo -e "      ${CYAN}↳ ${gl_link}${NC}"
         done <<< "$expired"
         echo ""
     fi
@@ -4379,8 +5173,8 @@ cmd_conforma_report() {
             local exceptions
             exceptions=$(fetch_conforma_exceptions "$app" 2>/dev/null)
 
-            printf " %2s  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "#" "Component" "Type" "Violations" "Exception" "AI" "Expiry" "Action"
-            printf " %2s  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "--" "$(printf '%0.s-' {1..40})" "-------" "----------" "------------------" "-----" "-----------------" "------"
+            printf " %2s  %-40s %-9s %6s  %-18s %-5s  %-17s  %s\n" "#" "Component" "Policy" "Viol" "Exception" "AI" "Expiry" "Action"
+            printf " %2s  %-40s %-9s %6s  %-18s %-5s  %-17s  %s\n" "--" "$(printf '%0.s-' {1..40})" "---------" "------" "------------------" "-----" "-----------------" "------"
 
             local idx=0
             while IFS='|' read -r comp_name c_scenario viol_count warn_count ai_status; do
@@ -4388,26 +5182,39 @@ cmd_conforma_report() {
                 idx=$((idx + 1))
 
                 c_scenario=$(trim "$c_scenario")
-                local c_type
-                c_type=$(conforma_scenario_label "$c_scenario")
+                local policy_name
+                policy_name=$(extract_policy_from_scenario "$c_scenario")
+                local policy_label
+                policy_label=$(echo "$policy_name" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
 
-                # Get exception status
+                # Get exception status via K8s API-aware matching
                 local vsummary
-                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '${comp_name}' AND application = '${app}' AND is_resolved = FALSE LIMIT 1;" 2>/dev/null)
+                vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '${comp_name}' AND scenario = '${c_scenario}' AND application = '${app}' AND is_resolved = FALSE LIMIT 1;" 2>/dev/null)
                 local exc_status="?"
-                [ -n "$exceptions" ] || [ -n "$gl_exceptions" ] && exc_status=$(check_exception_status "$vsummary" "$exceptions" "$gl_exceptions")
+                local exc_jira_ref=""
+                if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                    local exc_result
+                    exc_result=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$c_scenario")
+                    exc_status=$(echo "$exc_result" | cut -d'|' -f1)
+                    exc_jira_ref=$(echo "$exc_result" | cut -d'|' -f2)
+                fi
 
-                # Find expiry date from GitLab data
+                # Find expiry date
                 local expiry_info="-"
                 if [ -n "$expiring_data" ]; then
                     expiry_info=$(find_component_expiry "$comp_name" "$vsummary" "$expiring_data")
                 fi
 
-                # Determine action
+                # Determine action — include exception JIRA if available
                 local action=""
+                local jira_key=""
+                if [ -n "$exc_jira_ref" ] && [ "$exc_jira_ref" != "config.exclude (permanent)" ]; then
+                    jira_key=$(echo "$exc_jira_ref" | grep -oP '[A-Z]+-\d+' | tail -1)
+                fi
                 case "$exc_status" in
-                    YES) action="Excepted" ;;
-                    PARTIAL*) action="Needs JIRA (partial)" ;;
+                    YES*) action="Excepted${jira_key:+ ($jira_key)}" ;;
+                    PARTIAL*) action="Partial${jira_key:+ ($jira_key)}" ;;
+                    NO\ \(in*) action="In other${jira_key:+ ($jira_key)}" ;;
                     NO) action="Needs JIRA" ;;
                     *) action="Check manually" ;;
                 esac
@@ -4418,7 +5225,7 @@ cmd_conforma_report() {
                     display_name="${display_name:0:37}..."
                 fi
 
-                printf " %2d  %-40s %-7s %10s  %-18s %-5s  %-17s  %s\n" "$idx" "$display_name" "$c_type" "$viol_count" "$exc_status" "${ai_status:--}" "$expiry_info" "$action"
+                printf " %2d  %-40s %-9s %6s  %-18s %-5s  %-17s  %s\n" "$idx" "$display_name" "$policy_label" "$viol_count" "$exc_status" "${ai_status:--}" "$expiry_info" "$action"
             done < <(sql "
                 SELECT c.component_name, c.scenario, c.violations_count, c.warnings_count,
                     COALESCE((SELECT ROUND(confidence_score * 100) || '%' FROM ai_analysis WHERE conforma_result_id = c.id ORDER BY analyzed_at DESC LIMIT 1), '-')
@@ -4438,11 +5245,9 @@ cmd_conforma_report() {
     # Sources
     echo -e "${BOLD}Sources:${NC}"
     echo "  Violations DB     local PostgreSQL (konflux_monitoring)"
-    echo "  Exceptions (GH)   https://github.com/acme-org/conforma-reporter/blob/acme-3.4/conforma-exceptions-components.yaml"
-    echo "  Policy Prod (GL)  https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/registry-acme-prod.yaml"
-    echo "  Policy Prod (GL)  https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/fbc-acme-prod.yaml"
-    echo "  Policy Stage (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/registry-acme-stage.yaml"
-    echo "  Policy Stage (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/fbc-acme-stage.yaml"
+    echo "  Exceptions (GH)   https://github.com/acme-org/conforma-reporter"
+    echo "  EC Policies (K8s) 6 EnterpriseContractPolicy CRDs in releng-tenant (K8s API primary, GitLab fallback)"
+    echo "  Policy files (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/tree/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy"
     echo "  Reporter CSV      https://github.com/acme-org/conforma-reporter/blob/acme-3.4/latest/conforma-violations-report.csv"
     echo ""
 
@@ -4455,6 +5260,67 @@ cmd_conforma_report() {
 
     # Cleanup
     unset CONFORMA_NO_CACHE
+}
+
+cmd_conforma_categories() {
+    local app="${1:-$APPLICATION_NAME}"
+
+    section_header "Violation Categories — ${app}"
+    echo ""
+
+    local rule_data
+    rule_data=$(sql "
+        WITH extracted AS (
+            SELECT component_name,
+                   (regexp_matches(violation_summary, '(?<=[✕✗] \[Violation\] )([a-z_]+\.[a-z_]+)', 'g'))[1] as rule
+            FROM conforma_results
+            WHERE application = '${app}' AND is_resolved = FALSE
+              AND violation_summary IS NOT NULL
+        )
+        SELECT rule, COUNT(DISTINCT component_name) as comp_count, COUNT(*) as viol_count
+        FROM extracted
+        GROUP BY rule
+        ORDER BY viol_count DESC;
+    " 2>/dev/null)
+
+    if [ -z "$rule_data" ]; then
+        echo -e "${GREEN}No active violations.${NC}"
+        echo ""
+        return
+    fi
+
+    declare -A cat_comps cat_viols cat_rules
+    while IFS='|' read -r rule comp_count viol_count; do
+        rule=$(echo "$rule" | tr -d ' ')
+        comp_count=$(echo "$comp_count" | tr -d ' ')
+        viol_count=$(echo "$viol_count" | tr -d ' ')
+        [ -z "$rule" ] && continue
+        local cat
+        cat=$(map_rule_to_category "$rule")
+        cat_comps[$cat]=$(( ${cat_comps[$cat]:-0} + comp_count ))
+        cat_viols[$cat]=$(( ${cat_viols[$cat]:-0} + viol_count ))
+        cat_rules[$cat]="${cat_rules[$cat]:+${cat_rules[$cat]}, }${rule}(${viol_count})"
+    done <<< "$rule_data"
+
+    printf "  %-16s %8s %10s  %s\n" "Category" "Comps" "Violations" "Rules"
+    printf "  %-16s %8s %10s  %s\n" "$(printf '%0.s-' {1..16})" "--------" "----------" "$(printf '%0.s-' {1..50})"
+
+    for cat in $(for c in "${!cat_viols[@]}"; do echo "${cat_viols[$c]}|$c"; done | sort -t'|' -k1 -rn | cut -d'|' -f2); do
+        local color="$NC"
+        case "$cat" in
+            CVE) color="$RED" ;;
+            "Trusted Task"|"Base Image") color="$YELLOW" ;;
+        esac
+        echo -ne "  ${color}$(printf '%-16s' "$cat")${NC} "
+        printf "%8s %10s  %s\n" "${cat_comps[$cat]}" "${cat_viols[$cat]}" "${cat_rules[$cat]:0:60}"
+    done
+    echo ""
+
+    local total_viols=0 total_rules=0
+    for cat in "${!cat_viols[@]}"; do total_viols=$((total_viols + cat_viols[$cat])); done
+    total_rules=$(echo "$rule_data" | grep -c '[^[:space:]]')
+    echo -e "${BOLD}Total: ${total_viols} violations across ${total_rules} distinct rules${NC}"
+    echo ""
 }
 
 # BUILD REPORT — daily standup table for build failures (symmetric to cmd_conforma_report)
@@ -4789,6 +5655,1464 @@ cmd_conforma_history() {
     if [ $? -ne 0 ]; then
         echo -e "${RED}Error fetching PipelineRun history from KubeArchive${NC}"
     fi
+}
+
+# ============================================================================
+# RELEASE COMMANDS
+# ============================================================================
+
+RELENG_NAMESPACE="releng-tenant"
+
+_release_require_kinit() {
+    if klist -s 2>/dev/null; then
+        return 0
+    fi
+    echo -e "${YELLOW}Kerberos ticket expired — running kinit...${NC}" >&2
+    if ! kinit; then
+        echo -e "${RED}kinit failed. Pyxis queries require a valid Kerberos ticket.${NC}" >&2
+        return 1
+    fi
+}
+
+_release_require_oc() {
+    OC_TOKEN=$(oc whoami -t 2>/dev/null) || true
+    if [ -z "$OC_TOKEN" ]; then
+        echo -e "${RED}Error: Not logged into OpenShift. Run 'oc login' first.${NC}" >&2
+        return 1
+    fi
+}
+
+_release_epoch_from_name() {
+    local name="$1"
+    echo "$name" | grep -oP '\d{10}' | head -1
+}
+
+_release_retry_count() {
+    local name="$1"
+    local epoch
+    epoch=$(_release_epoch_from_name "$name")
+    [ -z "$epoch" ] && echo "0" && return
+    local suffix="${name##*"$epoch"}"
+    if [ -z "$suffix" ]; then
+        echo "0"
+    else
+        echo "$suffix" | tr -cd '-' | wc -c
+    fi
+}
+
+_release_classify() {
+    local plan="$1"
+    local target="unknown" type="unknown"
+
+    case "$plan" in
+        *-components-stage) target="stage"; type="components" ;;
+        *-components-prod)  target="prod";  type="components" ;;
+        *-charts-stage)     target="stage"; type="charts" ;;
+        *-charts-prod)      target="prod";  type="charts" ;;
+        *-addon-*-fbc-stage) target="stage"; type="fbc-addon" ;;
+        *-addon-*-fbc-prod)  target="prod";  type="fbc-addon" ;;
+        *-ocp-*-fbc-stage)
+            target="stage"
+            local ocp_ver
+            ocp_ver=$(echo "$plan" | grep -oP 'ocp-\K\d+')
+            type="fbc-${ocp_ver}"
+            ;;
+        *-ocp-*-fbc-prod)
+            target="prod"
+            local ocp_ver
+            ocp_ver=$(echo "$plan" | grep -oP 'ocp-\K\d+')
+            type="fbc-${ocp_ver}"
+            ;;
+    esac
+    echo "${target}|${type}"
+}
+
+_release_type_label() {
+    local type="$1"
+    case "$type" in
+        components) echo "Components" ;;
+        charts)     echo "Charts" ;;
+        fbc-addon)  echo "FBC Addon" ;;
+        fbc-*)      local ver="${type#fbc-}"
+                    local major="${ver:0:1}" minor="${ver:1}"
+                    echo "FBC OCP ${major}.${minor}" ;;
+        *)          echo "$type" ;;
+    esac
+}
+
+_release_discover_steps() {
+    local app="$APPLICATION_NAME"
+    local plans
+    plans=$(oc get releaseplans -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name' --no-headers 2>/dev/null \
+        | grep "^rhoai-.*${app#rhoai-}" | grep -v '\-ea-' | sort)
+
+    local has_stage_charts=false has_prod_charts=false
+    local has_stage_addon=false has_prod_addon=false
+    local stage_ocp_versions="" prod_ocp_versions=""
+
+    while IFS= read -r plan; do
+        [ -z "$plan" ] && continue
+        case "$plan" in
+            *-components-stage) ;;
+            *-components-prod)  ;;
+            *-charts-stage) has_stage_charts=true ;;
+            *-charts-prod)  has_prod_charts=true ;;
+            *-addon-*-fbc-stage) has_stage_addon=true ;;
+            *-addon-*-fbc-prod)  has_prod_addon=true ;;
+            *-ocp-*-fbc-stage)
+                local ver
+                ver=$(echo "$plan" | grep -oP 'ocp-\K\d+')
+                stage_ocp_versions="${stage_ocp_versions} ${ver}"
+                ;;
+            *-ocp-*-fbc-prod)
+                local ver
+                ver=$(echo "$plan" | grep -oP 'ocp-\K\d+')
+                prod_ocp_versions="${prod_ocp_versions} ${ver}"
+                ;;
+        esac
+    done <<< "$plans"
+
+    stage_ocp_versions=$(echo "$stage_ocp_versions" | tr ' ' '\n' | sort -n | uniq | tr '\n' ' ')
+    prod_ocp_versions=$(echo "$prod_ocp_versions" | tr ' ' '\n' | sort -n | uniq | tr '\n' ' ')
+
+    echo "stage|components"
+    [ "$has_stage_charts" = true ] && echo "stage|charts"
+    for ver in $stage_ocp_versions; do
+        echo "stage|fbc-${ver}"
+    done
+    [ "$has_stage_addon" = true ] && echo "stage|fbc-addon"
+
+    echo "prod|components"
+    [ "$has_prod_charts" = true ] && echo "prod|charts"
+    for ver in $prod_ocp_versions; do
+        echo "prod|fbc-${ver}"
+    done
+    [ "$has_prod_addon" = true ] && echo "prod|fbc-addon"
+    return 0
+}
+
+_release_name_prefix() {
+    local app="$APPLICATION_NAME" target="$1" type="$2"
+    case "$type" in
+        components)
+            echo "${app}-${target}" ;;
+        charts)
+            echo "${app}-charts-${target}" ;;
+        fbc-addon)
+            local ocp_ver
+            ocp_ver=$(oc get releaseplans -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name' --no-headers 2>/dev/null \
+                | grep "addon.*${app#rhoai-}.*fbc-${target}" | grep -oP 'ocp-\K\d+' | head -1)
+            echo "rhoai-fbc-addon-ocp-${ocp_ver:-419}-${target}" ;;
+        fbc-*)
+            local ver="${type#fbc-}"
+            echo "acme-fbc-fragment-ocp-${ver}-${target}" ;;
+    esac
+}
+
+_release_pipeline_ui_url() {
+    local pipeline_ref="$1"
+    local ns="${pipeline_ref%%/*}"
+    local pr_name="${pipeline_ref##*/}"
+    [ -z "$ns" ] && ns="$RELENG_NAMESPACE"
+    echo "${KONFLUX_UI_BASE}/ns/${ns}/applications/${APPLICATION_NAME}/pipelineruns/${pr_name}"
+}
+
+_release_blocker_advice() {
+    local message="${1:-}" release_name="${2:-}"
+    local advice=""
+    case "$message" in
+        *"ReleasePlan"*"not found"*)
+            advice="ReleasePlan doesn't exist — verify the name in the Release CR matches an existing ReleasePlan in namespace ${NAMESPACE}" ;;
+        *verify-access-to-resources*)
+            advice="Permission issue — verify the service account has access to the target namespace and resources" ;;
+        *apply-mapping*)
+            advice="Image mapping failed — check ReleasePlanAdmission component mappings in konflux-release-data repo" ;;
+        *publish-pyxis-repository*)
+            advice="Pyxis publish failed — may be a transient issue, check advisory status and retry the release" ;;
+        *verify-conforma*)
+            advice="EC policy violations — run 'ic describe release ${release_name} --logs' to see specific violations" ;;
+        *"Release validation"*)
+            advice="Release failed pre-pipeline validation — check the Validated condition message for details" ;;
+        *)
+            [ -n "$release_name" ] && advice="Run 'ic describe release ${release_name} --logs' for error details" ;;
+    esac
+    [ -n "$advice" ] && echo -e "  → ${BOLD}Suggested action:${NC} ${advice}"
+}
+
+_release_fetch_pipeline_error() {
+    local pipeline_ref="$1" fetch_logs="${2:-false}"
+    [ -z "$pipeline_ref" ] && return
+
+    local ns="${pipeline_ref%%/*}"
+    local pr_name="${pipeline_ref##*/}"
+    [ -z "$ns" ] && ns="$RELENG_NAMESPACE"
+
+    local pr_json=""
+    pr_json=$(oc get pipelinerun "$pr_name" -n "$ns" -o json 2>/dev/null || true)
+
+    if [ -z "$pr_json" ] || echo "$pr_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        pr_json=$(curl -sk --max-time 30 \
+            -H "Authorization: Bearer $OC_TOKEN" \
+            "${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${ns}/pipelineruns/${pr_name}" 2>/dev/null)
+    fi
+
+    [ -z "$pr_json" ] && echo -e "  ${YELLOW}Could not retrieve pipeline run data${NC}" && return
+
+    local failed_task="${3:-}"
+    local failed_taskrun=""
+
+    if [ -z "$failed_task" ]; then
+        local pr_message
+        pr_message=$(echo "$pr_json" | jq -r '
+            .status.conditions[]? | select(.type == "Succeeded" and .status == "False") | .message // empty
+        ' 2>/dev/null | head -1)
+        [ -n "$pr_message" ] && failed_task=$(echo "$pr_message" | grep -oP 'task \K[^ :]+' | head -1)
+    fi
+
+    if [ -n "$failed_task" ]; then
+        failed_taskrun=$(echo "$pr_json" | jq -r --arg task "$failed_task" '
+            .status.childReferences[]? | select(.pipelineTaskName == $task) | .name
+        ' 2>/dev/null | head -1)
+    fi
+    failed_taskrun="${failed_taskrun:-${pr_name}-${failed_task}}"
+
+    echo -e "  ${BOLD}Failed task:${NC} ${failed_task:-unknown}"
+
+    local tr_json=""
+    tr_json=$(oc get taskrun "$failed_taskrun" -n "$ns" -o json 2>/dev/null || true)
+    if [ -z "$tr_json" ] || echo "$tr_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        tr_json=$(curl -sk --max-time 30 \
+            -H "Authorization: Bearer $OC_TOKEN" \
+            "${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${ns}/taskruns/${failed_taskrun}" 2>/dev/null)
+    fi
+
+    if [ -n "$tr_json" ]; then
+        local tr_message
+        tr_message=$(echo "$tr_json" | jq -r '
+            .status.conditions[]? | select(.type == "Succeeded" and .status == "False") | .message // empty
+        ' 2>/dev/null | head -1)
+        [ -n "$tr_message" ] && echo -e "  ${BOLD}Message:${NC}     ${tr_message:0:120}"
+
+        local test_output
+        test_output=$(echo "$tr_json" | jq -r '
+            .metadata.annotations["test.appstudio.openshift.io/status"] // empty
+        ' 2>/dev/null)
+        if [ -z "$test_output" ]; then
+            test_output=$(echo "$tr_json" | jq -r '
+                .status.results[]? | select(.name == "TEST_OUTPUT") | .value // empty
+            ' 2>/dev/null | head -1)
+        fi
+        if [ -n "$test_output" ]; then
+            local result failures
+            result=$(echo "$test_output" | jq -r '.result // empty' 2>/dev/null)
+            failures=$(echo "$test_output" | jq -r '.failures // empty' 2>/dev/null)
+            [ -n "$result" ] && echo -e "  ${BOLD}Result:${NC}      ${result} (${failures:-0} failures)"
+        fi
+
+        local failed_step
+        failed_step=$(echo "$tr_json" | jq -r '
+            [.status.steps[]? | select(.terminated.exitCode != 0)] | .[0] | .name // empty
+        ' 2>/dev/null)
+        [ -n "$failed_step" ] && echo -e "  ${BOLD}Failed step:${NC} ${failed_step}"
+
+        if [ "$fetch_logs" = true ] && [ -n "$failed_step" ]; then
+            local pod_name
+            pod_name=$(echo "$tr_json" | jq -r '.status.podName // empty' 2>/dev/null)
+            if [ -n "$pod_name" ]; then
+                echo ""
+                echo -e "  ${BOLD}Log excerpt (${failed_step}):${NC}"
+                local logs
+                logs=$(curl -sk --max-time 30 \
+                    -H "Authorization: Bearer $OC_TOKEN" \
+                    "${KUBEARCHIVE_URL}/api/v1/namespaces/${ns}/pods/${pod_name}/log?container=${failed_step}" 2>/dev/null)
+                if [ -n "$logs" ]; then
+                    echo "$logs" | grep -iE 'error|fail|violation|unauthorized|denied' | tail -20 | sed 's/^/    /'
+                else
+                    echo -e "    ${YELLOW}Logs not available (may have expired from Loki)${NC}"
+                fi
+            fi
+        fi
+    fi
+}
+
+_release_step_task_list() {
+    local pipeline_ref="$1"
+    [ -z "$pipeline_ref" ] && return
+
+    local ns="${pipeline_ref%%/*}"
+    local pr_name="${pipeline_ref##*/}"
+    [ -z "$ns" ] && ns="$RELENG_NAMESPACE"
+
+    local pr_json=""
+    pr_json=$(oc get pipelinerun "$pr_name" -n "$ns" -o json 2>/dev/null || true)
+    if [ -z "$pr_json" ] || echo "$pr_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        pr_json=$(curl -sk --max-time 30 \
+            -H "Authorization: Bearer $OC_TOKEN" \
+            "${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${ns}/pipelineruns/${pr_name}" 2>/dev/null)
+    fi
+
+    [ -z "$pr_json" ] && return
+
+    echo "$pr_json" | jq -r '
+        [.status.childReferences[]? | {
+            name: .pipelineTaskName,
+            taskrun: .name
+        }] | .[] | .name + "|" + .taskrun
+    ' 2>/dev/null | while IFS='|' read -r task_name taskrun_name; do
+        [ -z "$task_name" ] && continue
+        local tr_json
+        tr_json=$(oc get taskrun "$taskrun_name" -n "$ns" -o json 2>/dev/null || true)
+        if [ -z "$tr_json" ] || echo "$tr_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+            tr_json=$(curl -sk --max-time 15 \
+                -H "Authorization: Bearer $OC_TOKEN" \
+                "${KUBEARCHIVE_URL}/apis/tekton.dev/v1/namespaces/${ns}/taskruns/${taskrun_name}" 2>/dev/null)
+        fi
+
+        local tr_status="unknown"
+        if [ -n "$tr_json" ]; then
+            local succeeded
+            succeeded=$(echo "$tr_json" | jq -r '
+                [.status.conditions[]? | select(.type == "Succeeded")] | .[0] | .status // "Unknown"
+            ' 2>/dev/null)
+            local reason
+            reason=$(echo "$tr_json" | jq -r '
+                [.status.conditions[]? | select(.type == "Succeeded")] | .[0] | .reason // ""
+            ' 2>/dev/null)
+            if [ "$succeeded" = "True" ]; then
+                tr_status="succeeded"
+            elif [ "$succeeded" = "False" ]; then
+                tr_status="failed"
+            elif [ "$reason" = "Running" ]; then
+                tr_status="running"
+            else
+                tr_status="pending"
+            fi
+        fi
+
+        case "$tr_status" in
+            succeeded) printf "       ${GREEN}✓${NC} %s\n" "$task_name" ;;
+            failed)    printf "       ${RED}✗${NC} %s\n" "$task_name" ;;
+            running)   printf "       ${YELLOW}◌${NC} %s\n" "$task_name" ;;
+            *)         printf "       ${YELLOW}○${NC} %s\n" "$task_name" ;;
+        esac
+    done
+}
+
+# GET RELEASES — list recent Release CRs grouped by epoch
+cmd_get_releases() {
+    local filter_target="" limit=5
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --stage) filter_target="stage"; shift ;;
+            --prod)  filter_target="prod";  shift ;;
+            --limit) shift; limit="${1:-5}"; shift ;;
+            --all)   limit=999; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    _release_require_oc || return 1
+
+    section_header "Release CRs — ${APPLICATION_NAME}"
+    echo ""
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+
+    if [ -z "$releases_json" ] || [ "$(echo "$releases_json" | jq '.items | length' 2>/dev/null)" = "0" ]; then
+        echo -e "${YELLOW}No Release CRs found in namespace ${NAMESPACE}${NC}"
+        return
+    fi
+
+    local app_version="${APPLICATION_NAME#rhoai-}"
+    local filtered
+    filtered=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
+        [.items[] | select(.spec.releasePlan | contains($ver))]
+    ' 2>/dev/null)
+
+    local epochs
+    epochs=$(echo "$filtered" | jq -r '.[].metadata.name' 2>/dev/null \
+        | grep -oP '\d{10}' | sort -rn | uniq | head -"$limit")
+
+    if [ -z "$epochs" ]; then
+        echo -e "${YELLOW}No releases found for ${APPLICATION_NAME}${NC}"
+        return
+    fi
+
+    local epoch_count
+    epoch_count=$(echo "$epochs" | wc -l)
+    echo -e "${CYAN}Showing ${epoch_count} most recent release group(s)${NC}"
+    [ -n "$filter_target" ] && echo -e "${CYAN}Filter: ${filter_target} only${NC}"
+    echo ""
+
+    while IFS= read -r epoch; do
+        [ -z "$epoch" ] && continue
+
+        local epoch_releases
+        epoch_releases=$(echo "$filtered" | jq -c --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | contains($epoch))]
+            | sort_by(.metadata.creationTimestamp)
+        ' 2>/dev/null)
+
+        local snapshot
+        snapshot=$(echo "$epoch_releases" | jq -r '.[0].spec.snapshot // "unknown"' 2>/dev/null)
+        local created
+        created=$(echo "$epoch_releases" | jq -r '.[0].metadata.creationTimestamp // ""' 2>/dev/null)
+        local date_label
+        date_label=$(date -d "$created" '+%Y-%m-%d' 2>/dev/null || echo "${created:0:10}")
+
+        echo -e "${BOLD}Epoch ${epoch}${NC}  (${date_label})  Snapshot: ${CYAN}${snapshot}${NC}"
+        printf "  %-48s %-14s %-6s  %s\n" "Release" "Type" "Target" "Status"
+        printf "  %-48s %-14s %-6s  %s\n" "$(printf '%0.s-' {1..48})" "--------------" "------" "----------"
+
+        echo "$epoch_releases" | jq -c '.[]' 2>/dev/null | while IFS= read -r rel; do
+            local name plan status_reason released_status
+            name=$(echo "$rel" | jq -r '.metadata.name')
+            plan=$(echo "$rel" | jq -r '.spec.releasePlan')
+            released_status=$(echo "$rel" | jq -r '
+                [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+            ')
+            status_reason=$(echo "$rel" | jq -r '
+                [.status.conditions[]? | select(.type == "Released")] | .[0] | .reason // "Pending"
+            ')
+
+            local classification target type
+            classification=$(_release_classify "$plan")
+            target=$(echo "$classification" | cut -d'|' -f1)
+            type=$(echo "$classification" | cut -d'|' -f2)
+
+            [ -n "$filter_target" ] && [ "$target" != "$filter_target" ] && continue
+
+            local type_label
+            type_label=$(_release_type_label "$type")
+            local target_label
+            target_label=$(echo "$target" | sed 's/stage/Stage/;s/prod/Prod/')
+
+            local status_display
+            if [ "$released_status" = "True" ]; then
+                status_display="${GREEN}✓ Succeeded${NC}"
+            elif [ "$released_status" = "False" ]; then
+                local msg
+                msg=$(echo "$rel" | jq -r '
+                    [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")] | .[0] | .message // empty
+                ' 2>/dev/null | head -1)
+                local short_msg=""
+                [ -n "$msg" ] && short_msg=" ($(echo "$msg" | grep -oP 'task \K[^ :]+' | head -1))"
+                status_display="${RED}✗ Failed${NC}${short_msg}"
+            else
+                local managed_status
+                managed_status=$(echo "$rel" | jq -r '
+                    [.status.conditions[]? | select(.type == "ManagedPipelineProcessed")] | .[0] | .reason // "Pending"
+                ')
+                if [ "$managed_status" = "Running" ] || [ "$managed_status" = "Pending" ]; then
+                    status_display="${YELLOW}◌ Running${NC}"
+                else
+                    status_display="${YELLOW}○ Pending${NC}"
+                fi
+            fi
+
+            local name_short="${name:0:48}"
+            printf "  %-48s %-14s %-6s  " "$name_short" "$type_label" "$target_label"
+            echo -e "$status_display"
+        done
+        echo ""
+    done <<< "$epochs"
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic describe release <name>' for details"
+    echo -e "${CYAN}Tip:${NC} Use 'ic release status [epoch]' for process checklist"
+    [ -z "$filter_target" ] && echo -e "${CYAN}Tip:${NC} Use '--stage' or '--prod' to filter"
+    echo ""
+}
+
+# DESCRIBE RELEASE — detail view of a single Release CR
+cmd_describe_release() {
+    local name="" fetch_logs=false
+
+    for arg in "$@"; do
+        case "$arg" in
+            --logs) fetch_logs=true ;;
+            -*) ;;
+            *) [ -z "$name" ] && name="$arg" ;;
+        esac
+    done
+
+    if [ -z "$name" ]; then
+        echo -e "${RED}Usage: ic describe release <name> [--logs]${NC}"
+        return 1
+    fi
+
+    _release_require_oc || return 1
+
+    local rel_json
+    rel_json=$(oc get release.appstudio.redhat.com "$name" -n "$NAMESPACE" -o json 2>/dev/null)
+
+    if [ -z "$rel_json" ] || echo "$rel_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        echo -e "${RED}Error: Release not found: ${name}${NC}"
+        return 1
+    fi
+
+    local snapshot plan created
+    snapshot=$(echo "$rel_json" | jq -r '.spec.snapshot // "unknown"')
+    plan=$(echo "$rel_json" | jq -r '.spec.releasePlan // "unknown"')
+    created=$(echo "$rel_json" | jq -r '.metadata.creationTimestamp // ""')
+
+    local classification target type
+    classification=$(_release_classify "$plan")
+    target=$(echo "$classification" | cut -d'|' -f1)
+    type=$(echo "$classification" | cut -d'|' -f2)
+    local type_label
+    type_label=$(_release_type_label "$type")
+    local target_label
+    target_label=$(echo "$target" | sed 's/stage/Stage/;s/prod/Prod/')
+
+    section_header "Release: ${name}"
+    echo ""
+    echo -e "${BOLD}Snapshot:${NC}     ${CYAN}${snapshot}${NC}"
+    local snap_json
+    snap_json=$(oc get snapshot "$snapshot" -n "$NAMESPACE" -o json 2>/dev/null || true)
+    if [ -n "$snap_json" ] && ! echo "$snap_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        local comp_count
+        comp_count=$(echo "$snap_json" | jq '.spec.components | length' 2>/dev/null)
+        [ -n "$comp_count" ] && [ "$comp_count" != "null" ] && \
+            echo -e "${BOLD}Components:${NC}   ${comp_count}"
+    fi
+    echo -e "${BOLD}ReleasePlan:${NC}  ${plan}"
+    echo -e "${BOLD}Type:${NC}         ${type_label} → ${target_label}"
+    echo -e "${BOLD}Created:${NC}      ${created}"
+
+    local advisory_type
+    advisory_type=$(echo "$rel_json" | jq -r '.spec.data.releaseNotes.type // empty' 2>/dev/null)
+    if [ -n "$advisory_type" ]; then
+        echo -e "${BOLD}Advisory:${NC}     ${advisory_type}"
+        local issues_list
+        issues_list=$(echo "$rel_json" | jq -r '
+            [.spec.data.releaseNotes.issues.fixed[]?.id // empty] | join(", ")
+        ' 2>/dev/null)
+        local issues_count
+        issues_count=$(echo "$rel_json" | jq '.spec.data.releaseNotes.issues.fixed | length // 0' 2>/dev/null)
+        if [ "${issues_count:-0}" -gt 0 ]; then
+            local issues_display="$issues_list"
+            [ ${#issues_display} -gt 80 ] && issues_display="${issues_display:0:77}..."
+            echo -e "${BOLD}Issues:${NC}       ${issues_count} fixed (${issues_display})"
+        fi
+        local cves_list
+        cves_list=$(echo "$rel_json" | jq -r '
+            [.spec.data.releaseNotes.cves[]? | .key + " (" + (.component // "?") + ")"] | join(", ")
+        ' 2>/dev/null)
+        local cves_count
+        cves_count=$(echo "$rel_json" | jq '.spec.data.releaseNotes.cves | length // 0' 2>/dev/null)
+        if [ "${cves_count:-0}" -gt 0 ]; then
+            local cves_display="$cves_list"
+            [ ${#cves_display} -gt 80 ] && cves_display="${cves_display:0:77}..."
+            echo -e "${BOLD}CVEs:${NC}         ${cves_count} (${cves_display})"
+        fi
+    fi
+    echo ""
+
+    echo -e "${BOLD}Conditions:${NC}"
+    printf "  %-36s %-8s %-12s %s\n" "Type" "Status" "Reason" "Message"
+    printf "  %-36s %-8s %-12s %s\n" "$(printf '%0.s-' {1..36})" "--------" "------------" "-------"
+
+    echo "$rel_json" | jq -c '.status.conditions[]?' 2>/dev/null | while IFS= read -r cond; do
+        local ctype cstatus creason cmessage
+        ctype=$(echo "$cond" | jq -r '.type')
+        cstatus=$(echo "$cond" | jq -r '.status')
+        creason=$(echo "$cond" | jq -r '.reason // "-"')
+        cmessage=$(echo "$cond" | jq -r '.message // "-"')
+
+        local status_color="$NC"
+        [ "$cstatus" = "True" ] && [ "$creason" != "Skipped" ] && status_color="$GREEN"
+        [ "$cstatus" = "False" ] && status_color="$RED"
+
+        local indicator=""
+        [ "$cstatus" = "False" ] && [ "$creason" = "Failed" ] && indicator=" ←"
+
+        local msg_display
+        if [ "$cmessage" = "-" ] || [ "$cmessage" = "" ]; then
+            msg_display="-"
+        elif [ "$cstatus" = "False" ]; then
+            msg_display="$cmessage"
+        else
+            msg_display="${cmessage:0:60}"
+        fi
+
+        printf "  %-36s " "$ctype"
+        echo -ne "${status_color}$(printf '%-8s' "$cstatus")${NC} "
+        printf "%-12s %s" "$creason" "$msg_display"
+        echo -e "${RED}${indicator}${NC}"
+    done
+    echo ""
+
+    local pipeline_ref start_time end_time
+    pipeline_ref=$(echo "$rel_json" | jq -r '.status.managedProcessing.pipelineRun // empty')
+    start_time=$(echo "$rel_json" | jq -r '.status.managedProcessing.startTime // empty')
+    end_time=$(echo "$rel_json" | jq -r '.status.managedProcessing.completionTime // empty')
+
+    if [ -z "$pipeline_ref" ]; then
+        local released_status
+        released_status=$(echo "$rel_json" | jq -r '
+            [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+        ')
+        if [ "$released_status" = "False" ]; then
+            echo -e "${BOLD}${RED}Error Details:${NC}"
+            echo "$rel_json" | jq -r '
+                [.status.conditions[]? | select(.status == "False")] | .[] |
+                "  \(.type): \(.message // .reason // "unknown")"
+            ' 2>/dev/null
+            echo ""
+            echo -e "  ${YELLOW}No managed pipeline was started — the release failed at validation.${NC}"
+            echo ""
+        fi
+    fi
+
+    if [ -n "$pipeline_ref" ]; then
+        echo -e "${BOLD}Pipeline:${NC}"
+        echo -e "  Run:      ${CYAN}${pipeline_ref}${NC}"
+        [ -n "$start_time" ] && echo -e "  Started:  ${start_time}"
+        [ -n "$end_time" ] && echo -e "  Ended:    ${end_time}"
+
+        if [ -n "$start_time" ] && [ -n "$end_time" ]; then
+            local start_epoch end_epoch duration_secs
+            start_epoch=$(date -d "$start_time" '+%s' 2>/dev/null)
+            end_epoch=$(date -d "$end_time" '+%s' 2>/dev/null)
+            if [ -n "$start_epoch" ] && [ -n "$end_epoch" ]; then
+                duration_secs=$((end_epoch - start_epoch))
+                echo -e "  Duration: ${duration_secs}s ($((duration_secs / 60))m $((duration_secs % 60))s)"
+            fi
+        fi
+
+        local ui_url
+        ui_url=$(_release_pipeline_ui_url "$pipeline_ref")
+        echo -e "  UI:       ${CYAN}${ui_url}${NC}"
+        echo ""
+
+        local released_status
+        released_status=$(echo "$rel_json" | jq -r '
+            [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+        ')
+
+        if [ "$released_status" = "False" ]; then
+            local managed_msg
+            managed_msg=$(echo "$rel_json" | jq -r '
+                [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")]
+                | .[0] | .message // empty
+            ' 2>/dev/null | head -1)
+            local hint_task
+            hint_task=$(echo "$managed_msg" | grep -oP 'task \K[^ :]+' | head -1)
+
+            echo -e "${BOLD}${RED}Error Details:${NC}"
+            _release_fetch_pipeline_error "$pipeline_ref" "$fetch_logs" "$hint_task"
+            echo ""
+        fi
+
+        echo -e "${BOLD}Pipeline Steps:${NC}"
+        _release_step_task_list "$pipeline_ref"
+        echo ""
+    fi
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic release status $(_release_epoch_from_name "$name")' for process checklist"
+    echo -e "${CYAN}Tip:${NC} Use 'ic release verify ${name}' to check image availability in Pyxis"
+    echo -e "${CYAN}Tip:${NC} oc get release ${name} -n ${NAMESPACE} -o yaml"
+    [ "$fetch_logs" = false ] && echo -e "${CYAN}Tip:${NC} Use '--logs' to fetch pipeline failure logs from KubeArchive"
+    echo ""
+}
+
+# RELEASE STATUS — process checklist showing done/pending/failed
+cmd_release_status() {
+    local epoch="" verbose=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --verbose|-v) verbose=true; shift ;;
+            -*) shift ;;
+            *) [ -z "$epoch" ] && epoch="$1"; shift ;;
+        esac
+    done
+
+    _release_require_oc || return 1
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+
+    if [ -z "$releases_json" ]; then
+        echo -e "${RED}Error: Could not fetch Release CRs${NC}"
+        return 1
+    fi
+
+    local app_version="${APPLICATION_NAME#rhoai-}"
+    local all_releases
+    all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
+        [.items[] | select(.spec.releasePlan | contains($ver))]
+    ' 2>/dev/null)
+
+    if [ -z "$epoch" ]; then
+        epoch=$(echo "$all_releases" | jq -r '.[].metadata.name' 2>/dev/null \
+            | grep -oP '\d{10}' | sort -rn | uniq | head -1)
+        if [ -z "$epoch" ]; then
+            echo -e "${YELLOW}No releases found for ${APPLICATION_NAME}${NC}"
+            return
+        fi
+    fi
+
+    local seed_releases
+    seed_releases=$(echo "$all_releases" | jq -c --arg epoch "$epoch" '
+        [.[] | select(.metadata.name | contains($epoch))]
+    ' 2>/dev/null)
+
+    local snapshot
+    snapshot=$(echo "$seed_releases" | jq -r '
+        [.[] | select(.spec.releasePlan | (endswith("-components-stage") or endswith("-components-prod")))]
+        | .[0].spec.snapshot // "unknown"
+    ' 2>/dev/null)
+    [ "$snapshot" = "unknown" ] || [ "$snapshot" = "null" ] && \
+        snapshot=$(echo "$seed_releases" | jq -r '.[0].spec.snapshot // "unknown"' 2>/dev/null)
+
+    local first_created
+    first_created=$(echo "$seed_releases" | jq -r '
+        [.[].metadata.creationTimestamp] | sort | .[0] // ""
+    ' 2>/dev/null)
+
+    section_header "Release Status — ${APPLICATION_NAME}"
+    echo ""
+    echo -e "${BOLD}Epoch:${NC}    ${CYAN}${epoch}${NC}"
+    echo -e "${BOLD}Snapshot:${NC} ${CYAN}${snapshot}${NC}"
+    [ -n "$first_created" ] && echo -e "${BOLD}Started:${NC}  ${first_created}"
+    echo ""
+
+    local steps
+    steps=$(_release_discover_steps)
+
+    local current_section=""
+    local stage_total=0 stage_done=0 stage_retries=0
+    local prod_total=0 prod_done=0 prod_retries=0
+    local blocker="" blocker_release="" next_step=""
+    local latest_end_time=""
+
+    while IFS='|' read -r step_target step_type; do
+        [ -z "$step_target" ] && continue
+
+        if [ "$step_target" != "$current_section" ]; then
+            current_section="$step_target"
+            local section_label
+            section_label=$(echo "$step_target" | sed 's/stage/Stage/;s/prod/Prod/')
+            echo -e "── ${BOLD}${section_label}${NC} ──────────────────────────────────────────────────"
+        fi
+
+        local type_label
+        type_label=$(_release_type_label "$step_type")
+
+        local prefix
+        prefix=$(_release_name_prefix "$step_target" "$step_type")
+
+        local matching
+        matching=$(echo "$all_releases" | jq -c --arg prefix "$prefix" --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | startswith($prefix + "-"))]
+            | [.[] | select(.metadata.name | capture("(?<ep>[0-9]{10})").ep >= $epoch)]
+            | sort_by(.metadata.creationTimestamp)
+        ' 2>/dev/null)
+        if [ -n "$matching" ] && [ "$matching" != "[]" ] && [ "$matching" != "null" ]; then
+            local best_epoch_in_step
+            best_epoch_in_step=$(echo "$matching" | jq -r '.[0].metadata.name' 2>/dev/null \
+                | grep -oP '\d{10}' | head -1)
+            if [ -n "$best_epoch_in_step" ]; then
+                matching=$(echo "$matching" | jq -c --arg ep "$best_epoch_in_step" '
+                    [.[] | select(.metadata.name | contains($ep))]
+                ' 2>/dev/null)
+            fi
+        fi
+        [ -z "$matching" ] || [ "$matching" = "null" ] && matching="[]"
+
+        local match_count
+        match_count=$(echo "$matching" | jq 'length' 2>/dev/null)
+
+        if [ "$step_target" = "stage" ]; then
+            stage_total=$((stage_total + 1))
+        else
+            prod_total=$((prod_total + 1))
+        fi
+
+        if [ "${match_count:-0}" -eq 0 ]; then
+            printf "  ${YELLOW}○${NC}  %-18s ${YELLOW}Not started${NC}\n" "$type_label"
+            if [ -z "$next_step" ] && [ -z "$blocker" ]; then
+                next_step="$step_target $type_label"
+            fi
+            continue
+        fi
+
+        echo "$matching" | jq -c '.[]' 2>/dev/null | while IFS= read -r rel; do
+            local rel_name released_status
+            rel_name=$(echo "$rel" | jq -r '.metadata.name')
+            released_status=$(echo "$rel" | jq -r '
+                [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+            ')
+
+            local retry=$(_release_retry_count "$rel_name")
+            local retry_label=""
+            [ "$retry" -gt 0 ] && retry_label=" (retry -${retry})"
+
+            local duration_label="" time_label=""
+            local s_time e_time
+            s_time=$(echo "$rel" | jq -r '.status.managedProcessing.startTime // empty')
+            e_time=$(echo "$rel" | jq -r '.status.managedProcessing.completionTime // empty')
+            if [ -n "$s_time" ]; then
+                time_label=$(date -d "$s_time" '+%m-%d %H:%M' 2>/dev/null)
+            fi
+            if [ -n "$s_time" ] && [ -n "$e_time" ]; then
+                local s_ep e_ep
+                s_ep=$(date -d "$s_time" '+%s' 2>/dev/null)
+                e_ep=$(date -d "$e_time" '+%s' 2>/dev/null)
+                if [ -n "$s_ep" ] && [ -n "$e_ep" ]; then
+                    local dur_secs=$(( e_ep - s_ep ))
+                    duration_label="(${dur_secs}s / $((dur_secs / 60))m)"
+                fi
+            fi
+
+            local display_name="$rel_name"
+            [ ${#display_name} -gt 46 ] && display_name="${display_name:0:43}..."
+
+            local pipeline_ref_inline
+            pipeline_ref_inline=$(echo "$rel" | jq -r '.status.managedProcessing.pipelineRun // empty')
+
+            if [ "$released_status" = "True" ]; then
+                printf "  ${GREEN}✓${NC}  %-18s ${GREEN}Succeeded${NC}   %-46s  %-12s %s\n" \
+                    "${type_label}${retry_label}" "$display_name" "${time_label:-}" "$duration_label"
+                if [ "$verbose" = true ] && [ -n "$pipeline_ref_inline" ]; then
+                    echo -e "     UI: ${CYAN}$(_release_pipeline_ui_url "$pipeline_ref_inline")${NC}"
+                fi
+            elif [ "$released_status" = "False" ]; then
+                printf "  ${RED}✗${NC}  %-18s ${RED}Failed${NC}      %-46s  %-12s %s\n" \
+                    "${type_label}${retry_label}" "$display_name" "${time_label:-}" "$duration_label"
+                local fail_msg
+                fail_msg=$(echo "$rel" | jq -r '
+                    [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")]
+                    | .[0] | .message // empty
+                ' 2>/dev/null | head -1)
+                if [ -n "$fail_msg" ]; then
+                    local short_msg="${fail_msg:0:100}"
+                    echo -e "     ${RED}↳${NC} ${short_msg}"
+                fi
+                if [ -n "$pipeline_ref_inline" ]; then
+                    echo -e "     UI: ${CYAN}$(_release_pipeline_ui_url "$pipeline_ref_inline")${NC}"
+                fi
+            else
+                local managed_reason
+                managed_reason=$(echo "$rel" | jq -r '
+                    [.status.conditions[]? | select(.type == "ManagedPipelineProcessed")]
+                    | .[0] | .reason // "Pending"
+                ')
+                if [ "$managed_reason" = "Running" ]; then
+                    printf "  ${YELLOW}◌${NC}  %-18s ${YELLOW}Running${NC}     %-46s  %-12s\n" \
+                        "${type_label}${retry_label}" "$display_name" "${time_label:-}"
+                else
+                    printf "  ${YELLOW}○${NC}  %-18s ${YELLOW}Pending${NC}     %-46s  %-12s\n" \
+                        "${type_label}${retry_label}" "$display_name" "${time_label:-}"
+                fi
+                if [ -n "$pipeline_ref_inline" ]; then
+                    echo -e "     UI: ${CYAN}$(_release_pipeline_ui_url "$pipeline_ref_inline")${NC}"
+                fi
+            fi
+        done
+
+        local last_status
+        last_status=$(echo "$matching" | jq -r '
+            .[-1] | [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+        ' 2>/dev/null)
+
+        local step_end
+        step_end=$(echo "$matching" | jq -r '
+            [.[].status.managedProcessing.completionTime // empty] | map(select(. != "")) | sort | .[-1] // empty
+        ' 2>/dev/null)
+        if [ -n "$step_end" ] && [[ "$step_end" > "${latest_end_time:-}" ]]; then
+            latest_end_time="$step_end"
+        fi
+
+        if [ "$last_status" = "True" ]; then
+            if [ "$step_target" = "stage" ]; then
+                stage_done=$((stage_done + 1))
+            else
+                prod_done=$((prod_done + 1))
+            fi
+            local total_retries
+            total_retries=$(echo "$matching" | jq 'length - 1' 2>/dev/null)
+            if [ "${total_retries:-0}" -gt 0 ]; then
+                if [ "$step_target" = "stage" ]; then
+                    stage_retries=$((stage_retries + total_retries))
+                else
+                    prod_retries=$((prod_retries + total_retries))
+                fi
+            fi
+        elif [ "$last_status" = "False" ]; then
+            if [ -z "$blocker" ]; then
+                blocker="${step_target} ${type_label}"
+                blocker_release=$(echo "$matching" | jq -r '.[-1].metadata.name' 2>/dev/null)
+            fi
+        else
+            if [ -z "$next_step" ] && [ -z "$blocker" ]; then
+                next_step="$step_target $type_label"
+            fi
+        fi
+
+    done <<< "$steps"
+
+    echo ""
+    echo -e "── ${BOLD}Summary${NC} ────────────────────────────────────────────────────"
+
+    local stage_status="" prod_status=""
+    if [ "$stage_done" -eq "$stage_total" ]; then
+        stage_status="${GREEN}${stage_done}/${stage_total} complete${NC}"
+    else
+        stage_status="${YELLOW}${stage_done}/${stage_total} complete${NC}"
+    fi
+    [ "$stage_retries" -gt 0 ] && stage_status="${stage_status} (${stage_retries} retries)"
+
+    if [ "$prod_done" -eq "$prod_total" ]; then
+        prod_status="${GREEN}${prod_done}/${prod_total} complete${NC}"
+    elif [ -n "$blocker" ]; then
+        prod_status="${RED}${prod_done}/${prod_total} complete — BLOCKED${NC}"
+    else
+        prod_status="${YELLOW}${prod_done}/${prod_total} complete${NC}"
+    fi
+    [ "$prod_retries" -gt 0 ] && prod_status="${prod_status} (${prod_retries} retries)"
+
+    echo -ne "  Stage: "; echo -e "$stage_status"
+    echo -ne "  Prod:  "; echo -e "$prod_status"
+
+    if [ -n "$first_created" ]; then
+        local start_epoch_ts end_epoch_ts elapsed_label
+        start_epoch_ts=$(date -d "$first_created" '+%s' 2>/dev/null)
+        if [ -n "$start_epoch_ts" ]; then
+            local is_complete=false
+            if [ "$stage_done" -eq "$stage_total" ] && [ "$prod_done" -eq "$prod_total" ]; then
+                is_complete=true
+            fi
+            if [ "$is_complete" = true ] && [ -n "$latest_end_time" ]; then
+                end_epoch_ts=$(date -d "$latest_end_time" '+%s' 2>/dev/null)
+            else
+                end_epoch_ts=$(date '+%s')
+            fi
+            if [ -n "$end_epoch_ts" ]; then
+                local elapsed=$(( end_epoch_ts - start_epoch_ts ))
+                local days=$((elapsed / 86400))
+                local hours=$(( (elapsed % 86400) / 3600 ))
+                local mins=$(( (elapsed % 3600) / 60 ))
+                elapsed_label=""
+                [ "$days" -gt 0 ] && elapsed_label="${days}d "
+                [ "$hours" -gt 0 ] || [ "$days" -gt 0 ] && elapsed_label="${elapsed_label}${hours}h "
+                elapsed_label="${elapsed_label}${mins}m"
+                local suffix="(complete)"
+                [ "$is_complete" != true ] && suffix="(in progress)"
+                echo -ne "  ${BOLD}Elapsed:${NC} ${elapsed_label} ${suffix}"
+                echo ""
+            fi
+        fi
+    fi
+    echo ""
+
+    if [ -n "$blocker" ]; then
+        echo -e "  ${RED}✗ Blocker:${NC} ${blocker} failed"
+        if [ -n "$blocker_release" ]; then
+            local fail_reason
+            fail_reason=$(echo "$all_releases" | jq -r --arg name "$blocker_release" '
+                [.[] | select(.metadata.name == $name)] | .[0]
+                | [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")]
+                | .[0] | .message // empty
+            ' 2>/dev/null | head -1)
+            if [ -z "$fail_reason" ]; then
+                fail_reason=$(echo "$all_releases" | jq -r --arg name "$blocker_release" '
+                    [.[] | select(.metadata.name == $name)] | .[0]
+                    | [.status.conditions[]? | select(.type == "Validated" and .status == "False")]
+                    | .[0] | .message // empty
+                ' 2>/dev/null | head -1)
+            fi
+            local short_reason
+            short_reason=$(echo "$fail_reason" | grep -oP 'task \K[^ :]+' | head -1)
+            [ -n "$short_reason" ] && echo -e "  → Failed at: ${short_reason}"
+            _release_blocker_advice "$fail_reason" "$blocker_release"
+        fi
+    elif [ -n "$next_step" ]; then
+        echo -e "  → ${BOLD}Next step:${NC} ${next_step}"
+    elif [ "$stage_done" -eq "$stage_total" ] && [ "$prod_done" -eq "$prod_total" ]; then
+        echo -e "  ${GREEN}✓ Release complete!${NC}"
+    fi
+
+    # Advisory status from Pyxis (only for completed releases, skip if no valid ticket)
+    if [ "$stage_done" -eq "$stage_total" ] && [ "$prod_done" -eq "$prod_total" ] && \
+       klist -s 2>/dev/null; then
+        local advisory_output
+        advisory_output=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 advisory_status.py --target prod --page-size 5 2>/dev/null)
+        if [ -n "$advisory_output" ]; then
+            local adv_count
+            adv_count=$(printf '%s\n' "$advisory_output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',0))" 2>/dev/null)
+            if [ "${adv_count:-0}" -gt 0 ]; then
+                echo ""
+                echo -e "  ${BOLD}Advisories:${NC}"
+                printf '%s\n' "$advisory_output" | python3.11 -c "
+import sys, json
+d = json.load(sys.stdin)
+for adv in d.get('advisories', [])[:5]:
+    eid = adv.get('errata_id', adv.get('_id', '?'))
+    status = adv.get('status', '?')
+    synopsis = adv.get('synopsis', '')[:60]
+    print('    {} [{}] {}'.format(eid, status, synopsis))
+" 2>/dev/null
+            fi
+        fi
+    fi
+    echo ""
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic describe release <name> --logs' for error details"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get releases' to list all Release CRs"
+    echo -e "${CYAN}Tip:${NC} Use '--verbose' to show Konflux UI links for each step"
+    echo ""
+}
+
+# RELEASE DIFF — compare snapshots between two release epochs
+cmd_release_diff() {
+    local epoch_a="${1:-}" epoch_b="${2:-}"
+    if [ -z "$epoch_a" ] || [ -z "$epoch_b" ]; then
+        echo -e "${RED}Usage: ic release diff <epoch1> <epoch2>${NC}"
+        echo -e "${CYAN}Example: ic release diff 1778062796 1778099025${NC}"
+        return 1
+    fi
+
+    _release_require_oc || return 1
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+    local app_version="${APPLICATION_NAME#rhoai-}"
+
+    _release_diff_snapshot() {
+        local ep="$1"
+        echo "$releases_json" | jq -r --arg ep "$ep" --arg ver "$app_version" '
+            [.items[] | select(.spec.releasePlan | contains($ver))
+                      | select(.metadata.name | contains($ep))
+                      | select(.spec.releasePlan | (endswith("-components-stage") or endswith("-components-prod")))]
+            | .[0].spec.snapshot // empty
+        ' 2>/dev/null
+    }
+
+    local snap_a snap_b
+    snap_a=$(_release_diff_snapshot "$epoch_a")
+    snap_b=$(_release_diff_snapshot "$epoch_b")
+
+    if [ -z "$snap_a" ]; then
+        echo -e "${RED}Error: No component release found for epoch ${epoch_a}${NC}"
+        return 1
+    fi
+    if [ -z "$snap_b" ]; then
+        echo -e "${RED}Error: No component release found for epoch ${epoch_b}${NC}"
+        return 1
+    fi
+
+    local snap_a_json snap_b_json
+    snap_a_json=$(oc get snapshot "$snap_a" -n "$NAMESPACE" -o json 2>/dev/null || true)
+    snap_b_json=$(oc get snapshot "$snap_b" -n "$NAMESPACE" -o json 2>/dev/null || true)
+
+    if [ -z "$snap_a_json" ] || echo "$snap_a_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        echo -e "${RED}Error: Snapshot ${snap_a} not found (may have been garbage-collected)${NC}"
+        return 1
+    fi
+    if [ -z "$snap_b_json" ] || echo "$snap_b_json" | jq -e '.kind == "Status"' >/dev/null 2>&1; then
+        echo -e "${RED}Error: Snapshot ${snap_b} not found (may have been garbage-collected)${NC}"
+        return 1
+    fi
+
+    local comps_a comps_b
+    comps_a=$(echo "$snap_a_json" | jq -r '[.spec.components[]? | {name: .name, image: .containerImage}] | sort_by(.name)' 2>/dev/null)
+    comps_b=$(echo "$snap_b_json" | jq -r '[.spec.components[]? | {name: .name, image: .containerImage}] | sort_by(.name)' 2>/dev/null)
+
+    section_header "Release Diff — ${APPLICATION_NAME}"
+    echo ""
+    echo -e "${BOLD}Epoch A:${NC}  ${CYAN}${epoch_a}${NC}  Snapshot: ${CYAN}${snap_a}${NC}"
+    echo -e "${BOLD}Epoch B:${NC}  ${CYAN}${epoch_b}${NC}  Snapshot: ${CYAN}${snap_b}${NC}"
+    echo ""
+
+    if [ "$snap_a" = "$snap_b" ]; then
+        echo -e "${YELLOW}Both epochs use the same snapshot — no differences.${NC}"
+        echo ""
+        return
+    fi
+
+    local changed=() added=() removed=() same_count=0
+
+    local names_a names_b
+    names_a=$(echo "$comps_a" | jq -r '.[].name' 2>/dev/null)
+    names_b=$(echo "$comps_b" | jq -r '.[].name' 2>/dev/null)
+
+    local all_names
+    all_names=$(echo -e "${names_a}\n${names_b}" | sort -u)
+
+    while IFS= read -r comp_name; do
+        [ -z "$comp_name" ] && continue
+        local img_a img_b
+        img_a=$(echo "$comps_a" | jq -r --arg n "$comp_name" '[.[] | select(.name == $n)] | .[0].image // empty' 2>/dev/null)
+        img_b=$(echo "$comps_b" | jq -r --arg n "$comp_name" '[.[] | select(.name == $n)] | .[0].image // empty' 2>/dev/null)
+
+        if [ -z "$img_a" ]; then
+            added+=("$comp_name|$img_b")
+        elif [ -z "$img_b" ]; then
+            removed+=("$comp_name|$img_a")
+        elif [ "$img_a" != "$img_b" ]; then
+            local digest_a="${img_a##*@}" digest_b="${img_b##*@}"
+            changed+=("$comp_name|${digest_a:0:19}|${digest_b:0:19}")
+        else
+            same_count=$((same_count + 1))
+        fi
+    done <<< "$all_names"
+
+    printf "  ${BOLD}Changed:${NC} %-6d ${BOLD}Added:${NC} %-6d ${BOLD}Removed:${NC} %-6d ${BOLD}Same:${NC} %d\n" \
+        "${#changed[@]}" "${#added[@]}" "${#removed[@]}" "$same_count"
+    echo ""
+
+    if [ "${#changed[@]}" -gt 0 ]; then
+        echo -e "${BOLD}Changed:${NC}"
+        for entry in "${changed[@]}"; do
+            IFS='|' read -r name dig_a dig_b <<< "$entry"
+            printf "  %-44s ${RED}%s${NC} → ${GREEN}%s${NC}\n" "$name" "$dig_a" "$dig_b"
+        done
+        echo ""
+    fi
+
+    if [ "${#added[@]}" -gt 0 ]; then
+        echo -e "${BOLD}${GREEN}Added:${NC}"
+        for entry in "${added[@]}"; do
+            IFS='|' read -r name img <<< "$entry"
+            local digest="${img##*@}"
+            printf "  ${GREEN}+${NC} %-44s %s\n" "$name" "${digest:0:19}"
+        done
+        echo ""
+    fi
+
+    if [ "${#removed[@]}" -gt 0 ]; then
+        echo -e "${BOLD}${RED}Removed:${NC}"
+        for entry in "${removed[@]}"; do
+            IFS='|' read -r name img <<< "$entry"
+            local digest="${img##*@}"
+            printf "  ${RED}-${NC} %-44s %s\n" "$name" "${digest:0:19}"
+        done
+        echo ""
+    fi
+
+    if [ "${#changed[@]}" -eq 0 ] && [ "${#added[@]}" -eq 0 ] && [ "${#removed[@]}" -eq 0 ]; then
+        echo -e "${GREEN}Snapshots have identical components.${NC}"
+        echo ""
+    fi
+}
+
+cmd_release_verify() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        echo -e "${RED}Usage: ic release verify <release-name>${NC}"
+        echo -e "${CYAN}Example: ic release verify acme-v2-0-prod-1778657574${NC}"
+        return 1
+    fi
+
+    _release_require_oc || return 1
+    _release_require_kinit || return 1
+
+    local output
+    output=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 verify_release.py --release "$name" --namespace "$NAMESPACE" 2>/dev/null)
+
+    if [ -z "$output" ]; then
+        echo -e "${RED}Error: Pyxis verification failed.${NC}"
+        return 1
+    fi
+
+    local status_check
+    status_check=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','ok'))" 2>/dev/null)
+    if [ "$status_check" = "error" ]; then
+        local err_msg
+        err_msg=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null)
+        echo -e "${RED}Error: ${err_msg}${NC}"
+        return 1
+    fi
+
+    local target snapshot total found missing errors
+    target=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['target'])" 2>/dev/null)
+    snapshot=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['snapshot'])" 2>/dev/null)
+    total=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['total'])" 2>/dev/null)
+    found=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['found'])" 2>/dev/null)
+    missing=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['missing'])" 2>/dev/null)
+    errors=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['errors'])" 2>/dev/null)
+
+    local target_label target_registry
+    if [ "$target" = "prod" ]; then
+        target_label="Prod"
+        target_registry="registry.redhat.io"
+    else
+        target_label="Stage"
+        target_registry="registry.stage.redhat.io"
+    fi
+
+    section_header "Release Verify: ${name}"
+    echo ""
+    echo -e "${BOLD}Target:${NC}    ${target_label} (${target_registry})"
+    echo -e "${BOLD}Snapshot:${NC}  ${CYAN}${snapshot}${NC}"
+    echo ""
+
+    local found_color="$GREEN" missing_color="$NC"
+    [ "${missing:-0}" -gt 0 ] 2>/dev/null && missing_color="$RED"
+    printf "  ${BOLD}Found:${NC} ${found_color}%d/%d${NC}    ${BOLD}Missing:${NC} ${missing_color}%d${NC}    ${BOLD}Errors:${NC} %d\n" \
+        "$found" "$total" "$missing" "$errors"
+    echo ""
+
+    if [ "${missing:-0}" -gt 0 ] || [ "${errors:-0}" -gt 0 ]; then
+        echo -e "${BOLD}Missing/Error images:${NC}"
+        printf '%s\n' "$output" | python3.11 -c "
+import sys, json
+d = json.load(sys.stdin)
+for img in d.get('images', []):
+    if img['status'] in ('missing', 'error'):
+        digest = img['digest'][:19] if len(img['digest']) > 19 else img['digest']
+        print('  {:<44s} {:<40s} {}'.format(img['name'], img['repository'], digest))
+" 2>/dev/null
+        echo ""
+        echo -e "${CYAN}Tip:${NC} Run 'ic ai analyze release ${name}' for root cause analysis"
+    else
+        echo -e "${GREEN}All images found in target registry.${NC}"
+    fi
+    echo ""
+}
+
+cmd_scenarios() {
+    local show_all=false
+    local show_gaps=false
+    local filter_active=false
+    local filter_disabled=false
+    local filter_type=""
+    local app_override=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)      show_all=true; shift ;;
+            --gaps)     show_gaps=true; shift ;;
+            --active)   filter_active=true; shift ;;
+            --disabled) filter_disabled=true; shift ;;
+            --type)     filter_type="$2"; shift 2 ;;
+            --app)      app_override="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    local app_filter="${app_override:-$APPLICATION_NAME}"
+    local action="list"
+    $show_gaps && action="gaps"
+
+    local its_json
+    if $show_all; then
+        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action "$action" --namespace "$NAMESPACE" 2>/dev/null || true)
+    elif [ "$action" = "gaps" ]; then
+        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action gaps --namespace "$NAMESPACE" 2>/dev/null || true)
+    else
+        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$app_filter" 2>/dev/null || true)
+    fi
+
+    if [ -z "$its_json" ] || [ "$(echo "$its_json" | jq -r '.source // empty' 2>/dev/null)" = "error" ]; then
+        echo -e "${RED}Error: Could not query IntegrationTestScenarios${NC}"
+        [ -n "$its_json" ] && echo -e "${YELLOW}$(echo "$its_json" | jq -r '.error // empty' 2>/dev/null)${NC}"
+        return 1
+    fi
+
+    if $show_gaps; then
+        _display_scenario_gaps "$its_json"
+        return
+    fi
+
+    # Populate ITS cache for extract_policy_from_scenario
+    if ! $show_all; then
+        local cache_dir="/tmp/ic-its-cache"
+        mkdir -p "$cache_dir"
+        echo "$its_json" | jq -r '.scenarios[] | select(.policy_ref != "") | "\(.name)|\(.policy_ref | split("/") | last)|\(if .is_disabled then "disabled" else "active" end)"' > "${cache_dir}/scenarios-${app_filter}" 2>/dev/null
+    fi
+
+    local total active disabled conforma
+    total=$(echo "$its_json" | jq '.total' 2>/dev/null)
+    active=$(echo "$its_json" | jq '.active' 2>/dev/null)
+    disabled=$(echo "$its_json" | jq '.disabled' 2>/dev/null)
+    conforma=$(echo "$its_json" | jq '.conforma' 2>/dev/null)
+
+    local label="$app_filter"
+    $show_all && label="all apps"
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Scenarios — ${label}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${CYAN}${total} total, ${active} active, ${disabled} disabled, ${conforma} conforma${NC}"
+    echo ""
+
+    printf " ${BOLD}%3s  %-50s  %-9s  %-28s  %-10s${NC}\n" "#" "Scenario" "Status" "Policy" "Type"
+    printf " %-3s  %-50s  %-9s  %-28s  %-10s\n" "---" "$(printf '%0.s-' {1..50})" "---------" "$(printf '%0.s-' {1..28})" "----------"
+
+    local idx=0
+    while IFS= read -r scenario; do
+        local name status policy stype is_disabled is_conforma is_future app
+
+        name=$(echo "$scenario" | jq -r '.name')
+        is_disabled=$(echo "$scenario" | jq -r '.is_disabled')
+        is_conforma=$(echo "$scenario" | jq -r '.is_conforma')
+        is_future=$(echo "$scenario" | jq -r '.is_future')
+        policy=$(echo "$scenario" | jq -r '.policy_ref // empty')
+        app=$(echo "$scenario" | jq -r '.application')
+
+        if [ "$is_disabled" = "true" ]; then
+            $filter_active && continue
+            status="${YELLOW}DISABLED${NC}"
+        else
+            $filter_disabled && continue
+            status="${GREEN}active${NC}"
+        fi
+
+        if [ "$is_conforma" = "true" ]; then
+            stype="conforma"
+        else
+            stype="other"
+        fi
+        [ "$is_future" = "true" ] && stype="${stype}+future"
+
+        [ -n "$filter_type" ] && [[ "$stype" != *"$filter_type"* ]] && continue
+
+        # Strip namespace prefix from policy for display
+        local policy_short="${policy##*/}"
+
+        idx=$((idx + 1))
+
+        local name_display="$name"
+        $show_all && name_display="${CYAN}${app}${NC}/${name}"
+
+        printf " %3d  %-50b  %-18b  %-28s  %-10s\n" "$idx" "$name_display" "$status" "$policy_short" "$stype"
+    done < <(echo "$its_json" | jq -c '.scenarios[]')
+
+    echo ""
+    echo -e "${CYAN}Tip:${NC} Use 'ic scenarios --active' for active only"
+    echo -e "${CYAN}Tip:${NC} Use 'ic scenarios --gaps' to detect missing scenarios"
+    echo -e "${CYAN}Tip:${NC} Use 'ic scenarios --all' for all apps"
+}
+
+_display_scenario_gaps() {
+    local gaps_json="$1"
+    local apps_checked common_count gap_count
+
+    apps_checked=$(echo "$gaps_json" | jq '.apps_checked' 2>/dev/null)
+    gap_count=$(echo "$gaps_json" | jq '.gaps | length' 2>/dev/null)
+
+    echo ""
+    echo -e "${BOLD}========================================${NC}"
+    echo -e "${BOLD}Scenario Gaps — ${NAMESPACE}${NC}"
+    echo -e "${BOLD}========================================${NC}"
+    echo ""
+    echo -e "${CYAN}Checked ${apps_checked} applications${NC}"
+    echo ""
+
+    local common_types
+    common_types=$(echo "$gaps_json" | jq -r '.common_types[]' 2>/dev/null)
+    if [ -n "$common_types" ]; then
+        echo -e "${BOLD}Common scenario types (present in ≥60% of apps):${NC}"
+        while IFS= read -r ct; do
+            echo "  • $ct"
+        done <<< "$common_types"
+        echo ""
+    fi
+
+    if [ "$gap_count" = "0" ]; then
+        echo -e "${GREEN}No scenario gaps detected.${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}${gap_count} applications with missing scenarios:${NC}"
+    echo ""
+    printf " %-30s  %s\n" "Application" "Missing Scenarios"
+    printf " %-30s  %s\n" "$(printf '%0.s-' {1..30})" "$(printf '%0.s-' {1..40})"
+
+    while IFS= read -r gap; do
+        local gapp missing_list
+        gapp=$(echo "$gap" | jq -r '.application')
+        missing_list=$(echo "$gap" | jq -r '.missing | join(", ")')
+        printf " %-30s  ${YELLOW}%s${NC}\n" "$gapp" "$missing_list"
+    done < <(echo "$gaps_json" | jq -c '.gaps[]')
+
+    echo ""
+}
+
+cmd_components_health() {
+    _release_require_oc || return 1
+
+    section_header "Component Health — ${APPLICATION_NAME}"
+    echo ""
+
+    local comps_json
+    comps_json=$(oc get components.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+
+    if [ -z "$comps_json" ] || [ "$(echo "$comps_json" | jq '.items | length' 2>/dev/null)" = "0" ]; then
+        echo -e "${YELLOW}No components found in namespace ${NAMESPACE}${NC}"
+        return
+    fi
+
+    local app_comps
+    app_comps=$(echo "$comps_json" | jq -c --arg app "$APPLICATION_NAME" '
+        [.items[] | select(.spec.application == $app)]
+        | sort_by(.metadata.name)
+    ' 2>/dev/null)
+
+    local total
+    total=$(echo "$app_comps" | jq 'length' 2>/dev/null || echo "0")
+    echo -e "${CYAN}${total} components in ${APPLICATION_NAME}${NC}"
+    echo ""
+
+    # Count by build status from DB
+    local db_failing
+    db_failing=$(sql "SELECT component_name FROM build_failures WHERE application = '${APPLICATION_NAME}' AND is_resolved = FALSE;" 2>/dev/null | tr -d ' ')
+    local db_conforma
+    db_conforma=$(sql "SELECT DISTINCT component_name FROM conforma_results WHERE application = '${APPLICATION_NAME}' AND is_resolved = FALSE;" 2>/dev/null | tr -d ' ')
+
+    local healthy=0 build_fail=0 conforma_fail=0 both_fail=0
+
+    printf "  %-50s %-12s %-12s %s\n" "Component" "Build" "Conforma" "Image"
+    printf "  %-50s %-12s %-12s %s\n" "$(printf '%0.s-' {1..50})" "------------" "------------" "$(printf '%0.s-' {1..40})"
+
+    echo "$app_comps" | jq -c '.[]' 2>/dev/null | while IFS= read -r comp; do
+        local name image
+        name=$(echo "$comp" | jq -r '.metadata.name')
+        image=$(echo "$comp" | jq -r '.spec.containerImage // ""' | sed 's/@sha256:.*//')
+
+        local b_status="✓ OK"
+        local b_color="$GREEN"
+        if echo "$db_failing" | grep -q "^${name}$"; then
+            b_status="✗ Failed"
+            b_color="$RED"
+        fi
+
+        local c_status="✓ OK"
+        local c_color="$GREEN"
+        if echo "$db_conforma" | grep -q "^${name}$"; then
+            c_status="✗ Failing"
+            c_color="$RED"
+        fi
+
+        local image_short="${image:0:40}"
+        printf "  %-50s " "${name:0:50}"
+        echo -ne "${b_color}$(printf '%-12s' "$b_status")${NC} "
+        echo -ne "${c_color}$(printf '%-12s' "$c_status")${NC} "
+        echo "$image_short"
+    done
+
+    echo ""
+
+    # Summary counts — components can have both build AND conforma failures
+    local fail_b fail_c
+    fail_b=$(echo "$db_failing" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    fail_c=$(echo "$db_conforma" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    local any_failing
+    any_failing=$(echo -e "${db_failing}\n${db_conforma}" | sort -u | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    local ok_count=$((total - any_failing))
+    [ "$ok_count" -lt 0 ] && ok_count=0
+
+    echo -e "${BOLD}Summary:${NC} ${GREEN}${ok_count} healthy${NC}, ${RED}${fail_b} build failures${NC}, ${RED}${fail_c} conforma failures${NC} (of ${total} total)"
+    echo ""
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts' for detailed failure information"
+    echo ""
 }
 
 # ============================================================================
@@ -5499,17 +7823,18 @@ cmd_jira_create_conforma() {
         return 1
     fi
 
-    # Fetch violation data
+    # Fetch violation data (including is_future flag)
+    # Order by violations_count DESC to prioritize the worst failure
     local data=$(sql "
         SELECT c.component_name, c.scenario,
                c.violations_count, c.warnings_count, c.successes_count,
                COALESCE(c.repository_url, ''), COALESCE(c.commit_sha, ''),
-               c.pipelinerun_name
+               c.pipelinerun_name, c.is_future
         FROM conforma_results c
         WHERE c.component_name = '$component'
           AND c.is_resolved = FALSE
           AND c.application = '$APPLICATION_NAME'
-        ORDER BY c.last_updated_at DESC
+        ORDER BY c.violations_count DESC, c.last_updated_at DESC
         LIMIT 1;
     " 2>/dev/null)
 
@@ -5519,9 +7844,23 @@ cmd_jira_create_conforma() {
     fi
 
     local data_oneline=$(echo "$data" | tr '\n' ' ' | sed 's/  */ /g')
-    IFS='|' read -r comp_name scenario violations warnings successes repo_url commit_sha pr_name <<< "$data_oneline"
+    IFS='|' read -r comp_name scenario violations warnings successes repo_url commit_sha pr_name is_future <<< "$data_oneline"
 
-    local summary="[Conforma] ${comp_name} - ${scenario} (${violations} violations)"
+    # Trim whitespace from parsed values
+    is_future=$(echo "$is_future" | xargs)
+
+    # Determine ticket prefix, priority, and labels based on is_future flag
+    local ticket_prefix="BLOCKER"
+    local jira_priority="Blocker"
+    local jira_labels="conforma,conforma-blocker"
+
+    if [ "$is_future" = "t" ] || [ "$is_future" = "true" ]; then
+        ticket_prefix="FUTURE"
+        jira_priority="Low"
+        jira_labels="conforma,conforma-future"
+    fi
+
+    local summary="[Conforma/${ticket_prefix}] ${comp_name} - ${scenario} (${violations} violations)"
 
     # Generate description by reusing the export function output
     local description
@@ -5530,10 +7869,11 @@ cmd_jira_create_conforma() {
     if [ "$execute" = true ]; then
         echo -e "${BOLD}Creating Jira ticket...${NC}"
 
-        # Build JSON payload
+        # Build JSON payload (pass priority and labels via env vars)
         local payload
         payload=$(JIRA_PROJECT="$JIRA_PROJECT" JIRA_COMPONENT="$JIRA_COMPONENT" JIRA_SUMMARY="$summary" \
-            python3 "$SCRIPT_DIR/parsers/build_jira_payload.py" <<< "$description")
+                  JIRA_PRIORITY="$jira_priority" JIRA_LABELS="$jira_labels" \
+                  python3 "$SCRIPT_DIR/parsers/build_jira_payload.py" <<< "$description")
 
         local response
         response=$(jira_api POST "/rest/api/2/issue" "$payload")
@@ -5555,11 +7895,15 @@ cmd_jira_create_conforma() {
         echo ""
         echo -e "  ${CYAN}Project:${NC}   $JIRA_PROJECT"
         echo -e "  ${CYAN}Type:${NC}      Bug"
-        echo -e "  ${CYAN}Priority:${NC}  Blocker"
-        echo -e "  ${CYAN}Labels:${NC}    conforma-violation"
+        echo -e "  ${CYAN}Priority:${NC}  $jira_priority"
+        echo -e "  ${CYAN}Labels:${NC}    $jira_labels"
         echo -e "  ${CYAN}Component:${NC} $JIRA_COMPONENT"
         echo -e "  ${CYAN}Summary:${NC}   $summary"
         echo ""
+        if [ "$is_future" = "t" ] || [ "$is_future" = "true" ]; then
+            echo -e "  ${YELLOW}Note: This is a FUTURE policy violation (informational, not blocking current releases)${NC}"
+            echo ""
+        fi
         echo -e "${BOLD}Description preview:${NC}"
         echo "$description" | head -30
         echo "..."
@@ -5586,6 +7930,9 @@ case "${1:-}" in
             exceptions)
                 cmd_get_exceptions
                 ;;
+            bindings)
+                cmd_get_bindings
+                ;;
             conforma)
                 cmd_get_conforma "${3:-}"
                 ;;
@@ -5606,6 +7953,14 @@ case "${1:-}" in
             fixes|fix-attempts)
                 cmd_get_fixes "${3:-}"
                 ;;
+            releases|release)
+                if [ -n "${3:-}" ] && [[ "${3:-}" != -* ]]; then
+                    cmd_describe_release "$3" "${@:4}"
+                else
+                    shift 2
+                    cmd_get_releases "$@"
+                fi
+                ;;
             *) usage ;;
         esac
         ;;
@@ -5615,6 +7970,7 @@ case "${1:-}" in
             conforma) shift 2; cmd_describe_conforma "$@" ;;
             pipelinerun|pr) cmd_describe_pipelinerun "$3" ;;
             jira) shift 2; cmd_describe_jira "$@" ;;
+            release) shift 2; cmd_describe_release "$@" ;;
             *) usage ;;
         esac
         ;;
@@ -5692,11 +8048,15 @@ case "${1:-}" in
         ;;
     conforma)
         case "${2:-}" in
-            report)   shift 2; cmd_conforma_report "$@" ;;
-            csv)      shift 2; cmd_conforma_csv "$@" ;;
-            snapshot) shift 2; cmd_conforma_snapshot "$@" ;;
+            report)     shift 2; cmd_conforma_report "$@" ;;
+            categories) shift 2; cmd_conforma_categories "$@" ;;
+            csv)        shift 2; cmd_conforma_csv "$@" ;;
+            snapshot)   shift 2; cmd_conforma_snapshot "$@" ;;
             *) cmd_get_conforma "${2:-}" ;;
         esac
+        ;;
+    scenarios|its)
+        shift; cmd_scenarios "$@"
         ;;
     db)
         case "${2:-}" in
@@ -5706,13 +8066,21 @@ case "${1:-}" in
         esac
         ;;
     # Backward compatibility
-    build)
+    build|builds)
         case "${2:-}" in
+            health) cmd_components_health ;;
             status) cmd_get_components ;;
             failures) shift 2; cmd_get_pipelineruns "$@" ;;
             get) cmd_get_pipelinerun "$3" ;;
             logs) cmd_describe_pipelinerun "$3" ;;
             *) usage ;;
+        esac
+        ;;
+    components)
+        case "${2:-}" in
+            health) cmd_components_health ;;
+            list)   cmd_get_components ;;
+            *)      cmd_get_components ;;
         esac
         ;;
     component)
@@ -5721,6 +8089,14 @@ case "${1:-}" in
             get) cmd_get_component "$3" ;;
             show) cmd_describe_component "$3" ;;
             *) usage ;;
+        esac
+        ;;
+    release)
+        case "${2:-}" in
+            status) shift 2; cmd_release_status "$@" ;;
+            diff)   shift 2; cmd_release_diff "$@" ;;
+            verify) shift 2; cmd_release_verify "$@" ;;
+            *) cmd_get_releases "${@:2}" ;;
         esac
         ;;
     help|--help|-h|"") usage ;;
