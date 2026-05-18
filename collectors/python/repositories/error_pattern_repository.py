@@ -97,7 +97,7 @@ class ErrorPatternRepository:
                 WHERE doc_url IS NOT NULL
                   AND (
                       doc_context IS NULL
-                      OR doc_fetched_at < NOW() - INTERVAL '%s days'
+                      OR doc_fetched_at < NOW() - (%s || ' days')::INTERVAL
                   )
                 ORDER BY occurrence_count DESC
             """, (stale_days,))

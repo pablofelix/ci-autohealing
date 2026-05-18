@@ -62,6 +62,17 @@ class JiraConfig:
 
 
 @dataclass(frozen=True)
+class BatchAnalysisConfig:
+    """Batch analysis automation configuration."""
+
+    enabled: bool = True
+    max_per_run: int = 20
+    fifo_priority: bool = True
+    auto_jira: bool = False  # Auto-create Jira tickets (disabled for P0)
+    schedule_cron: str = '0 * * * *'  # Hourly by default
+
+
+@dataclass(frozen=True)
 class CollectorConfig:
     """Main collector configuration."""
 
@@ -73,6 +84,7 @@ class CollectorConfig:
     components_file: Optional[Path] = None
     auto_fix_max_per_run: int = 3
     auto_fix_min_confidence: float = 0.95
+    batch_analysis: Optional[BatchAnalysisConfig] = None
 
     @classmethod
     def from_env(cls, env_path: Optional[Path] = None) -> 'CollectorConfig':
@@ -156,6 +168,15 @@ class CollectorConfig:
                 project=os.getenv('JIRA_PROJECT', 'RHOAIENG'),
             )
 
+        # Batch analysis config
+        batch_config = BatchAnalysisConfig(
+            enabled=os.getenv('BATCH_ANALYSIS_ENABLED', 'true').lower() == 'true',
+            max_per_run=int(os.getenv('BATCH_ANALYSIS_MAX_PER_RUN', '20')),
+            fifo_priority=os.getenv('BATCH_ANALYSIS_FIFO', 'true').lower() == 'true',
+            auto_jira=os.getenv('BATCH_ANALYSIS_AUTO_JIRA', 'false').lower() == 'true',
+            schedule_cron=os.getenv('BATCH_ANALYSIS_SCHEDULE', '0 * * * *'),
+        )
+
         return cls(
             db=db_config,
             k8s=k8s_config,
@@ -165,4 +186,5 @@ class CollectorConfig:
             components_file=components_file,
             auto_fix_max_per_run=int(os.getenv('AUTO_FIX_MAX_PER_RUN', '3')),
             auto_fix_min_confidence=float(os.getenv('AUTO_FIX_MIN_CONFIDENCE', '0.95')),
+            batch_analysis=batch_config,
         )

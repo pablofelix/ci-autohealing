@@ -87,7 +87,7 @@ class BuildFailureAnalyzer:
     """Analyzes build failures using an LLM provider."""
 
     def __init__(self, config, db=None, build_repo=None,
-                 ai_repo=None, llm=None, langfuse=None):
+                 ai_repo=None, llm=None, langfuse=None, pattern_service=None):
         # type: (CollectorConfig, ...) -> None
         """Initialize analyzer with dependency injection.
 
@@ -98,6 +98,7 @@ class BuildFailureAnalyzer:
             ai_repo: AIAnalysisRepository (created if None)
             llm: LLMProvider (created from config if None)
             langfuse: LangfuseTracker (created if None)
+            pattern_service: PatternMatchingService (created if None)
         """
         if db is None:
             db = DatabaseConnection(config.db)
@@ -119,6 +120,14 @@ class BuildFailureAnalyzer:
             langfuse_enabled = bool(os.environ.get('LANGFUSE_PUBLIC_KEY'))
             langfuse = LangfuseTracker(enabled=langfuse_enabled)
         self.langfuse = langfuse
+
+        # Pattern matching service (for confidence boosting and pattern context)
+        if pattern_service is None:
+            from patterns.category_matcher import CategoryBasedMatcher
+            from patterns.pattern_matching_service import PatternMatchingService
+            matcher = CategoryBasedMatcher(self.pattern_repo)
+            pattern_service = PatternMatchingService(matcher, self.pattern_repo)
+        self.pattern_service = pattern_service
 
     def get_pending_failures(self, limit=5, component_filter=None, force=False):
         # type: (int, Optional[str], bool) -> List[Dict[str, Any]]
@@ -156,13 +165,14 @@ class BuildFailureAnalyzer:
         if len(logs) > 50000:
             logs = logs[-50000:]
 
-        # Build commit context section
+        # Build commit context section (includes enriched_context if available)
         commit_context_section = self._format_commit_context(
-            failure.get('commit_context')
+            failure.get('commit_context'),
+            failure.get('enriched_context')
         )
 
-        # Known-pattern context from previous occurrences of the same failure category
-        pattern_section = self._format_pattern_section(failure)
+        # Known-pattern context from previous occurrences (top 3 patterns)
+        pattern_section = self.pattern_service.get_matches_for_prompt(failure)
 
         user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
 
@@ -233,18 +243,25 @@ CRITICAL FORMATTING RULES:
 
         return (SYSTEM_PROMPT, user_prompt)
 
-    def _format_commit_context(self, commit_context):
-        # type: (Optional[Dict[str, Any]],) -> str
-        """Format commit context dict into prompt text."""
+    def _format_commit_context(self, commit_context, enriched_context=None):
+        # type: (Optional[Dict[str, Any]], Optional[Dict[str, Any]]) -> str
+        """Format commit context and enriched context into prompt text."""
+        import json
+
         if not commit_context:
             return "\n## Commit Context\n(Not available — commit diff not fetched yet)\n"
 
-        import json
         if isinstance(commit_context, str):
             try:
                 commit_context = json.loads(commit_context)
             except (json.JSONDecodeError, TypeError):
                 return "\n## Commit Context\n(Not available)\n"
+
+        if enriched_context and isinstance(enriched_context, str):
+            try:
+                enriched_context = json.loads(enriched_context)
+            except (json.JSONDecodeError, TypeError):
+                enriched_context = None
 
         sections = ["\n## Commit Context"]
 
@@ -313,22 +330,47 @@ CRITICAL FORMATTING RULES:
                     "\n**{}**:\n```yaml\n{}\n```".format(fname, content)
                 )
 
+        # Enriched context (dependency changes + related failures)
+        if enriched_context:
+            dep_changes = enriched_context.get('dependency_changes')
+            if dep_changes:
+                sections.append("\n### Dependency File Changes")
+                for fname, change in dep_changes.items():
+                    patch = change.get('patch', '')
+                    sections.append(
+                        "\n**{}** ({}, +{} -{})".format(
+                            fname,
+                            change.get('status', 'modified'),
+                            change.get('additions', 0),
+                            change.get('deletions', 0)
+                        )
+                    )
+                    if patch:
+                        sections.append("```diff\n{}\n```".format(patch))
+
+            related = enriched_context.get('related_failures')
+            if related:
+                sections.append("\n### Related Recent Failures (last 7 days)")
+                for rf in related:
+                    analyzed_status = "analyzed" if rf.get('ai_analyzed') else "pending"
+                    category = rf.get('failure_category', '')
+                    category_label = " ({})".format(category) if category else ""
+                    sections.append(
+                        "- **{}**: {} - {}{}  [{}]".format(
+                            rf.get('component_name', ''),
+                            rf.get('error_type', ''),
+                            rf.get('error_message', '')[:150],
+                            category_label,
+                            analyzed_status
+                        )
+                    )
+                    if rf.get('root_cause'):
+                        sections.append("  Previous root cause: {}".format(
+                            rf['root_cause'][:200]
+                        ))
+
         return '\n'.join(sections) + '\n'
 
-    def _format_pattern_section(self, failure):
-        # type: (Dict[str, Any],) -> str
-        """Return a prompt section with institutional memory from prior occurrences."""
-        fix = failure.get('pattern_typical_fix')
-        doc = failure.get('pattern_doc_context')
-        name = failure.get('pattern_name', 'prior occurrence')
-        if not fix and not doc:
-            return ""
-        parts = ["\n## Known Pattern: {}\n".format(name)]
-        if fix:
-            parts.append("### Previous Solution\n{}\n".format(fix))
-        if doc:
-            parts.append("### Relevant Documentation\n{}\n".format(doc[:2000]))
-        return '\n'.join(parts)
 
     def parse_analysis_response(self, llm_response):
         # type: (Any,) -> Dict[str, Any]
@@ -434,8 +476,35 @@ CRITICAL FORMATTING RULES:
         # Parse response
         analysis = self.parse_analysis_response(response)
 
+        # Apply pattern confidence boost if applicable
+        enhancement = self.pattern_service.enhance_analysis(
+            failure=failure,
+            llm_confidence=analysis['confidence_score'],
+            llm_category=analysis['failure_category']
+        )
+
+        # Store boost metadata separately
+        pattern_boost_metadata = None
+        if enhancement.boost_applied:
+            # Update confidence score with boosted value
+            analysis['confidence_score'] = enhancement.boosted_confidence
+            # Store boost metadata for transparency
+            pattern_boost_metadata = {
+                'original_confidence': enhancement.original_confidence,
+                'boosted_confidence': enhancement.boosted_confidence,
+                'boost_amount': enhancement.boost_amount,
+                'pattern_id': enhancement.matched_patterns[0].pattern_id if enhancement.matched_patterns else None,
+                'pattern_name': enhancement.matched_patterns[0].pattern_name if enhancement.matched_patterns else None
+            }
+
         # Estimate cost (rough approximation: $3/MTok input, $15/MTok output for Claude Sonnet)
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
+
+        # Prepare analysis_json with pattern boost metadata if applicable
+        analysis_json = {
+            'tool_calls': response.tool_calls,
+            'pattern_boost': pattern_boost_metadata
+        }
 
         # Save to database
         analysis_id = self.ai_repo.insert_analysis(
@@ -445,7 +514,7 @@ CRITICAL FORMATTING RULES:
             tokens_used=response.input_tokens + response.output_tokens,
             cost_usd=cost_usd,
             analysis_duration=duration,
-            analysis_json=response.tool_calls,
+            analysis_json=analysis_json,
             **analysis
         )
 

@@ -72,7 +72,7 @@ class AIAnalysisRepository:
             langfuse_trace_url = langfuse_observation_id
             langfuse_observation_id = None
 
-        if (build_failure_id is None) == (conforma_result_id is None):
+        if sum(x is not None for x in (build_failure_id, conforma_result_id)) != 1:
             raise ValueError("Exactly one of build_failure_id or conforma_result_id must be provided")
 
         with self.db.connection() as conn:
@@ -168,20 +168,22 @@ class AIAnalysisRepository:
         Called once per analysis attempt so callers can circuit-break after
         MAX_ANALYSIS_RETRIES without a separate query.
         """
-        if build_failure_id is not None:
-            table, col = 'build_failures', 'id'
-            pk = build_failure_id
-        else:
-            table, col = 'conforma_results', 'id'
-            pk = conforma_result_id
-
         with self.db.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"UPDATE {table} SET ai_attempts = ai_attempts + 1 WHERE {col} = %s"
-                f" RETURNING ai_attempts",
-                (pk,)
-            )
+
+            if build_failure_id is not None:
+                cursor.execute(
+                    "UPDATE build_failures SET ai_attempts = ai_attempts + 1 WHERE id = %s"
+                    " RETURNING ai_attempts",
+                    (build_failure_id,)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE conforma_results SET ai_attempts = ai_attempts + 1 WHERE id = %s"
+                    " RETURNING ai_attempts",
+                    (conforma_result_id,)
+                )
+
             row = cursor.fetchone()
             conn.commit()
             return row[0] if row else 1
@@ -193,18 +195,22 @@ class AIAnalysisRepository:
         Sets ai_skip_reason and ai_analyzed=TRUE so the pending queries
         stop returning it. reason should be 'no_logs' or 'max_retries'.
         """
-        if build_failure_id is not None:
-            table, col, pk = 'build_failures', 'id', build_failure_id
-        else:
-            table, col, pk = 'conforma_results', 'id', conforma_result_id
-
         with self.db.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"UPDATE {table} SET ai_skip_reason = %s, ai_analyzed = TRUE"
-                f" WHERE {col} = %s",
-                (reason, pk)
-            )
+
+            if build_failure_id is not None:
+                cursor.execute(
+                    "UPDATE build_failures SET ai_skip_reason = %s, ai_analyzed = TRUE"
+                    " WHERE id = %s",
+                    (reason, build_failure_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE conforma_results SET ai_skip_reason = %s, ai_analyzed = TRUE"
+                    " WHERE id = %s",
+                    (reason, conforma_result_id)
+                )
+
             conn.commit()
 
     def skip_no_logs_timeouts(self, application, timeout_days=7):
@@ -225,7 +231,7 @@ class AIAnalysisRepository:
                   AND build_logs    IS NULL
                   AND ai_analyzed   = FALSE
                   AND ai_skip_reason IS NULL
-                  AND first_detected_at < NOW() - INTERVAL '%s days'
+                  AND first_detected_at < NOW() - (%s || ' days')::INTERVAL
             """, (application, timeout_days))
             count = cursor.rowcount
             conn.commit()
@@ -518,3 +524,76 @@ class AIAnalysisRepository:
             """, (application,))
 
             return cursor.fetchone()[0]
+
+    def insert_release_analysis(self, release_name, model_used, root_cause,
+                                failure_category, confidence_score, recommended_fix,
+                                recommended_files, can_auto_fix, requires_human_review,
+                                tokens_used, cost_usd, analysis_duration,
+                                analysis_json, langfuse_trace_id=None,
+                                **kwargs):
+        # type: (...) -> int
+        """Insert AI analysis for a release failure.
+
+        Unlike build/conforma analyses which reference source table rows,
+        release analyses are keyed by release_name (the Release CR name).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO ai_analysis (
+                    release_name,
+                    model_used, root_cause, failure_category,
+                    confidence_score, recommended_fix, recommended_files,
+                    can_auto_fix, requires_human_review,
+                    langfuse_trace_id,
+                    tokens_used, cost_usd, analysis_duration_seconds, analysis_json
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                release_name,
+                model_used, root_cause, failure_category,
+                confidence_score, recommended_fix, recommended_files,
+                can_auto_fix, requires_human_review,
+                langfuse_trace_id,
+                tokens_used, cost_usd, analysis_duration,
+                json.dumps(analysis_json) if analysis_json else None
+            ))
+            analysis_id = cursor.fetchone()[0]
+            conn.commit()
+            return analysis_id
+
+    def get_analysis_for_release(self, release_name):
+        # type: (str,) -> Optional[Dict[str, Any]]
+        """Get existing analysis for a release (avoid re-analyzing)."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, model_used, root_cause, failure_category,
+                       confidence_score, recommended_fix, recommended_files,
+                       can_auto_fix, requires_human_review, analyzed_at,
+                       langfuse_trace_id, tokens_used, cost_usd
+                FROM ai_analysis
+                WHERE release_name = %s
+                ORDER BY analyzed_at DESC
+                LIMIT 1
+            """, (release_name,))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            return {
+                'id': row[0],
+                'model_used': row[1],
+                'root_cause': row[2],
+                'failure_category': row[3],
+                'confidence_score': row[4],
+                'recommended_fix': row[5],
+                'recommended_files': row[6],
+                'can_auto_fix': row[7],
+                'requires_human_review': row[8],
+                'analyzed_at': row[9],
+                'langfuse_trace_id': row[10],
+                'tokens_used': row[11],
+                'cost_usd': row[12],
+            }
