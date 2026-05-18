@@ -88,37 +88,17 @@ class EnrichmentOrchestrator:
         self.sources.append(source)
         logger.info("Registered context source: %s", source.source_name())
 
-    def enrich_failure(self, failure_id: int) -> OrchestrationResult:
+    def enrich_failure(self, failure: Dict[str, Any]) -> OrchestrationResult:
         """Enrich one failure with all registered sources.
 
         Args:
-            failure_id: Database ID of failure to enrich
+            failure: Failure dict to enrich (must include 'id' key)
 
         Returns:
             OrchestrationResult with aggregated data and stats
         """
         start_time = time.time()
-
-        # Get failure data
-        pending = self.enrichment_repo.get_pending_enrichments(
-            self.config.k8s.application_name,
-            limit=1
-        )
-
-        if not pending or pending[0]['id'] != failure_id:
-            logger.warning("Failure %d not found or not pending enrichment", failure_id)
-            return OrchestrationResult(
-                failure_id=failure_id,
-                success=False,
-                sources_attempted=0,
-                sources_succeeded=0,
-                sources_failed=0,
-                enrichment_data={},
-                errors=["Failure not found or not pending"],
-                duration_seconds=time.time() - start_time
-            )
-
-        failure = pending[0]
+        failure_id = failure['id']
 
         # Check circuit breaker
         attempts = self.enrichment_repo.increment_enrichment_attempts(failure_id)
@@ -334,7 +314,7 @@ class EnrichmentOrchestrator:
             logger.info("[%d/%d] %s (id=%d)",
                        i, len(pending), failure['component_name'], failure['id'])
 
-            result = self.enrich_failure(failure['id'])
+            result = self.enrich_failure(failure)
 
             if result.success:
                 enriched += 1

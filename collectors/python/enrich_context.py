@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """Context enrichment CLI entry point.
 
 Enriches build failures with additional context from multiple sources:
