@@ -59,9 +59,10 @@ _FLOATING_REF_RE = re.compile(
 
 def load_failure_and_analysis(db_conn, failure_id=None, component=None, application=None):
     # type: (DatabaseConnection, Optional[int], Optional[str], Optional[str]) -> Tuple[Optional[Dict], Optional[Dict]]
-    """Load build failure and AI analysis from DB.
+    """Load build failure, AI analysis, pattern data, and resolution history.
 
     Returns (failure_row, analysis_row). Either can be None.
+    failure_row includes enriched_context, pattern_data, and previous_attempts.
     """
     with db_conn.connection() as conn:
         with conn.cursor() as cur:
@@ -70,7 +71,7 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
                     SELECT id, component_name, repository_url, branch, commit_sha,
                            error_type, error_message, failed_step_name,
                            LEFT(build_logs, 50000) as build_logs,
-                           application
+                           application, enriched_context
                     FROM build_failures
                     WHERE id = %s
                 """, (failure_id,))
@@ -79,7 +80,7 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
                     SELECT id, component_name, repository_url, branch, commit_sha,
                            error_type, error_message, failed_step_name,
                            LEFT(build_logs, 50000) as build_logs,
-                           application
+                           application, enriched_context
                     FROM build_failures
                     WHERE component_name = %s
                       AND application = %s
@@ -95,14 +96,16 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
             cols = [d[0] for d in cur.description]
             failure = dict(zip(cols, row))
 
-            # Load AI analysis if it exists
             cur.execute("""
-                SELECT failure_category, confidence_score, root_cause,
-                       recommended_fix, recommended_files, can_auto_fix,
-                       requires_human_review
-                FROM ai_analysis
-                WHERE build_failure_id = %s
-                ORDER BY created_at DESC
+                SELECT a.failure_category, a.confidence_score, a.root_cause,
+                       a.recommended_fix, a.recommended_files, a.can_auto_fix,
+                       a.requires_human_review,
+                       ep.pattern_name, ep.typical_fix, ep.doc_context,
+                       ep.occurrence_count, ep.avg_confidence AS pattern_confidence
+                FROM ai_analysis a
+                LEFT JOIN error_patterns ep ON ep.id = a.error_pattern_id
+                WHERE a.build_failure_id = %s
+                ORDER BY a.created_at DESC
                 LIMIT 1
             """, (failure['id'],))
 
@@ -111,6 +114,18 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
             if analysis_row:
                 analysis_cols = [d[0] for d in cur.description]
                 analysis = dict(zip(analysis_cols, analysis_row))
+
+            cur.execute("""
+                SELECT attempt_number, changes_description, files_modified,
+                       was_successful, verification_notes, status, pr_url
+                FROM resolution_attempts
+                WHERE build_failure_id = %s
+                ORDER BY attempt_number ASC
+            """, (failure['id'],))
+            prev_cols = [d[0] for d in cur.description]
+            failure['previous_attempts'] = [
+                dict(zip(prev_cols, r)) for r in cur.fetchall()
+            ]
 
     return failure, analysis
 
@@ -161,9 +176,89 @@ def generate_unified_diff(path, old_content, new_content):
     return '\n'.join(diff)
 
 
+def _format_pattern_section(analysis):
+    # type: (Dict) -> List[str]
+    """Format known pattern data for prompt injection."""
+    if not analysis or not analysis.get('pattern_name'):
+        return []
+
+    parts = [
+        '',
+        '## Known Pattern (Institutional Memory)',
+        'Pattern: {} ({} occurrences, {:.0%} confidence)'.format(
+            analysis['pattern_name'],
+            analysis.get('occurrence_count', 0),
+            analysis.get('pattern_confidence') or 0,
+        ),
+    ]
+    if analysis.get('typical_fix'):
+        parts += ['', '**Previously successful fix:**', analysis['typical_fix']]
+    if analysis.get('doc_context'):
+        parts += ['', '**Relevant documentation:**', analysis['doc_context'][:1500]]
+    return parts
+
+
+def _format_enrichment_section(enriched_context):
+    # type: (Optional[Dict]) -> List[str]
+    """Format enriched context (dependency changes, related failures)."""
+    if not enriched_context or not isinstance(enriched_context, dict):
+        return []
+
+    parts = ['', '## Enrichment Context']
+
+    dep_changes = enriched_context.get('dependency_changes')
+    if dep_changes and isinstance(dep_changes, dict):
+        parts += ['', '### Dependency Changes']
+        for filename, change in dep_changes.items():
+            diff = change.get('diff', '') if isinstance(change, dict) else str(change)
+            parts += ['**{}:**'.format(filename), diff[:2000]]
+
+    related = enriched_context.get('related_failures')
+    if related and isinstance(related, list):
+        parts += ['', '### Related Failures']
+        for rf in related[:3]:
+            cross = ' (cross-app: {})'.format(rf['source_application']) if rf.get('cross_app') else ''
+            parts.append('- {} [{}]{}: {}'.format(
+                rf.get('component_name', '?'),
+                rf.get('failure_category') or rf.get('error_type', '?'),
+                cross,
+                (rf.get('root_cause') or rf.get('error_message', ''))[:200],
+            ))
+
+    return parts
+
+
+def _format_previous_attempts(attempts):
+    # type: (List[Dict]) -> List[str]
+    """Format previous resolution attempts for prompt injection."""
+    if not attempts:
+        return []
+
+    parts = ['', '## Previous Fix Attempts']
+    for a in attempts:
+        outcome = a.get('status', 'unknown')
+        files = ', '.join(a.get('files_modified') or [])
+        parts.append('- Attempt #{}: {} — {} [{}]'.format(
+            a.get('attempt_number', '?'),
+            a.get('changes_description', '?')[:200],
+            outcome,
+            files or 'no files recorded',
+        ))
+        if a.get('verification_notes'):
+            parts.append('  Notes: {}'.format(a['verification_notes'][:200]))
+
+    parts.append('')
+    parts.append('If a previous attempt failed, try a DIFFERENT approach.')
+    return parts
+
+
 def build_fix_prompt(failure, analysis, file_contents):
     # type: (Dict, Optional[Dict], Dict[str, Optional[str]]) -> str
-    """Build the user message for Claude's fix generation."""
+    """Build the user message for Claude's fix generation.
+
+    Includes enriched context, pattern data, and resolution history
+    when available — giving the LLM maximum context for generating fixes.
+    """
     parts = [
         '## Build Failure',
         'Component: {}'.format(failure['component_name']),
@@ -187,6 +282,10 @@ def build_fix_prompt(failure, analysis, file_contents):
             'Root cause: {}'.format(analysis.get('root_cause', '')),
             'Recommended fix: {}'.format(analysis.get('recommended_fix', '')),
         ]
+
+    parts += _format_pattern_section(analysis)
+    parts += _format_enrichment_section(failure.get('enriched_context'))
+    parts += _format_previous_attempts(failure.get('previous_attempts', []))
 
     if file_contents:
         parts += ['', '## Current file contents']
