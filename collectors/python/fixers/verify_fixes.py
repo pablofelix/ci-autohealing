@@ -157,7 +157,9 @@ def main():
 
     db_conn = DatabaseConnection(config.db)
     github = GitHubClient(token=config.github_token)
-    repo_obj = ResolutionAttemptRepository(db_conn)
+    from repositories.error_pattern_repository import ErrorPatternRepository
+    pattern_repo = ErrorPatternRepository(db_conn)
+    repo_obj = ResolutionAttemptRepository(db_conn, pattern_repo=pattern_repo)
 
     pending = repo_obj.get_pending_verification()
     if not pending:

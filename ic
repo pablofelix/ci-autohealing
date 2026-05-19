@@ -2734,8 +2734,52 @@ cmd_patterns() {
     case "$subcmd" in
         list) cmd_patterns_list "$@" ;;
         show) cmd_patterns_show "$@" ;;
-        *) echo "Usage: ic patterns <list|show> [--type build|conforma] [pattern_name]" ;;
+        learn) cmd_patterns_learn ;;
+        stale) cmd_patterns_stale ;;
+        *) echo "Usage: ic patterns <list|show|learn|stale> [--type build|conforma] [pattern_name]" ;;
     esac
+}
+
+cmd_patterns_learn() {
+    echo -e "${BOLD}Discovering new patterns from repeated failures...${NC}"
+    python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from repositories.error_pattern_repository import ErrorPatternRepository
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+repo = ErrorPatternRepository(db)
+created = repo.discover_new_patterns()
+if created:
+    print(f'Created {len(created)} new pattern(s):')
+    for p in created:
+        print(f'  - {p[\"pattern_name\"]} (category: {p[\"failure_category\"]})')
+else:
+    print('No new patterns to create (need 3+ occurrences of same category)')
+"
+}
+
+cmd_patterns_stale() {
+    echo -e "${BOLD}Stale patterns (unused 90+ days or low accuracy):${NC}"
+    python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from repositories.error_pattern_repository import ErrorPatternRepository
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+repo = ErrorPatternRepository(db)
+stale = repo.get_stale_patterns()
+if stale:
+    for p in stale:
+        conf = f'{p[\"avg_confidence\"]:.2f}' if p['avg_confidence'] else 'N/A'
+        print(f'  {p[\"pattern_name\"]:30s}  conf={conf}  last_used={p[\"last_used_at\"] or \"never\"}')
+else:
+    print('  No stale patterns found')
+"
 }
 
 cmd_patterns_list() {

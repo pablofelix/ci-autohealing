@@ -9,12 +9,17 @@ columns (build_failure_id / conforma_result_id). Exactly one is set per row.
 
 from typing import Any, Dict, List, Optional
 
+from logger import setup_logger
+
+logger = setup_logger(__name__)
+
 
 class ResolutionAttemptRepository:
     """SQL operations on the resolution_attempts table."""
 
-    def __init__(self, db):
+    def __init__(self, db, pattern_repo=None):
         self.db = db
+        self.pattern_repo = pattern_repo
 
     def record_pr_created(self, build_failure_id, pr_url, pr_number,
                           pr_branch, files_modified, changes_description,
@@ -227,6 +232,25 @@ class ResolutionAttemptRepository:
                 """, (attempt_id, attempt_id))
 
             conn.commit()
+
+            # Pattern learning: update confidence based on fix outcome
+            if self.pattern_repo and was_successful is not None:
+                cursor.execute("""
+                    SELECT build_failure_id, conforma_result_id
+                    FROM resolution_attempts WHERE id = %s
+                """, (attempt_id,))
+                ids = cursor.fetchone()
+                if ids:
+                    pattern_id = self.pattern_repo.get_pattern_for_failure(
+                        build_failure_id=ids[0],
+                        conforma_result_id=ids[1]
+                    )
+                    if pattern_id:
+                        self.pattern_repo.record_fix_outcome(pattern_id, was_successful)
+                        logger.info(
+                            "Pattern %d confidence updated (fix %s)",
+                            pattern_id, "succeeded" if was_successful else "failed"
+                        )
 
     def get_all(self, days=30):
         # type: (int) -> List[Dict[str, Any]]

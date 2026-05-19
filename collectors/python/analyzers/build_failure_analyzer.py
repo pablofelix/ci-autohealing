@@ -507,6 +507,11 @@ CRITICAL FORMATTING RULES:
         }
 
         # Save to database
+        matched_pattern_id = (
+            enhancement.matched_patterns[0].pattern_id
+            if enhancement.boost_applied and enhancement.matched_patterns
+            else None
+        )
         analysis_id = self.ai_repo.insert_analysis(
             build_failure_id=failure['id'],
             model_used=self.llm.model_name(),
@@ -515,6 +520,7 @@ CRITICAL FORMATTING RULES:
             cost_usd=cost_usd,
             analysis_duration=duration,
             analysis_json=analysis_json,
+            error_pattern_id=matched_pattern_id,
             **analysis
         )
 

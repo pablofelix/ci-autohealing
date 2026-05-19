@@ -152,6 +152,115 @@ class ErrorPatternRepository:
             """, (pattern_id, analysis_id))
             conn.commit()
 
+    def record_fix_outcome(self, pattern_id, was_successful):
+        # type: (int, bool) -> None
+        """Update pattern confidence based on whether the recommended fix worked.
+
+        Uses exponential moving average with alpha=0.2 to weight recent
+        outcomes more heavily than historical ones.
+        """
+        LEARNING_RATE = 0.2
+        outcome_score = 1.0 if was_successful else 0.0
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE error_patterns
+                SET avg_confidence = CASE
+                        WHEN avg_confidence IS NULL THEN %s
+                        ELSE avg_confidence * (1.0 - %s) + %s * %s
+                    END,
+                    match_count = match_count + 1,
+                    last_used_at = NOW()
+                WHERE id = %s
+            """, (outcome_score, LEARNING_RATE, LEARNING_RATE, outcome_score, pattern_id))
+            conn.commit()
+
+    def get_pattern_for_failure(self, build_failure_id=None, conforma_result_id=None):
+        # type: (Optional[int], Optional[int]) -> Optional[int]
+        """Look up which pattern was used in the AI analysis for a failure."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            if build_failure_id is not None:
+                cursor.execute("""
+                    SELECT error_pattern_id FROM ai_analysis
+                    WHERE build_failure_id = %s AND error_pattern_id IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1
+                """, (build_failure_id,))
+            elif conforma_result_id is not None:
+                cursor.execute("""
+                    SELECT error_pattern_id FROM ai_analysis
+                    WHERE conforma_result_id = %s AND error_pattern_id IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1
+                """, (conforma_result_id,))
+            else:
+                return None
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    MIN_OCCURRENCES_FOR_PATTERN = 3
+
+    def discover_new_patterns(self):
+        # type: () -> List[Dict[str, Any]]
+        """Find failure categories that recur 3+ times but have no pattern yet.
+
+        Returns list of newly created patterns.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT a.failure_category, COUNT(*) as cnt,
+                       AVG(a.confidence_score) as avg_conf
+                FROM ai_analysis a
+                WHERE a.failure_category IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM error_patterns ep
+                      WHERE ep.failure_type = 'build'
+                        AND ep.failure_category = a.failure_category
+                  )
+                GROUP BY a.failure_category
+                HAVING COUNT(*) >= %s
+            """, (self.MIN_OCCURRENCES_FOR_PATTERN,))
+            candidates = cursor.fetchall()
+
+        created = []
+        for category, count, avg_conf in candidates:
+            pattern = self.find_or_create('build', category)
+            if avg_conf:
+                self._set_initial_confidence(pattern['id'], avg_conf, count)
+            created.append(pattern)
+
+        return created
+
+    def _set_initial_confidence(self, pattern_id, avg_confidence, occurrence_count):
+        # type: (int, float, int) -> None
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE error_patterns
+                SET avg_confidence = %s, occurrence_count = %s
+                WHERE id = %s AND avg_confidence IS NULL
+            """, (avg_confidence, occurrence_count, pattern_id))
+            conn.commit()
+
+    def get_stale_patterns(self, inactive_days=90, min_accuracy=0.3):
+        # type: (int, float) -> List[Dict[str, Any]]
+        """Find patterns that should be archived: low accuracy or unused."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, failure_type, failure_category, pattern_name,
+                       description, typical_fix, doc_url, doc_context, doc_fetched_at,
+                       occurrence_count, avg_confidence, first_seen_at, last_seen_at, created_by
+                FROM error_patterns
+                WHERE (
+                    (last_used_at IS NOT NULL AND last_used_at < NOW() - (%s || ' days')::INTERVAL)
+                    OR (avg_confidence IS NOT NULL AND avg_confidence < %s AND match_count >= 5)
+                )
+                ORDER BY COALESCE(last_used_at, first_seen_at) ASC
+            """, (inactive_days, min_accuracy))
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
     @staticmethod
     def _row_to_dict(row):
         # type: (Any,) -> Dict[str, Any]

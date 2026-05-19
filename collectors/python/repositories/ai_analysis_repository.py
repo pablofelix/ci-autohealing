@@ -21,7 +21,8 @@ class AIAnalysisRepository:
                        tokens_used, cost_usd, analysis_duration,
                        analysis_json, langfuse_trace_id=None,
                        langfuse_trace_url=None, langfuse_observation_id=None,
-                       build_failure_id=None, conforma_result_id=None):
+                       build_failure_id=None, conforma_result_id=None,
+                       error_pattern_id=None):
         # type: (...) -> int
         """Insert AI analysis for either build failure or Conforma violation.
 
@@ -44,7 +45,8 @@ class AIAnalysisRepository:
             langfuse_trace_url: Optional Langfuse trace URL
             langfuse_observation_id: Optional Langfuse observation ID
             build_failure_id: Foreign key to build_failures (mutually exclusive with conforma_result_id)
-            conforma_result_id: Foreign key to conforma_results (mutually exclusive with build_failure_id)
+            conforma_result_id: Foreign key to conforma_results (mutually exclusive with conforma_result_id)
+            error_pattern_id: Foreign key to error_patterns (pattern used for boost, if any)
 
         Returns:
             ID of the inserted ai_analysis record
@@ -86,8 +88,9 @@ class AIAnalysisRepository:
                     confidence_score, recommended_fix, recommended_files,
                     can_auto_fix, requires_human_review,
                     langfuse_trace_id, langfuse_trace_url, langfuse_observation_id,
-                    tokens_used, cost_usd, analysis_duration_seconds, analysis_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    tokens_used, cost_usd, analysis_duration_seconds, analysis_json,
+                    error_pattern_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 build_failure_id, conforma_result_id,
@@ -96,7 +99,8 @@ class AIAnalysisRepository:
                 can_auto_fix, requires_human_review,
                 langfuse_trace_id, langfuse_trace_url, langfuse_observation_id,
                 tokens_used, cost_usd, analysis_duration,
-                json.dumps(analysis_json) if analysis_json else None
+                json.dumps(analysis_json) if analysis_json else None,
+                error_pattern_id
             ))
 
             analysis_id = cursor.fetchone()[0]
