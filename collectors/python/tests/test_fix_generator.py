@@ -64,8 +64,8 @@ def test_vendor_label_inserted_after_last_label():
     content = "FROM ubi9\nLABEL name=myapp\nLABEL version=1.0\nCMD [\"bash\"]\n"
     result = apply_sbom_vendor_label_fix(content)
     lines = result.splitlines()
-    vendor_idx = next(i for i, l in enumerate(lines) if 'vendor' in l)
-    version_idx = next(i for i, l in enumerate(lines) if 'version=1.0' in l)
+    vendor_idx = next(i for i, ln in enumerate(lines) if 'vendor' in ln)
+    version_idx = next(i for i, ln in enumerate(lines) if 'version=1.0' in ln)
     assert vendor_idx == version_idx + 1
 
 
@@ -73,8 +73,8 @@ def test_vendor_label_inserted_before_cmd_when_no_labels():
     content = "FROM ubi9\nRUN dnf install -y git\nCMD [\"bash\"]\n"
     result = apply_sbom_vendor_label_fix(content)
     lines = result.splitlines()
-    vendor_idx = next(i for i, l in enumerate(lines) if 'vendor' in l)
-    cmd_idx = next(i for i, l in enumerate(lines) if l.startswith('CMD'))
+    vendor_idx = next(i for i, ln in enumerate(lines) if 'vendor' in ln)
+    cmd_idx = next(i for i, ln in enumerate(lines) if ln.startswith('CMD'))
     assert vendor_idx < cmd_idx
 
 
@@ -82,8 +82,8 @@ def test_vendor_label_inserted_before_entrypoint():
     content = "FROM ubi9\nRUN echo hi\nENTRYPOINT [\"/start.sh\"]\n"
     result = apply_sbom_vendor_label_fix(content)
     lines = result.splitlines()
-    vendor_idx = next(i for i, l in enumerate(lines) if 'vendor' in l)
-    entry_idx = next(i for i, l in enumerate(lines) if l.startswith('ENTRYPOINT'))
+    vendor_idx = next(i for i, ln in enumerate(lines) if 'vendor' in ln)
+    entry_idx = next(i for i, ln in enumerate(lines) if ln.startswith('ENTRYPOINT'))
     assert vendor_idx < entry_idx
 
 
@@ -374,7 +374,7 @@ def test_refresh_new_digest_updates_ref():
 
 
 def test_refresh_oci_prefix_preserved():
-    old_ref = f"oci://quay.io/org/task:0.1@sha256:a1b2c3d4e5f60000"
+    old_ref = "oci://quay.io/org/task:0.1@sha256:a1b2c3d4e5f60000"
     with patch('fixers.fix_generator.resolve_quay_digest', return_value=_NEW_DIGEST):
         result = _refresh_pinned_ref(old_ref)
         assert result.startswith("oci://")

@@ -1,7 +1,6 @@
 """Unit tests for data models."""
 
 import unittest
-from datetime import datetime
 from models import BuildStatus, TaskRun, PipelineRun, Component, ScanResult
 
 

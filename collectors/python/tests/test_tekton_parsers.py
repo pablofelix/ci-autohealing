@@ -1,6 +1,5 @@
 """Tests for tekton_parsers pure functions."""
 
-import pytest
 from tekton_parsers import (
     extract_taskrun_names,
     extract_failed_step_names,

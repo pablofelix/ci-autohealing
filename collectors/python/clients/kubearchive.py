@@ -1,6 +1,5 @@
 """KubeArchive API client for querying archived Tekton resources."""
 
-from typing import Optional, List, Dict, Any
 import requests
 
 from clients.pipeline_source import PipelineRunSource

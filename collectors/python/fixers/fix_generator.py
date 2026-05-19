@@ -21,7 +21,6 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent directory to path so we can import project modules
 sys.path.insert(0, str(Path(__file__).parent.parent))

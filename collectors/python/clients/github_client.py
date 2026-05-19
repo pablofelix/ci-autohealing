@@ -6,7 +6,6 @@ No disk usage — all data returned in memory.
 
 import base64
 import re
-from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -261,7 +260,7 @@ class GitHubClient:
             'title': pr.get('title', ''),
             'body': (pr.get('body') or '')[:5000],
             'url': pr.get('html_url', ''),
-            'labels': [l.get('name', '') for l in pr.get('labels', [])],
+            'labels': [lbl.get('name', '') for lbl in pr.get('labels', [])],
             'state': pr.get('state', ''),
         }
 

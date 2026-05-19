@@ -9,9 +9,7 @@ Follows the collector pattern: thin orchestration delegating to clients
 
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
 
-from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository, ErrorPatternRepository
 from clients.llm_provider import create_llm_provider

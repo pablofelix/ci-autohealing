@@ -5,9 +5,8 @@ before failures fully manifest. No API cost — SQL queries only.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
-from repositories.connection import DatabaseConnection
 from logger import setup_logger
 
 logger = setup_logger(__name__)

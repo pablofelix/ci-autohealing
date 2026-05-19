@@ -10,7 +10,6 @@ polling where Python needs direct access.
 """
 
 import requests
-from typing import Any, Dict, List, Optional
 
 from logger import setup_logger
 

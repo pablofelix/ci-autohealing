@@ -2,11 +2,8 @@
 
 import uuid
 from contextlib import contextmanager
-from typing import Generator
 import psycopg2
 
-from config import DatabaseConfig
-from models import ScanResult
 
 
 class DatabaseConnection:

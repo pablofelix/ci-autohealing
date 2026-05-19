@@ -5,6 +5,7 @@ requests>=2.20.0,<3.0.0          # HTTP client for KubeArchive API
 psycopg2-binary>=2.8.0,<3.0.0    # PostgreSQL database adapter
 python-dotenv>=0.19.0,<2.0.0     # Environment configuration
 anthropic>=0.90.0,<1.0.0         # Claude API client
+requests-kerberos>=0.14.0,<1.0.0 # Kerberos auth for Pyxis API
 langfuse>=2.50.0,<3.0.0          # LLM observability (v3+ requires ClickHouse, stay on v2)
 
 # Development dependencies
@@ -19,5 +20,4 @@ pytest-mock>=3.3.0,<4.0.0        # Mocking helpers
 mypy>=0.910,<1.0.0               # Type checker (Python 3.6 compatible)
 
 # Code quality
-flake8>=3.8.0,<7.0.0             # Linting
-black>=21.12b0,<25.0.0           # Code formatting (Python 3.6 compatible)
+ruff>=0.4.0                      # Linting + formatting (replaces flake8 + black)

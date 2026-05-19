@@ -4,8 +4,7 @@ Wraps the Langfuse SDK to track all AI analysis operations: traces per
 analysis run, generations per LLM call, token usage, cost, duration.
 """
 
-import time
-from typing import Any, Dict, Optional
+import logging
 
 
 class LangfuseTracker:
@@ -20,19 +19,15 @@ class LangfuseTracker:
 
     def __init__(self, enabled=True):
         # type: (bool,) -> None
-        """Initialize Langfuse tracker.
-
-        Args:
-            enabled: Whether to enable tracking. If False, all methods are no-ops.
-        """
         self.enabled = enabled
         self._langfuse = None
 
         if enabled:
             try:
+                logging.getLogger('langfuse').setLevel(logging.CRITICAL)
                 from langfuse import Langfuse
                 self._langfuse = Langfuse()
-            except ImportError:
+            except (ImportError, Exception):
                 self.enabled = False
 
     def create_trace(self, name, input_data=None, metadata=None):

@@ -9,7 +9,6 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
 
 from config import CollectorConfig
 from services.batch_analysis_service import BatchAnalysisService

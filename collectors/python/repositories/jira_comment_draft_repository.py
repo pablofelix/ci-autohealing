@@ -5,7 +5,6 @@ One row per (jira_key, comment_id). Comment text is never stored here —
 always fetched fresh from the Jira API when displaying.
 """
 
-from typing import Any, Dict, List, Set
 
 
 class JiraCommentDraftRepository:

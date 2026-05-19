@@ -5,7 +5,6 @@ and return transformed data. No I/O, no side effects, no network calls.
 """
 
 import re
-from typing import Dict, Any, List, Optional, Tuple
 
 
 def extract_taskrun_names(pipelinerun_data):
@@ -66,10 +65,12 @@ def build_taskrun_detail(taskrun_data):
 _ERROR_PATTERNS = [
     (r'ERROR:\s*(.{0,500})', 'Build Error'),
     (r'FAIL(?:ED)?:\s*(.{0,500})', 'Test Failure'),
-    (r'(?:exit|return) code (\d+)', 'Exit Code'),
-    (r'(timeout|timed out)', 'Timeout'),
-    (r'(resource not found|404)', 'Resource Not Found'),
+    (r'(?:exit|return) code ([1-9]\d*)', 'Exit Code'),
     (r'(?:fatal|FATAL):\s*(.{0,500})', 'Fatal Error'),
+    (r'(?:Exception|exception):\s*(.{0,500})', 'Exception'),
+    (r'(?:Traceback|traceback)', 'Python Error'),
+    (r'timed?\s*out', 'Timeout'),
+    (r'(?:returned?|status(?:\s+code)?)\s+404', 'Resource Not Found'),
 ]
 
 
@@ -77,16 +78,59 @@ def extract_error_from_logs(logs):
     # type: (Optional[str]) -> Tuple[Optional[str], Optional[str]]
     """Extract an error message and its category from build logs.
 
+    Filters out script source code, metadata, and Slack messages.
+    Only matches actual execution errors.
+
     Returns:
         (error_message, error_type) or (None, None) if no error found.
     """
     if not logs:
         return None, None
 
-    for pattern, error_type in _ERROR_PATTERNS:
-        match = re.search(pattern, logs, re.IGNORECASE | re.MULTILINE)
-        if match:
-            return match.group(0)[:500], error_type
+    # Split into lines for context-aware filtering
+    lines = logs.split('\n')
+
+    # Patterns that indicate script source code (not execution)
+    script_indicators = [
+        r'^\s*(echo|cat|printf|print)\s+["\']',  # echo "ERROR..."
+        r'^\s*#',                                  # Comments
+        r'<<["\']?EOF',                            # Heredocs
+        r'^\s*function\s+',                        # Function definitions
+        r'^\s*\w+\(\)\s*{',                        # Function definitions (bash)
+    ]
+
+    # Patterns to skip (metadata, not actual errors)
+    metadata_patterns = [
+        r'Slack Message:',                         # Slack notifications
+        r'pull request pipeline detected',         # PR detection messages
+        r'CC -.*subteam',                          # Slack mentions
+        r'Status:.*\(cluster:',                    # Status messages
+        r'Build URL:',                             # Metadata URLs
+        r'DEBUG INFORMATION',                      # Debug sections
+    ]
+
+    for i, line in enumerate(lines):
+        # Skip if this looks like script source code
+        if any(re.match(pattern, line) for pattern in script_indicators):
+            continue
+
+        # Skip if line ends with >&2 or similar (script redirects)
+        if re.search(r'>&\d+\s*$', line):
+            continue
+
+        # Skip metadata/notification messages
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in metadata_patterns):
+            continue
+
+        # Now try to match error patterns on execution output only
+        for pattern, error_type in _ERROR_PATTERNS:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                # Get some context (2 lines before and after)
+                start = max(0, i - 2)
+                end = min(len(lines), i + 3)
+                context = '\n'.join(lines[start:end])
+                return context[:500], error_type
 
     return None, None
 
@@ -99,6 +143,36 @@ def extract_failed_step_from_logs(logs):
     match = re.search(r'===== TaskRun: ([^/]+) / Step: ([^=]+) =====', logs)
     if match:
         return match.group(2).strip()
+    return None
+
+
+def extract_failed_step_from_pipelinerun(pr_data):
+    # type: (Optional[Dict[str, Any]]) -> Optional[str]
+    """Extract the failed task/step name from PipelineRun metadata.
+
+    More reliable than parsing logs. Checks childReferences for failed TaskRuns.
+
+    Returns:
+        Name of the failed pipelineTask (e.g., 'build', 'test', 'init-task')
+    """
+    if not pr_data:
+        return None
+
+    # Get the failed tasks from status
+    child_refs = pr_data.get('status', {}).get('childReferences', [])
+
+    # Look for the first TaskRun that failed
+    for ref in child_refs:
+        if ref.get('kind') == 'TaskRun':
+            task_name = ref.get('pipelineTaskName')
+            # If whenExpressions exist and are False, this task was skipped
+            when_expr = ref.get('whenExpressions', [])
+            if when_expr and all(w.get('output') == 'false' for w in when_expr):
+                continue
+            # Return the first non-skipped task (likely the failed one)
+            if task_name:
+                return task_name
+
     return None
 
 
@@ -171,6 +245,23 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
             if task_name:
                 failed_tasks.append(task_name)
 
+    # Extract pipeline output results (IMAGE_URL, IMAGE_DIGEST, etc.)
+    pr_results = status.get('results', [])
+    results_map = {r['name']: r.get('value', '') for r in pr_results if 'name' in r}
+
+    image_url = results_map.get('IMAGE_URL')
+    image_digest = results_map.get('IMAGE_DIGEST')
+    chains_git_url = results_map.get('CHAINS-GIT_URL')
+    chains_git_commit = results_map.get('CHAINS-GIT_COMMIT')
+
+    # Task completion summary from conditions message
+    task_summary = None
+    conditions = status.get('conditions', [])
+    if conditions:
+        msg = conditions[-1].get('message', '')
+        if 'Tasks Completed' in msg:
+            task_summary = msg
+
     return {
         'commit_sha': commit_sha,
         'commit_short_sha': commit_sha[:8] if commit_sha else None,
@@ -185,7 +276,12 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
         'completion_time': completion_time,
         'failed_tasks': failed_tasks,
         'pr_number': extract_pr_number_from_annotations(annotations),
-        'pr_url': annotations.get('pipelinesascode.tekton.dev/pull-request-url')
+        'pr_url': annotations.get('pipelinesascode.tekton.dev/pull-request-url'),
+        'output_image': image_url,
+        'image_digest': image_digest,
+        'chains_git_url': chains_git_url,
+        'chains_git_commit': chains_git_commit,
+        'task_summary': task_summary,
     }
 
 

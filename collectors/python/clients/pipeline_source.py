@@ -6,7 +6,6 @@ subprocess to oc CLI) behind this common interface.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
 
 from tekton_parsers import extract_taskrun_names, extract_failed_step_names, build_taskrun_detail
 

@@ -18,12 +18,11 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CollectorConfig
-from clients.github_client import GitHubClient, parse_github_repo
+from clients.github_client import GitHubClient
 from repositories.connection import DatabaseConnection
 from repositories.resolution_attempt_repository import ResolutionAttemptRepository
 from logger import setup_logger

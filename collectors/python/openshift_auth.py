@@ -5,7 +5,6 @@ authenticated session creation used across all clients and collectors.
 """
 
 import subprocess
-from typing import Optional
 
 import requests
 

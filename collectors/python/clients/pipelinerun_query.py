@@ -7,7 +7,6 @@ same PipelineRun twice even when it appears in both sources.
 
 import subprocess
 import json
-from typing import List, Dict, Any, Optional
 
 from logger import setup_logger
 

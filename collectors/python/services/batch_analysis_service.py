@@ -224,7 +224,6 @@ class BatchAnalysisService:
     def _discover_apps_with_pending(self) -> List[str]:
         """Find all applications that have pending failures or violations."""
         try:
-            from repositories.connection import DatabaseConnection
             db = self.build_analyzer.ai_repo.db
             with db.connection() as conn:
                 cursor = conn.cursor()

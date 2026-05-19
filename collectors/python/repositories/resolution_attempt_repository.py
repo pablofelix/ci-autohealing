@@ -7,7 +7,6 @@ Build failures and conforma violations are tracked in parallel via separate FK
 columns (build_failure_id / conforma_result_id). Exactly one is set per row.
 """
 
-from typing import Any, Dict, List, Optional
 
 from logger import setup_logger
 

@@ -1,7 +1,6 @@
 """Tests for query_pipelineruns shared function."""
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
 from clients.pipelinerun_query import query_pipelineruns
 

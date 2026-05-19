@@ -11,7 +11,7 @@ Checks:
 import sys
 from config import CollectorConfig
 from clients.github_client import GitHubClient
-from repositories import DatabaseConnection, BuildFailureRepository
+from repositories import DatabaseConnection
 from logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -52,7 +52,6 @@ def check_token_scopes(github):
 def check_repo_access(github, config):
     """Test access to repositories in the database."""
     db = DatabaseConnection(config.db)
-    repo = BuildFailureRepository(db)
 
     # Get unique repos from recent failures
     with db.connection() as conn:
@@ -77,7 +76,6 @@ def check_repo_access(github, config):
     logger.info("Testing access to %d repositories:", len(repos))
 
     accessible = 0
-    forbidden = 0
     not_found = 0
 
     for repo_url, failure_count in repos:

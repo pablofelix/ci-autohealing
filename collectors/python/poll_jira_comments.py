@@ -14,11 +14,9 @@ Requires: JIRA_EMAIL + JIRA_TOKEN (Jira access) + LLM_PROVIDER (AI drafts).
 All three must be set; the cron script guards on these before calling this script.
 """
 
-import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import CollectorConfig
 from clients.jira_client import JiraClient

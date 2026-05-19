@@ -1,9 +1,7 @@
 """Repository for sync_status table operations."""
 
 import json
-from typing import Optional, Set, Dict, Any
 
-from repositories.connection import DatabaseConnection
 
 
 class SyncStatusRepository:

@@ -10,7 +10,6 @@ Tests:
 """
 
 import sys
-from pathlib import Path
 
 from config import CollectorConfig
 from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
@@ -125,7 +124,7 @@ def test_batch_analysis(config):
 
         try:
             service = BatchAnalysisService(config)
-        except ImportError as e:
+        except ImportError:
             logger.warning("⚠ Anthropic module not installed - skipping batch analysis test")
             logger.warning("  Run: pip install anthropic")
             return None

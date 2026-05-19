@@ -19,14 +19,12 @@ Usage:
 import argparse
 import hashlib
 import html.parser
-import os
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 

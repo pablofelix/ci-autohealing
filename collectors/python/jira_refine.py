@@ -19,7 +19,6 @@ import json
 import sys
 import textwrap
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from config import CollectorConfig
 from clients.jira_client import JiraClient
@@ -47,7 +46,7 @@ def wrap(text, indent='    '):
             lines.extend(textwrap.wrap(paragraph, WIDTH - len(indent)))
         else:
             lines.append('')
-    return '\n'.join(indent + l for l in lines)
+    return '\n'.join(indent + line for line in lines)
 
 
 def display_draft(draft, label='Current draft:'):

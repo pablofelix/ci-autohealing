@@ -1,0 +1,18 @@
+#!/bin/bash
+# Pre-commit hook: blocks commit if lint or tests fail.
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+PYTHON=python3.11
+ROOT=$(git rev-parse --show-toplevel)
+COLLECTORS="$ROOT/collectors/python"
+
+echo "=== pre-commit: lint ==="
+$PYTHON -m ruff check "$COLLECTORS/" --exclude='__pycache__'
+
+echo "=== pre-commit: tests ==="
+cd "$ROOT"
+$PYTHON -m pytest -q --tb=short 2>&1
+
+echo "=== pre-commit: all checks passed ==="

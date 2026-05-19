@@ -9,7 +9,6 @@ Pattern granularity: one row per (failure_type, failure_category). This is
 intentionally coarse for v1 — subtype columns can be added later if needed.
 """
 
-from typing import Any, Dict, List, Optional
 
 
 class ErrorPatternRepository:

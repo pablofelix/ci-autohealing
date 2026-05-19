@@ -7,7 +7,6 @@ for build failures that don't have this context yet.
 Requires GITHUB_TOKEN environment variable.
 """
 
-import os
 import sys
 from config import CollectorConfig
 from collectors.commit_context_collector import CommitContextCollector
