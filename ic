@@ -3185,6 +3185,123 @@ cmd_dashboard() {
 }
 
 # ============================================================================
+# Health Monitoring
+# ============================================================================
+
+cmd_health_overview() {
+    _check_db || return 1
+    section_header "Component Health"
+    echo ""
+
+    python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from proactive.health_monitor import HealthMonitor
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+monitor = HealthMonitor(db)
+
+summary = monitor.get_component_health_summary()
+if not summary:
+    print('  No component health data. Run data collection first.')
+else:
+    # Count by status
+    by_status = {}
+    for s in summary:
+        st = s.get('health_status') or 'unknown'
+        by_status[st] = by_status.get(st, 0) + 1
+
+    print(f'  Total components: {len(summary)}')
+    for st in ['critical', 'warning', 'healthy', 'unknown']:
+        if st in by_status:
+            print(f'  {st:10s}: {by_status[st]}')
+    print()
+
+    # Show unhealthy components
+    unhealthy = [s for s in summary if (s.get('health_status') or '') in ('critical', 'warning')
+                 or (s.get('consecutive_failures') or 0) >= 2]
+    if unhealthy:
+        print('  Unhealthy components:')
+        fmt = '  {:<55s} {:>5s} {:>10s} {:>5s} {:>8s}'
+        print(fmt.format('COMPONENT', 'SCORE', 'STATUS', 'FAILS', '7D RATE'))
+        print('  ' + '-' * 87)
+        for s in unhealthy:
+            score = str(s['health_score']) if s['health_score'] is not None else 'N/A'
+            status = s.get('health_status') or 'unknown'
+            fails = str(s.get('consecutive_failures') or 0)
+            rate = f'{s[\"success_rate_last_7d\"]:.0f}%' if s.get('success_rate_last_7d') is not None else 'N/A'
+            print(fmt.format(s['component_name'][:55], score, status, fails, rate))
+    else:
+        print('  All components healthy.')
+"
+}
+
+cmd_health_warnings() {
+    _check_db || return 1
+    section_header "Proactive Warnings"
+    echo ""
+
+    python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from proactive.health_monitor import HealthMonitor
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+monitor = HealthMonitor(db)
+
+warnings = monitor.run_checks()
+if not warnings:
+    print('  No warnings — all clear.')
+else:
+    by_type = {}
+    for w in warnings:
+        by_type.setdefault(w.signal_type, []).append(w)
+
+    for signal_type, group in by_type.items():
+        label = signal_type.replace('_', ' ').title()
+        print(f'  {label} ({len(group)}):')
+        for w in group:
+            icon = '!!' if w.severity == 'critical' else ' >'
+            print(f'    {icon} {w.message}')
+        print()
+
+    crit = sum(1 for w in warnings if w.severity == 'critical')
+    warn = sum(1 for w in warnings if w.severity == 'warning')
+    print(f'  Summary: {crit} critical, {warn} warning')
+"
+}
+
+cmd_health_component() {
+    local component="$1"
+    _check_db || return 1
+    section_header "Health: $component"
+    echo ""
+
+    sql_table "
+        SELECT
+            component_name as \"Component\",
+            application as \"App\",
+            current_status as \"Status\",
+            health_score as \"Score\",
+            health_status as \"Health\",
+            consecutive_failures as \"Consec. Fails\",
+            success_rate_last_7d as \"7d Rate\",
+            success_rate_last_30d as \"30d Rate\",
+            total_failures_last_7d as \"7d Fails\",
+            total_failures_last_30d as \"30d Fails\",
+            TO_CHAR(last_successful_build, 'DD Mon HH24:MI') as \"Last Success\",
+            TO_CHAR(last_failed_build, 'DD Mon HH24:MI') as \"Last Fail\"
+        FROM component_health
+        WHERE component_name LIKE '%${component}%'
+        ORDER BY health_score ASC NULLS FIRST;
+    "
+}
+
+# ============================================================================
 # Alerts
 # ============================================================================
 
@@ -3228,6 +3345,27 @@ cmd_alerts_check() {
     if [ "${sk:-0}" -gt 5 ]; then
         echo -e "${YELLOW}ALERT: ${sk} analyses skipped (max retries) in last 24h${NC}"
         _write_alert "WARN" "${sk} analyses skipped (max retries) in last 24h"
+        alerts_found=1
+    fi
+
+    # Check component health warnings
+    local hw
+    hw=$(python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from proactive.health_monitor import HealthMonitor
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+warnings = HealthMonitor(db).run_checks()
+crit = sum(1 for w in warnings if w.severity == 'critical')
+if crit > 0:
+    print(f'{crit} critical, {len(warnings)} total')
+" 2>/dev/null)
+    if [ -n "$hw" ]; then
+        echo -e "${RED}ALERT: Health warnings: ${hw}${NC}"
+        echo -e "  Run 'ic health warnings' for details"
+        _write_alert "WARN" "Health warnings: ${hw}"
         alerts_found=1
     fi
 
@@ -8550,6 +8688,13 @@ case "${1:-}" in
         ;;
     dashboard)
         cmd_dashboard
+        ;;
+    health)
+        case "${2:-}" in
+            warnings) cmd_health_warnings ;;
+            "") cmd_health_overview ;;
+            *) cmd_health_component "$2" ;;
+        esac
         ;;
     stats)
         case "${2:-}" in
