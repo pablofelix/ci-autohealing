@@ -731,6 +731,7 @@ ${BOLD}COMMANDS:${NC}
     ic get components                        List all failing components
     ic get component <name>                  Get component summary
     ic get alerts                            Unified view: builds + Conforma
+    ic get alerts --group                    Group failures by root cause
     ic get alerts --all                      Alerts across all applications
     ic get alerts --date <date>              Alerts on a specific date
     ic get alerts --from <date> --to <date>  Changes between two dates
@@ -1074,6 +1075,7 @@ cmd_get_components() {
             status,
             is_resolved,
             first_detected_at,
+            COALESCE(failed_step_name, '') as failed_task,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name AND bf.build_logs IS NOT NULL) as with_logs
         FROM build_failures
@@ -1081,7 +1083,7 @@ cmd_get_components() {
         ORDER BY component_name, first_detected_at DESC
     ),
     failing AS (
-        SELECT component_name, total_failures, with_logs,
+        SELECT component_name, total_failures, with_logs, failed_task,
             TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
             1 as sort_group
         FROM push_failed
@@ -1089,7 +1091,7 @@ cmd_get_components() {
             AND component_name NOT IN (SELECT value FROM json_array_elements_text('$(echo "${retriggered_json:-[]}" | sed "s/'/\\\\'/g")'))
     ),
     retriggered AS (
-        SELECT component_name, total_failures, with_logs,
+        SELECT component_name, total_failures, with_logs, failed_task,
             TO_CHAR(first_detected_at, 'DD Mon') as failed_date,
             2 as sort_group
         FROM push_failed
@@ -1102,17 +1104,18 @@ cmd_get_components() {
         SELECT * FROM retriggered
     )
     SELECT
-        ROW_NUMBER() OVER (ORDER BY sort_group, total_failures DESC) as \"#\",
+        ROW_NUMBER() OVER (ORDER BY sort_group, failed_task, total_failures DESC) as \"#\",
         component_name as \"Component\",
         CASE sort_group
             WHEN 1 THEN 'Push Failed'
             WHEN 2 THEN 'Re-triggered ✓'
         END as \"Status\",
+        failed_task as \"Failed Task\",
         failed_date as \"Failed\",
         total_failures as \"Builds\",
         with_logs as \"Logs\"
     FROM combined
-    ORDER BY sort_group, total_failures DESC;
+    ORDER BY sort_group, failed_task, total_failures DESC;
     "
     echo ""
 
@@ -1288,7 +1291,10 @@ cmd_describe_component() {
                COALESCE(failed_step_name, ''), COALESCE(error_type, ''),
                COALESCE(REPLACE(REPLACE(LEFT(error_message, 200), E'\n', ' '), E'\r', ''), ''),
                COALESCE(build_duration_seconds::text, ''),
-               COALESCE(jira_key, '')
+               COALESCE(jira_key, ''),
+               COALESCE(output_image, ''),
+               COALESCE(image_digest, ''),
+               COALESCE(REPLACE(REPLACE(LEFT(task_summary, 120), E'\n', ' '), E'\r', ''), '')
         FROM build_failures
         WHERE component_name = '$component'
         ORDER BY first_detected_at DESC
@@ -1298,7 +1304,8 @@ cmd_describe_component() {
     if [ -n "$pr_data" ]; then
         IFS='|' read -r failure_id pr_name pr_uid status repo_url branch has_logs konflux_url \
             commit_sha commit_url commit_author commit_message \
-            failed_step error_type error_message build_duration bf_jira_key <<< "$pr_data"
+            failed_step error_type error_message build_duration bf_jira_key \
+            output_image image_digest task_summary_msg <<< "$pr_data"
 
         section_header "Latest PipelineRun"
         echo ""
@@ -1332,6 +1339,10 @@ cmd_describe_component() {
         [ -n "$commit_message" ] && echo -e "${BOLD}Message:${NC}     $commit_message"
         [ -n "$commit_url" ] && echo -e "${BOLD}Commit URL:${NC}  ${CYAN}$commit_url${NC}"
 
+        output_image=$(trim "$output_image")
+        image_digest=$(trim "$image_digest")
+        task_summary_msg=$(trim "$task_summary_msg")
+
         if [ -n "$failed_step" ] || [ -n "$error_type" ]; then
             echo ""
             echo -e "${BOLD}Failure Info:${NC}"
@@ -1339,6 +1350,7 @@ cmd_describe_component() {
             [ -n "$error_type" ] && echo -e "  Error Type:  $error_type"
             [ -n "$error_message" ] && echo -e "  Error:       $error_message"
             [ -n "$build_duration" ] && echo -e "  Duration:    ${build_duration}s"
+            [ -n "$task_summary_msg" ] && echo -e "  Tasks:       $task_summary_msg"
 
             # If CONTEXT parameter error, extract Tekton config details
             if [[ "$error_message" =~ "CONTEXT parameter" ]]; then
@@ -1360,6 +1372,13 @@ cmd_describe_component() {
                     fi
                 fi
             fi
+        fi
+
+        if [ -n "$output_image" ]; then
+            echo ""
+            echo -e "${BOLD}Build Output:${NC}"
+            echo -e "  Image:  $output_image"
+            [ -n "$image_digest" ] && echo -e "  Digest: ${image_digest:0:24}..."
         fi
 
         echo ""
@@ -1412,6 +1431,35 @@ cmd_describe_component() {
             echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
             echo ""
         fi
+
+        # Build History from Tekton Results
+        section_header "Build History (Tekton Results)"
+        echo ""
+        local history=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 get_build_history.py "$component" --limit 8 --type build 2>/dev/null)
+        if [ -n "$history" ]; then
+            while IFS='|' read -r h_ts h_status h_commit h_failed_task h_image h_pr_name; do
+                h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
+                case "$h_status" in
+                    Succeeded) echo -e "  ${h_ts}  ${GREEN}✓ succeeded${NC}  (${h_commit})" ;;
+                    Failed)    echo -e "  ${h_ts}  ${RED}✗ failed${NC}     (${h_failed_task:-unknown}, ${h_commit})" ;;
+                    Cancelled) echo -e "  ${h_ts}  ${YELLOW}⊘ cancelled${NC}  (${h_commit})" ;;
+                    Timeout)   echo -e "  ${h_ts}  ${YELLOW}⏱ timeout${NC}   (${h_commit})" ;;
+                    *)         echo -e "  ${h_ts}  ? ${h_status}  (${h_commit})" ;;
+                esac
+            done <<< "$history"
+
+            # Resolution status based on newest build
+            local newest_status=$(echo "$history" | head -1 | cut -d'|' -f2)
+            echo ""
+            if [ "$newest_status" = "Succeeded" ]; then
+                echo -e "  ${GREEN}Status: RESOLVED${NC} (latest build passed)"
+            else
+                echo -e "  ${RED}Status: FAILING${NC} (latest build: ${newest_status})"
+            fi
+        else
+            echo -e "  ${YELLOW}No history available from Tekton Results${NC}"
+        fi
+        echo ""
 
         # Display AI analysis if available (matching this specific failure)
         display_ai_analysis "$component" "$failure_id" "build" "$commit_author"
@@ -2099,7 +2147,11 @@ cmd_ai() {
             cmd_ai_status
             ;;
         stats)
-            cmd_ai_stats
+            shift
+            case "${1:-}" in
+                --fixes) cmd_ai_stats_fixes ;;
+                *) cmd_ai_stats ;;
+            esac
             ;;
         *)
             echo -e "${BOLD}IC AI - AI Analysis Commands${NC}"
@@ -2728,6 +2780,75 @@ cmd_ai_stats() {
     echo ""
 }
 
+cmd_ai_stats_fixes() {
+    section_header "Fix Quality Metrics (last 30 days)"
+    echo ""
+
+    local has_data
+    has_data=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days'" 2>/dev/null | grep -v "Emulate Docker" | tr -d '[:space:]')
+    if [ "$has_data" = "0" ] || [ -z "$has_data" ]; then
+        echo "  No fix attempts in the last 30 days."
+        echo "  Run 'ic fix <component>' to create fix PRs, then 'ic verify' to track outcomes."
+        return 0
+    fi
+
+    echo -e "${BOLD}Fix Success Rate by Pattern:${NC}"
+    sql_table "
+        SELECT
+            COALESCE(ep.pattern_name, '(no pattern)') as \"Pattern\",
+            COUNT(*) as \"Fixes\",
+            SUM(CASE WHEN ra.was_successful THEN 1 ELSE 0 END) as \"Success\",
+            SUM(CASE WHEN ra.was_successful = FALSE THEN 1 ELSE 0 END) as \"Failed\",
+            CASE WHEN SUM(CASE WHEN ra.was_successful IS NOT NULL THEN 1 ELSE 0 END) > 0
+                THEN ROUND(SUM(CASE WHEN ra.was_successful THEN 1 ELSE 0 END)::numeric * 100 /
+                     NULLIF(SUM(CASE WHEN ra.was_successful IS NOT NULL THEN 1 ELSE 0 END), 0)) || '%'
+                ELSE '—'
+            END as \"Rate\"
+        FROM resolution_attempts ra
+        LEFT JOIN ai_analysis a ON (a.build_failure_id = ra.build_failure_id OR a.conforma_result_id = ra.conforma_result_id)
+        LEFT JOIN error_patterns ep ON ep.id = a.error_pattern_id
+        WHERE ra.attempted_at >= NOW() - INTERVAL '30 days'
+        GROUP BY ep.pattern_name
+        ORDER BY COUNT(*) DESC;
+    "
+    echo ""
+
+    echo -e "${BOLD}PR Merge Time:${NC}"
+    sql_table "
+        SELECT
+            CASE WHEN ra.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END as \"Type\",
+            COUNT(*) FILTER (WHERE ra.pr_merged) as \"Merged\",
+            COUNT(*) FILTER (WHERE ra.was_successful) as \"Success\",
+            COALESCE(
+                ROUND(AVG(EXTRACT(EPOCH FROM (ra.pr_merged_at - ra.attempted_at)) / 3600)::numeric, 1),
+                0
+            ) || 'h' as \"Avg Merge Time\"
+        FROM resolution_attempts ra
+        WHERE ra.attempted_at >= NOW() - INTERVAL '30 days'
+        GROUP BY CASE WHEN ra.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END;
+    "
+    echo ""
+
+    echo -e "${BOLD}Hardest Categories (lowest success rate):${NC}"
+    sql_table "
+        SELECT
+            a.failure_category as \"Category\",
+            COUNT(ra.*) as \"Fix Attempts\",
+            SUM(CASE WHEN ra.was_successful THEN 1 ELSE 0 END) as \"Successes\",
+            CASE WHEN COUNT(ra.*) > 0
+                THEN ROUND(SUM(CASE WHEN ra.was_successful THEN 1 ELSE 0 END)::numeric * 100 / COUNT(ra.*)) || '%'
+                ELSE '—'
+            END as \"Rate\"
+        FROM ai_analysis a
+        JOIN resolution_attempts ra ON (ra.build_failure_id = a.build_failure_id OR ra.conforma_result_id = a.conforma_result_id)
+        WHERE ra.attempted_at >= NOW() - INTERVAL '30 days'
+        GROUP BY a.failure_category
+        ORDER BY
+            CASE WHEN COUNT(ra.*) > 0 THEN SUM(CASE WHEN ra.was_successful THEN 1 ELSE 0 END)::numeric / COUNT(ra.*) ELSE 1 END ASC;
+    "
+    echo ""
+}
+
 cmd_patterns() {
     local subcmd="${1:-list}"
     shift || true
@@ -2736,7 +2857,8 @@ cmd_patterns() {
         show) cmd_patterns_show "$@" ;;
         learn) cmd_patterns_learn ;;
         stale) cmd_patterns_stale ;;
-        *) echo "Usage: ic patterns <list|show|learn|stale> [--type build|conforma] [pattern_name]" ;;
+        shared) cmd_patterns_shared "$@" ;;
+        *) echo "Usage: ic patterns <list|show|learn|stale|shared> [--type build|conforma] [pattern_name]" ;;
     esac
 }
 
@@ -2780,6 +2902,60 @@ if stale:
 else:
     print('  No stale patterns found')
 "
+}
+
+cmd_patterns_shared() {
+    local app_filter="${1:-}"
+    echo -e "${BOLD}Cross-App Pattern Sharing${NC}"
+    echo ""
+    if [ -n "$app_filter" ]; then
+        echo -e "Patterns seen in ${CYAN}${app_filter}${NC} (with cross-app context):"
+        python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from repositories.error_pattern_repository import ErrorPatternRepository
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+repo = ErrorPatternRepository(db)
+patterns = repo.get_patterns_for_app('$app_filter')
+if not patterns:
+    print('  No patterns found for this application.')
+else:
+    for p in patterns:
+        conf = f'{p[\"avg_confidence\"]:.0%}' if p['avg_confidence'] else 'N/A'
+        also = p.get('also_seen_in')
+        cross = ', '.join(also) if also else '(unique to this app)'
+        print(f'  {p[\"pattern_name\"]:30s}  {p[\"failure_type\"]:10s}  conf={conf:>5s}  here={p[\"app_occurrences\"]}  total={p[\"total_occurrences\"]}')
+        print(f'    Also seen in: {cross}')
+"
+    else
+        echo "Patterns appearing across multiple applications:"
+        python3.11 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+from config import CollectorConfig
+from repositories.connection import DatabaseConnection
+from repositories.error_pattern_repository import ErrorPatternRepository
+
+config = CollectorConfig.from_env()
+db = DatabaseConnection(config.db)
+repo = ErrorPatternRepository(db)
+shared = repo.get_cross_app_patterns()
+if not shared:
+    print('  No patterns shared across apps yet.')
+    print('  Run more analyses across different apps to build cross-app data.')
+else:
+    for p in shared:
+        conf = f'{p[\"avg_confidence\"]:.0%}' if p['avg_confidence'] else 'N/A'
+        apps = ', '.join(p['applications'])
+        fix_preview = (p['typical_fix'][:60] + '...') if p.get('typical_fix') and len(p['typical_fix']) > 60 else (p.get('typical_fix') or '—')
+        print(f'  {p[\"pattern_name\"]:30s}  {p[\"failure_type\"]:10s}  apps={p[\"app_count\"]}  total={p[\"total_occurrences\"]}  conf={conf}')
+        print(f'    Apps: {apps}')
+        print(f'    Fix:  {fix_preview}')
+        print()
+"
+    fi
 }
 
 cmd_patterns_list() {
@@ -2890,6 +3066,185 @@ cmd_patterns_show() {
         fi
     fi
     echo ""
+}
+
+# ============================================================================
+# Dashboard
+# ============================================================================
+
+cmd_dashboard() {
+    _check_db || return 1
+
+    section_header "CI Auto-Healing Dashboard"
+    printf "  Application: ${CYAN}%s${NC}\n" "$APPLICATION_NAME"
+    printf "  Date: %s\n\n" "$(date '+%Y-%m-%d %H:%M')"
+
+    # --- Analysis Queue ---
+    echo -e "${BOLD}Analysis Queue${NC}"
+    local queue
+    queue=$(sql "
+        SELECT
+            (SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME' AND ai_analyzed = FALSE AND is_resolved = FALSE AND ai_skip_reason IS NULL) as build_pending,
+            (SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND ai_analyzed = FALSE AND ai_skip_reason IS NULL) as conforma_pending,
+            (SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME' AND ai_analyzed = TRUE) as build_done,
+            (SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND ai_analyzed = TRUE) as conforma_done;
+    ")
+    local bp cp bd cd
+    IFS='|' read -r bp cp bd cd <<< "$queue"
+    printf "  Build:    ${GREEN}%s analyzed${NC}  ${YELLOW}%s pending${NC}\n" "${bd:-0}" "${bp:-0}"
+    printf "  Conforma: ${GREEN}%s analyzed${NC}  ${YELLOW}%s pending${NC}\n" "${cd:-0}" "${cp:-0}"
+    echo ""
+
+    # --- Enrichment Coverage ---
+    echo -e "${BOLD}Enrichment Coverage${NC}"
+    local enrich
+    enrich=$(sql "
+        SELECT
+            COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND is_resolved = FALSE) as total,
+            COUNT(*) FILTER (WHERE enriched_context IS NOT NULL) as enriched,
+            COUNT(*) FILTER (WHERE enrichment_error IS NOT NULL) as failed
+        FROM build_failures WHERE application = '$APPLICATION_NAME' AND commit_sha IS NOT NULL;
+    ")
+    local et ee ef
+    IFS='|' read -r et ee ef <<< "$enrich"
+    local epct=0
+    if [ "${et:-0}" -gt 0 ]; then
+        epct=$(( (${ee:-0} * 100) / ${et:-1} ))
+    fi
+    printf "  Enriched: ${GREEN}%s/%s${NC} (%s%%)  Failed: ${RED}%s${NC}\n" "${ee:-0}" "${et:-0}" "$epct" "${ef:-0}"
+    echo ""
+
+    # --- Pattern Library ---
+    echo -e "${BOLD}Pattern Library${NC}"
+    local patterns
+    patterns=$(sql "
+        SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE avg_confidence IS NOT NULL) as with_conf,
+            COALESCE(ROUND(AVG(avg_confidence)::numeric * 100), 0) as avg_pct,
+            COALESCE(SUM(occurrence_count), 0) as total_occ
+        FROM error_patterns;
+    ")
+    local pt pw pa po
+    IFS='|' read -r pt pw pa po <<< "$patterns"
+    printf "  Patterns: %s total (%s with confidence data)\n" "${pt:-0}" "${pw:-0}"
+    printf "  Avg confidence: ${CYAN}%s%%${NC}  Total occurrences: %s\n" "${pa:-0}" "${po:-0}"
+    local shared_count
+    shared_count=$(sql "
+        SELECT COUNT(DISTINCT ep.id)
+        FROM error_patterns ep
+        JOIN ai_analysis a ON a.error_pattern_id = ep.id
+        LEFT JOIN build_failures bf ON bf.id = a.build_failure_id
+        LEFT JOIN conforma_results cr ON cr.id = a.conforma_result_id
+        GROUP BY ep.id
+        HAVING COUNT(DISTINCT COALESCE(bf.application, cr.application)) >= 2;
+    " 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${shared_count:-0}" -gt 0 ]; then
+        printf "  Cross-app: ${CYAN}%s patterns${NC} shared across apps\n" "$shared_count"
+    fi
+    echo ""
+
+    # --- Fix Outcomes ---
+    echo -e "${BOLD}Fix Outcomes (last 30 days)${NC}"
+    local fixes
+    fixes=$(sql "
+        SELECT
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE was_successful = TRUE) as success,
+            COUNT(*) FILTER (WHERE was_successful = FALSE) as failed,
+            COUNT(*) FILTER (WHERE was_successful IS NULL AND status = 'pr_created') as pending
+        FROM resolution_attempts
+        WHERE attempted_at >= NOW() - INTERVAL '30 days';
+    ")
+    local ft fs ff fp
+    IFS='|' read -r ft fs ff fp <<< "$fixes"
+    local frate=0
+    local resolved=$(( ${fs:-0} + ${ff:-0} ))
+    if [ "$resolved" -gt 0 ]; then
+        frate=$(( (${fs:-0} * 100) / resolved ))
+    fi
+    printf "  Total: %s  ${GREEN}Success: %s${NC}  ${RED}Failed: %s${NC}  Pending: %s\n" "${ft:-0}" "${fs:-0}" "${ff:-0}" "${fp:-0}"
+    printf "  Success rate: ${CYAN}%s%%${NC}\n" "$frate"
+    echo ""
+
+    # --- API Costs ---
+    echo -e "${BOLD}API Costs (last 30 days)${NC}"
+    local costs
+    costs=$(sql "
+        SELECT
+            COUNT(*) as analyses,
+            COALESCE(SUM(tokens_used), 0) as tokens,
+            ROUND(COALESCE(SUM(cost_usd), 0)::numeric, 2) as cost
+        FROM ai_analysis
+        WHERE analyzed_at >= NOW() - INTERVAL '30 days';
+    ")
+    local ca ct cc
+    IFS='|' read -r ca ct cc <<< "$costs"
+    printf "  Analyses: %s  Tokens: %s  Cost: ${CYAN}\$%s${NC}\n" "${ca:-0}" "${ct:-0}" "${cc:-0.00}"
+    echo ""
+}
+
+# ============================================================================
+# Alerts
+# ============================================================================
+
+ALERTS_DIR="/tmp/ci-autohealing"
+ALERTS_FILE="$ALERTS_DIR/alerts.log"
+
+_write_alert() {
+    local level="$1" message="$2"
+    mkdir -p "$ALERTS_DIR"
+    printf "%s [%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$message" >> "$ALERTS_FILE"
+}
+
+cmd_alerts_check() {
+    _check_db || return 1
+
+    local alerts_found=0
+
+    # Check queue depth
+    local bp cp
+    bp=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME' AND ai_analyzed = FALSE AND is_resolved = FALSE AND ai_skip_reason IS NULL;")
+    cp=$(sql "SELECT COUNT(*) FROM conforma_results WHERE application = '$APPLICATION_NAME' AND ai_analyzed = FALSE AND ai_skip_reason IS NULL;")
+
+    if [ "${bp:-0}" -gt 100 ] || [ "${cp:-0}" -gt 50 ]; then
+        echo -e "${RED}ALERT: High queue depth - Build: ${bp}, Conforma: ${cp}${NC}"
+        _write_alert "WARN" "High queue depth - Build: ${bp}, Conforma: ${cp}"
+        alerts_found=1
+    fi
+
+    # Check failed enrichments
+    local fe
+    fe=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME' AND enrichment_error IS NOT NULL AND last_updated_at >= NOW() - INTERVAL '1 hour';")
+    if [ "${fe:-0}" -gt 10 ]; then
+        echo -e "${RED}ALERT: ${fe} enrichment failures in last hour${NC}"
+        _write_alert "WARN" "${fe} enrichment failures in last hour"
+        alerts_found=1
+    fi
+
+    # Check skipped analyses
+    local sk
+    sk=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME' AND ai_skip_reason = 'max_retries' AND last_updated_at >= NOW() - INTERVAL '24 hours';")
+    if [ "${sk:-0}" -gt 5 ]; then
+        echo -e "${YELLOW}ALERT: ${sk} analyses skipped (max retries) in last 24h${NC}"
+        _write_alert "WARN" "${sk} analyses skipped (max retries) in last 24h"
+        alerts_found=1
+    fi
+
+    if [ "$alerts_found" -eq 0 ]; then
+        echo -e "${GREEN}No alerts - system healthy${NC}"
+    fi
+
+    # Show recent alerts from log
+    if [ -f "$ALERTS_FILE" ]; then
+        local count
+        count=$(wc -l < "$ALERTS_FILE")
+        if [ "$count" -gt 0 ]; then
+            echo ""
+            echo -e "${BOLD}Recent alerts (last 10):${NC}"
+            tail -10 "$ALERTS_FILE" | sed 's/^/  /'
+        fi
+    fi
 }
 
 # Part 3: Export commands
@@ -3657,6 +4012,8 @@ cmd_get_conforma() {
     local refresh=false
     local filter_mode="current"  # current | future | all
 
+    local show_grouped=false
+
     # Parse flags
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3664,6 +4021,7 @@ cmd_get_conforma() {
             --future) filter_mode="future"; shift ;;
             --all) filter_mode="all"; shift ;;
             --current) filter_mode="current"; shift ;;
+            --group|-g) show_grouped=true; shift ;;
             *) shift ;;
         esac
     done
@@ -3712,30 +4070,73 @@ cmd_get_conforma() {
     echo -e "${BOLD}Summary:${NC} ${RED}${count}${NC} components failing Conforma tests"
     echo ""
 
-    sql_table "
-    SELECT
-        ROW_NUMBER() OVER (ORDER BY violations_count DESC) as \"#\",
-        component_name as \"Component\",
-        CASE WHEN scenario LIKE '%-single-component' THEN 'single'
-             WHEN scenario LIKE 'conforma-fbc-%' THEN 'fbc'
-             WHEN scenario LIKE 'conforma-custom-%' THEN 'custom'
-             WHEN scenario LIKE '%-chart-%' THEN 'chart'
-             ELSE '-' END as \"Type\",
-        CASE WHEN is_future THEN 'future' ELSE 'current' END as \"Policy\",
-        violations_count as \"Violations\",
-        warnings_count as \"Warnings\",
-        successes_count as \"OK\",
-        TO_CHAR(first_detected_at, 'DD Mon') as \"Since\",
-        COALESCE(jira_key, '-') as \"JIRA\"
-    FROM conforma_results
-    WHERE application = '$APPLICATION_NAME'
-      AND is_resolved = FALSE
-      ${filter_clause}
-    ORDER BY violations_count DESC;
-    "
+    if [ "$show_grouped" = true ]; then
+        # Grouped by scenario
+        local groups=$(sql "
+            WITH latest AS (
+                SELECT DISTINCT ON (component_name, scenario)
+                    component_name, scenario, violations_count,
+                    CASE WHEN is_future THEN 'future' ELSE 'current' END as policy
+                FROM conforma_results
+                WHERE application = '$APPLICATION_NAME'
+                  AND is_resolved = FALSE
+                  ${filter_clause}
+                ORDER BY component_name, scenario, last_updated_at DESC
+            )
+            SELECT
+                scenario,
+                policy,
+                COUNT(*) as cnt,
+                SUM(violations_count) as total_violations,
+                STRING_AGG(component_name || '(' || violations_count || ')', ', ' ORDER BY component_name) as components
+            FROM latest
+            GROUP BY scenario, policy
+            ORDER BY cnt DESC;
+        " 2>/dev/null)
+
+        if [ -n "$groups" ]; then
+            while IFS='|' read -r scenario policy cnt total_v components; do
+                scenario=$(trim "$scenario")
+                policy=$(trim "$policy")
+                cnt=$(trim "$cnt")
+                total_v=$(trim "$total_v")
+                components=$(trim "$components")
+                local policy_label=""
+                [ "$policy" = "future" ] && policy_label=" ${YELLOW}[future]${NC}"
+                echo -e "  ${RED}${scenario}${NC}${policy_label} (${cnt} components, ${total_v} total violations)"
+                echo "$components" | fold -s -w 70 | while IFS= read -r line; do
+                    echo -e "    ${CYAN}${line}${NC}"
+                done
+                echo ""
+            done <<< "$groups"
+        fi
+    else
+        sql_table "
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY violations_count DESC) as \"#\",
+            component_name as \"Component\",
+            CASE WHEN scenario LIKE '%-single-component' THEN 'single'
+                 WHEN scenario LIKE 'conforma-fbc-%' THEN 'fbc'
+                 WHEN scenario LIKE 'conforma-custom-%' THEN 'custom'
+                 WHEN scenario LIKE '%-chart-%' THEN 'chart'
+                 ELSE '-' END as \"Type\",
+            CASE WHEN is_future THEN 'future' ELSE 'current' END as \"Policy\",
+            violations_count as \"Violations\",
+            warnings_count as \"Warnings\",
+            successes_count as \"OK\",
+            TO_CHAR(first_detected_at, 'DD Mon') as \"Since\",
+            COALESCE(jira_key, '-') as \"JIRA\"
+        FROM conforma_results
+        WHERE application = '$APPLICATION_NAME'
+          AND is_resolved = FALSE
+          ${filter_clause}
+        ORDER BY violations_count DESC;
+        "
+    fi
     echo ""
 
     echo -e "${CYAN}Tip:${NC} Use 'ic describe conforma <component>' for violation details"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get conforma --group' to group by scenario"
     if [ "$filter_mode" = "current" ]; then
         echo -e "${CYAN}Tip:${NC} Use 'ic conforma --future' to see future policy violations"
         echo -e "${CYAN}Tip:${NC} Use 'ic conforma --all' to see both current and future"
@@ -4171,11 +4572,13 @@ cmd_get_alerts() {
     local from_date=""
     local to_date=""
     local show_all=false
+    local show_grouped=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --refresh|-r) refresh=true; shift ;;
             --all) show_all=true; shift ;;
+            --group|-g) show_grouped=true; shift ;;
             --date)
                 shift
                 target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
@@ -4206,6 +4609,11 @@ cmd_get_alerts() {
     if [ -n "$from_date" ]; then
         [ -z "$to_date" ] && to_date=$(date '+%Y-%m-%d')
         cmd_get_alerts_range "$from_date" "$to_date"
+        return
+    fi
+
+    if [ "$show_grouped" = true ]; then
+        cmd_get_alerts_grouped
         return
     fi
 
@@ -4291,8 +4699,101 @@ cmd_get_alerts() {
     echo ""
     echo -e "${CYAN}Tip:${NC} Use 'ic <number>' to see details (works across both sections)"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --refresh' to force a fresh check"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --group' to group failures by root cause"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --date yesterday' to see past alerts"
     echo -e "${CYAN}Tip:${NC} Use 'ic get alerts --all' to show alerts across all applications"
+    echo ""
+}
+
+# GET ALERTS GROUPED - group failures by root cause
+cmd_get_alerts_grouped() {
+    section_header "Alerts by Root Cause — ${APPLICATION_NAME}"
+    echo ""
+
+    # Build failures grouped by failed_task + error_type + error_message (truncated)
+    local build_groups=$(sql "
+        WITH latest AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, failed_step_name, error_type,
+                COALESCE(REPLACE(REPLACE(LEFT(error_message, 80), E'\n', ' '), E'\r', ''), '') as error_snippet
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME'
+              AND is_resolved = FALSE
+              AND status = 'Failed'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT
+            COALESCE(failed_step_name, 'unknown') as task,
+            COALESCE(error_type, '-') as etype,
+            error_snippet,
+            COUNT(*) as cnt,
+            STRING_AGG(component_name, ', ' ORDER BY component_name) as components
+        FROM latest
+        GROUP BY COALESCE(failed_step_name, 'unknown'), COALESCE(error_type, '-'), error_snippet
+        ORDER BY cnt DESC;
+    " 2>/dev/null)
+
+    if [ -n "$build_groups" ]; then
+        echo -e "${BOLD}Build Failures:${NC}"
+        echo ""
+        while IFS='|' read -r task etype error_snippet cnt components; do
+            task=$(trim "$task")
+            etype=$(trim "$etype")
+            error_snippet=$(trim "$error_snippet")
+            cnt=$(trim "$cnt")
+            components=$(trim "$components")
+            echo -e "  ${RED}${task}${NC} / ${etype} (${cnt} components)"
+            [ -n "$error_snippet" ] && echo -e "    ${YELLOW}\"${error_snippet}\"${NC}"
+            echo "$components" | fold -s -w 70 | while IFS= read -r line; do
+                echo -e "    ${CYAN}${line}${NC}"
+            done
+            echo ""
+        done <<< "$build_groups"
+    else
+        echo -e "  ${GREEN}✓ No build failures${NC}"
+        echo ""
+    fi
+
+    # Conforma failures grouped by scenario
+    local conforma_groups=$(sql "
+        WITH latest AS (
+            SELECT DISTINCT ON (component_name, scenario)
+                component_name, scenario, violations_count
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME'
+              AND is_resolved = FALSE
+            ORDER BY component_name, scenario, last_updated_at DESC
+        )
+        SELECT
+            scenario,
+            COUNT(*) as cnt,
+            SUM(violations_count) as total_violations,
+            STRING_AGG(component_name || '(' || violations_count || ')', ', ' ORDER BY component_name) as components
+        FROM latest
+        GROUP BY scenario
+        ORDER BY cnt DESC;
+    " 2>/dev/null)
+
+    if [ -n "$conforma_groups" ]; then
+        echo -e "${BOLD}Conforma Failures:${NC}"
+        echo ""
+        while IFS='|' read -r scenario cnt total_v components; do
+            scenario=$(trim "$scenario")
+            cnt=$(trim "$cnt")
+            total_v=$(trim "$total_v")
+            components=$(trim "$components")
+            echo -e "  ${RED}${scenario}${NC} (${cnt} components, ${total_v} total violations)"
+            echo "$components" | fold -s -w 70 | while IFS= read -r line; do
+                echo -e "    ${CYAN}${line}${NC}"
+            done
+            echo ""
+        done <<< "$conforma_groups"
+    else
+        echo -e "  ${GREEN}✓ No Conforma failures${NC}"
+        echo ""
+    fi
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic get alerts' for the numbered list view"
     echo ""
 }
 
@@ -5665,7 +6166,7 @@ cmd_describe_conforma() {
     fi
 }
 
-# CONFORMA HISTORY - PipelineRun timeline from KubeArchive
+# CONFORMA HISTORY - PipelineRun timeline from KubeArchive + Tekton Results
 cmd_conforma_history() {
     local component="$1"
     local limit="${2:-10}"
@@ -5698,6 +6199,25 @@ cmd_conforma_history() {
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}Error fetching PipelineRun history from KubeArchive${NC}"
+    fi
+
+    # Also show Tekton Results conforma history (longer retention)
+    echo ""
+    echo -e "${BOLD}Conforma Test History (Tekton Results):${NC}"
+    echo ""
+    local conforma_hist=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
+    if [ -n "$conforma_hist" ]; then
+        while IFS='|' read -r h_ts h_status h_scenario h_pr_name; do
+            h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
+            local scenario_short="${h_scenario#conforma-}"
+            case "$h_status" in
+                Passed) echo -e "  ${h_ts}  ${GREEN}✓ passed${NC}  ${scenario_short}" ;;
+                Failed) echo -e "  ${h_ts}  ${RED}✗ failed${NC}  ${scenario_short}" ;;
+                *)      echo -e "  ${h_ts}  ? ${h_status}  ${scenario_short}" ;;
+            esac
+        done <<< "$conforma_hist"
+    else
+        echo -e "  ${YELLOW}No conforma history from Tekton Results${NC}"
     fi
 }
 
@@ -8028,6 +8548,9 @@ case "${1:-}" in
     apps|versions)
         cmd_get_apps
         ;;
+    dashboard)
+        cmd_dashboard
+        ;;
     stats)
         case "${2:-}" in
             daily) cmd_stats_daily ;;
@@ -8039,6 +8562,12 @@ case "${1:-}" in
         ;;
     triage)
         cmd_triage
+        ;;
+    alerts)
+        case "${2:-}" in
+            check) cmd_alerts_check ;;
+            *) cmd_alerts_check ;;
+        esac
         ;;
     why)
         cmd_why "$2"

@@ -261,6 +261,87 @@ class ErrorPatternRepository:
             """, (inactive_days, min_accuracy))
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def get_cross_app_patterns(self):
+        # type: () -> List[Dict[str, Any]]
+        """Find patterns that appear across multiple applications.
+
+        Joins error_patterns → ai_analysis → build_failures to see which
+        applications share each pattern. Only returns patterns seen in 2+ apps.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    ep.id,
+                    ep.pattern_name,
+                    ep.failure_type,
+                    ep.failure_category,
+                    ep.avg_confidence,
+                    ep.typical_fix,
+                    COUNT(DISTINCT app) as app_count,
+                    ARRAY_AGG(DISTINCT app) as applications,
+                    SUM(cnt) as total_occurrences
+                FROM error_patterns ep
+                JOIN (
+                    SELECT
+                        a.error_pattern_id,
+                        COALESCE(bf.application, cr.application) as app,
+                        COUNT(*) as cnt
+                    FROM ai_analysis a
+                    LEFT JOIN build_failures bf ON bf.id = a.build_failure_id
+                    LEFT JOIN conforma_results cr ON cr.id = a.conforma_result_id
+                    WHERE a.error_pattern_id IS NOT NULL
+                    GROUP BY a.error_pattern_id, COALESCE(bf.application, cr.application)
+                ) usage ON usage.error_pattern_id = ep.id
+                GROUP BY ep.id, ep.pattern_name, ep.failure_type, ep.failure_category,
+                         ep.avg_confidence, ep.typical_fix
+                HAVING COUNT(DISTINCT app) >= 2
+                ORDER BY COUNT(DISTINCT app) DESC, SUM(cnt) DESC
+            """)
+            cols = ['id', 'pattern_name', 'failure_type', 'failure_category',
+                    'avg_confidence', 'typical_fix', 'app_count', 'applications',
+                    'total_occurrences']
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_patterns_for_app(self, application):
+        # type: (str,) -> List[Dict[str, Any]]
+        """Get patterns seen in a specific application, with cross-app context."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    ep.id,
+                    ep.pattern_name,
+                    ep.failure_type,
+                    ep.failure_category,
+                    ep.avg_confidence,
+                    ep.typical_fix,
+                    app_usage.cnt as app_occurrences,
+                    ep.occurrence_count as total_occurrences,
+                    (SELECT ARRAY_AGG(DISTINCT COALESCE(bf2.application, cr2.application))
+                     FROM ai_analysis a2
+                     LEFT JOIN build_failures bf2 ON bf2.id = a2.build_failure_id
+                     LEFT JOIN conforma_results cr2 ON cr2.id = a2.conforma_result_id
+                     WHERE a2.error_pattern_id = ep.id
+                       AND COALESCE(bf2.application, cr2.application) != %s
+                    ) as also_seen_in
+                FROM error_patterns ep
+                JOIN (
+                    SELECT a.error_pattern_id, COUNT(*) as cnt
+                    FROM ai_analysis a
+                    LEFT JOIN build_failures bf ON bf.id = a.build_failure_id
+                    LEFT JOIN conforma_results cr ON cr.id = a.conforma_result_id
+                    WHERE COALESCE(bf.application, cr.application) = %s
+                      AND a.error_pattern_id IS NOT NULL
+                    GROUP BY a.error_pattern_id
+                ) app_usage ON app_usage.error_pattern_id = ep.id
+                ORDER BY app_usage.cnt DESC
+            """, (application, application))
+            cols = ['id', 'pattern_name', 'failure_type', 'failure_category',
+                    'avg_confidence', 'typical_fix', 'app_occurrences',
+                    'total_occurrences', 'also_seen_in']
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     @staticmethod
     def _row_to_dict(row):
         # type: (Any,) -> Dict[str, Any]

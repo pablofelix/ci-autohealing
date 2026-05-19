@@ -1,9 +1,9 @@
-"""Related failures source - finds similar failures from the same component.
+"""Related failures source - finds similar failures from same and other apps.
 
 Queries the database for recent failures with:
-- Same component name
-- Same error type
-- Recent (last 7 days)
+- Same component name (same-app first, then cross-app)
+- Same error type / failure category
+- Recent (last 7 days same-app, last 30 days cross-app)
 - Includes AI analysis if available
 """
 
@@ -77,13 +77,26 @@ class RelatedFailuresSource(ContextSource):
                 limit=3
             )
 
-            if not related:
+            cross_app = []
+            if len(related) < 2:
+                cross_app = self._query_cross_app_failures(
+                    component_name=component_name,
+                    error_type=error_type,
+                    failure_id=failure_id,
+                    exclude_application=application,
+                    limit=3 - len(related)
+                )
+
+            all_related = related + cross_app
+            if not all_related:
                 return None
 
-            logger.info("Found %d related failures", len(related))
+            logger.info("Found %d related failures (%d same-app, %d cross-app)",
+                        len(all_related), len(related), len(cross_app))
 
             return {
-                'related_failures': related
+                'related_failures': all_related,
+                'cross_app_count': len(cross_app)
             }
 
         except Exception as e:
@@ -165,6 +178,87 @@ class RelatedFailuresSource(ContextSource):
                 })
 
             return results
+
+    def _query_cross_app_failures(
+        self,
+        component_name: str,
+        error_type: Optional[str],
+        failure_id: int,
+        exclude_application: str,
+        limit: int = 3
+    ) -> List[Dict[str, Any]]:
+        """Find similar failures from other applications.
+
+        Matches on base component name (strips version suffix) and error type.
+        Looks back 30 days (wider window than same-app).
+        """
+        base_name = self._strip_version_suffix(component_name)
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    bf.id,
+                    bf.component_name,
+                    bf.error_type,
+                    bf.error_message,
+                    bf.pipelinerun_name,
+                    bf.first_detected_at,
+                    bf.ai_analyzed,
+                    aa.root_cause,
+                    aa.confidence_score,
+                    aa.failure_category,
+                    bf.application,
+                    CASE
+                        WHEN bf.error_type = %s THEN 0.8
+                        WHEN aa.failure_category IS NOT NULL
+                             AND aa.failure_category = (
+                                 SELECT a2.failure_category FROM ai_analysis a2
+                                 WHERE a2.build_failure_id = %s LIMIT 1
+                             ) THEN 0.7
+                        ELSE 0.4
+                    END as similarity_score
+                FROM build_failures bf
+                LEFT JOIN ai_analysis aa ON bf.ai_analysis_id = aa.id
+                WHERE bf.application != %s
+                  AND bf.component_name LIKE %s
+                  AND bf.id != %s
+                  AND bf.ai_analyzed = TRUE
+                  AND bf.first_detected_at > NOW() - INTERVAL '30 days'
+                ORDER BY similarity_score DESC, bf.first_detected_at DESC
+                LIMIT %s
+            """, (error_type, failure_id, exclude_application,
+                  base_name + '%', failure_id, limit))
+
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'id': row[0],
+                    'component_name': row[1],
+                    'error_type': row[2],
+                    'error_message': row[3][:MAX_ERROR_MESSAGE_LENGTH] if row[3] else '',
+                    'pipelinerun_name': row[4],
+                    'first_detected_at': row[5].isoformat() if row[5] else None,
+                    'ai_analyzed': row[6],
+                    'root_cause': row[7][:MAX_ROOT_CAUSE_LENGTH] if row[7] else None,
+                    'confidence_score': float(row[8]) if row[8] else None,
+                    'failure_category': row[9],
+                    'source_application': row[10],
+                    'similarity_score': float(row[11]),
+                    'cross_app': True,
+                })
+
+            return results
+
+    @staticmethod
+    def _strip_version_suffix(component_name: str) -> str:
+        """Strip version suffix to match across app versions.
+
+        'odh-dashboard-v3-4' → 'odh-dashboard-'
+        'odh-dashboard-v3-5-ea-1' → 'odh-dashboard-'
+        """
+        import re
+        return re.sub(r'-v\d+.*$', '-', component_name)
 
     def source_name(self) -> str:
         return 'related_failures'
