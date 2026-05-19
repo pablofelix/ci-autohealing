@@ -118,20 +118,21 @@ class ConformaAnalyzer:
             langfuse = LangfuseTracker(enabled=langfuse_enabled)
         self.langfuse = langfuse
 
-    def get_pending_violations(self, limit=5, component_filter=None, force=False):
-        # type: (int, Optional[str], bool) -> List[Dict[str, Any]]
+    def get_pending_violations(self, limit=5, component_filter=None, force=False, application=None):
+        # type: (int, Optional[str], bool, Optional[str]) -> List[Dict[str, Any]]
         """Get unanalyzed Conforma violations from DB.
 
         Args:
             limit: Maximum number of violations to fetch
             component_filter: If specified, only get violations for this component
             force: If True, include already-analyzed violations
+            application: Override config app. None uses config default.
 
         Returns:
             List of violation dicts ready for analysis
         """
         return self.ai_repo.get_pending_conforma_violations(
-            self.config.k8s.application_name,
+            application or self.config.k8s.application_name,
             limit=limit,
             component_filter=component_filter,
             force=force
@@ -358,30 +359,34 @@ Use the record_conforma_analysis tool. Remember:
 
     MAX_RETRIES = 3
 
-    def run(self, limit=5, component_filter=None, force=False):
-        # type: (int, Optional[str], bool) -> Dict[str, Any]
+    def run(self, limit=5, component_filter=None, force=False, application=None):
+        # type: (int, Optional[str], bool, Optional[str]) -> Dict[str, Any]
         """Analyze up to `limit` pending Conforma violations.
 
         Args:
             limit: Maximum number of violations to analyze
             component_filter: If specified, only analyze this component
             force: If True, re-analyze even if already analyzed
+            application: Override config app. None uses config default.
 
         Returns:
             Dict with stats: analyzed, duration
         """
+        app = application or self.config.k8s.application_name
         start_time = time.time()
 
         logger.info("=" * 70)
         logger.info("Conforma Violation AI Analysis")
-        logger.info("Application: %s", self.config.k8s.application_name)
+        logger.info("Application: %s", app)
         if component_filter:
             logger.info("Component filter: %s", component_filter)
         if force:
             logger.info("Force mode: Re-analyzing existing analyses")
         logger.info("=" * 70)
 
-        pending = self.get_pending_violations(limit=limit, component_filter=component_filter, force=force)
+        pending = self.get_pending_violations(
+            limit=limit, component_filter=component_filter, force=force, application=app
+        )
 
         if not pending:
             logger.info("No pending Conforma violations to analyze")

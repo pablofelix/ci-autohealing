@@ -33,6 +33,11 @@ def main():
         action='store_true',
         help='Estimate queue depth without analyzing'
     )
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Analyze failures across all applications (default: current app only)'
+    )
     args = parser.parse_args()
 
     # Load config
@@ -49,7 +54,7 @@ def main():
         return 1
 
     # Create service
-    service = BatchAnalysisService(config)
+    service = BatchAnalysisService(config, all_apps=args.all)
 
     # Override limit if provided
     if args.limit:
@@ -59,13 +64,15 @@ def main():
 
     try:
         if args.estimate:
-            # Just show queue depth
             estimate = service.estimate_queue_depth()
-            logger.info("Queue Depth Estimate")
+            mode = "All Apps" if args.all else config.k8s.application_name
+            logger.info("Queue Depth Estimate (%s)", mode)
             logger.info("Build pending: %d", estimate['build_pending'])
             logger.info("Conforma pending: %d", estimate['conforma_pending'])
             logger.info("Total pending: %d", estimate['total_pending'])
             logger.info("ETA to clear: %.1f hours", estimate['eta_hours'])
+            if estimate.get('apps'):
+                logger.info("Apps with pending: %s", ', '.join(estimate['apps']))
             return 0
         else:
             # Run batch analysis

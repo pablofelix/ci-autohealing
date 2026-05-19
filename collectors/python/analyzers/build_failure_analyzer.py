@@ -129,20 +129,21 @@ class BuildFailureAnalyzer:
             pattern_service = PatternMatchingService(matcher, self.pattern_repo)
         self.pattern_service = pattern_service
 
-    def get_pending_failures(self, limit=5, component_filter=None, force=False):
-        # type: (int, Optional[str], bool) -> List[Dict[str, Any]]
+    def get_pending_failures(self, limit=5, component_filter=None, force=False, application=None):
+        # type: (int, Optional[str], bool, Optional[str]) -> List[Dict[str, Any]]
         """Get unanalyzed failures from DB.
 
         Args:
             limit: Maximum number of failures to fetch
             component_filter: If specified, only get failures for this component
             force: If True, include already-analyzed failures
+            application: Override config app. None uses config default.
 
         Returns:
             List of failure dicts ready for analysis
         """
         return self.ai_repo.get_pending_failures(
-            self.config.k8s.application_name,
+            application or self.config.k8s.application_name,
             limit=limit,
             component_filter=component_filter,
             force=force
@@ -537,37 +538,38 @@ CRITICAL FORMATTING RULES:
 
     MAX_RETRIES = 3
 
-    def run(self, limit=5, component_filter=None, force=False):
-        # type: (int, Optional[str], bool) -> Dict[str, Any]
+    def run(self, limit=5, component_filter=None, force=False, application=None):
+        # type: (int, Optional[str], bool, Optional[str]) -> Dict[str, Any]
         """Analyze up to `limit` pending failures.
 
         Args:
             limit: Maximum number of failures to analyze
             component_filter: If specified, only analyze this component
             force: If True, re-analyze even if already analyzed
+            application: Override config app. None uses config default.
 
         Returns:
             Dict with stats: analyzed, skipped_new, duration
         """
+        app = application or self.config.k8s.application_name
         start_time = time.time()
 
         logger.info("=" * 70)
         logger.info("Build Failure AI Analysis")
-        logger.info("Application: %s", self.config.k8s.application_name)
+        logger.info("Application: %s", app)
         if component_filter:
             logger.info("Component filter: %s", component_filter)
         if force:
             logger.info("Force mode: Re-analyzing existing analyses")
         logger.info("=" * 70)
 
-        # Mark failures whose logs never arrived as permanently skipped
-        skipped_new = self.ai_repo.skip_no_logs_timeouts(
-            self.config.k8s.application_name
-        )
+        skipped_new = self.ai_repo.skip_no_logs_timeouts(app)
         if skipped_new:
             logger.info("Marked %d no-logs failures as skipped (timeout)", skipped_new)
 
-        pending = self.get_pending_failures(limit=limit, component_filter=component_filter, force=force)
+        pending = self.get_pending_failures(
+            limit=limit, component_filter=component_filter, force=force, application=app
+        )
 
         if not pending:
             logger.info("No pending failures to analyze")

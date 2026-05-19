@@ -297,15 +297,15 @@ class AIAnalysisRepository:
 
             return {'build': build, 'conforma': conforma}
 
-    def get_pending_failures(self, application, limit=5, component_filter=None, force=False):
-        # type: (str, int, Optional[str], bool) -> List[Dict[str, Any]]
+    def get_pending_failures(self, application=None, limit=5, component_filter=None, force=False):
+        # type: (Optional[str], int, Optional[str], bool) -> List[Dict[str, Any]]
         """Get failures awaiting AI analysis.
 
         Criteria: ai_analyzed=FALSE (unless force=True), is_resolved=FALSE,
         build_logs IS NOT NULL, ai_skip_reason IS NULL.
 
         Args:
-            application: Application name (e.g., 'acme-v2-0')
+            application: Application name (e.g., 'acme-v2-0'). None = all apps.
             limit: Maximum number of failures to return
             component_filter: If specified, only get failures for this component
             force: If True, include already-analyzed failures (for re-analysis)
@@ -318,12 +318,15 @@ class AIAnalysisRepository:
 
             # Build WHERE clause dynamically (all conditions use bf. alias)
             where_conditions = [
-                "bf.application = %s",
                 "bf.is_resolved = FALSE",
                 "bf.build_logs IS NOT NULL",
                 "bf.ai_skip_reason IS NULL",
             ]
-            params = [application]
+            params = []
+
+            if application:
+                where_conditions.append("bf.application = %s")
+                params.append(application)
 
             if not force:
                 where_conditions.append("bf.ai_analyzed = FALSE")
@@ -389,39 +392,49 @@ class AIAnalysisRepository:
 
             return results
 
-    def get_pending_count(self, application):
-        # type: (str,) -> int
+    def get_pending_count(self, application=None):
+        # type: (Optional[str],) -> int
         """Count failures awaiting AI analysis.
 
         Args:
-            application: Application name
+            application: Application name. None = all apps.
 
         Returns:
             Count of pending failures
         """
         with self.db.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*)
-                FROM build_failures
-                WHERE application = %s
-                  AND ai_analyzed = FALSE
-                  AND is_resolved = FALSE
-                  AND build_logs IS NOT NULL
-                  AND ai_skip_reason IS NULL
-            """, (application,))
+            if application:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM build_failures
+                    WHERE application = %s
+                      AND ai_analyzed = FALSE
+                      AND is_resolved = FALSE
+                      AND build_logs IS NOT NULL
+                      AND ai_skip_reason IS NULL
+                """, (application,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM build_failures
+                    WHERE ai_analyzed = FALSE
+                      AND is_resolved = FALSE
+                      AND build_logs IS NOT NULL
+                      AND ai_skip_reason IS NULL
+                """)
 
             return cursor.fetchone()[0]
 
-    def get_pending_conforma_violations(self, application, limit=5, component_filter=None, force=False):
-        # type: (str, int, Optional[str], bool) -> List[Dict[str, Any]]
+    def get_pending_conforma_violations(self, application=None, limit=5, component_filter=None, force=False):
+        # type: (Optional[str], int, Optional[str], bool) -> List[Dict[str, Any]]
         """Get Conforma violations awaiting AI analysis.
 
         Criteria: ai_analyzed=FALSE (unless force=True), is_resolved=FALSE,
         violation_summary IS NOT NULL, ai_skip_reason IS NULL.
 
         Args:
-            application: Application name (e.g., 'acme-v2-0')
+            application: Application name (e.g., 'acme-v2-0'). None = all apps.
             limit: Maximum number of violations to return
             component_filter: If specified, only get violations for this component
             force: If True, include already-analyzed violations (for re-analysis)
@@ -434,12 +447,15 @@ class AIAnalysisRepository:
 
             # Build WHERE clause dynamically (all conditions use cr. alias)
             where_conditions = [
-                "cr.application = %s",
                 "cr.is_resolved = FALSE",
                 "cr.violation_summary IS NOT NULL",
                 "cr.ai_skip_reason IS NULL",
             ]
-            params = [application]
+            params = []
+
+            if application:
+                where_conditions.append("cr.application = %s")
+                params.append(application)
 
             if not force:
                 where_conditions.append("cr.ai_analyzed = FALSE")
@@ -505,27 +521,37 @@ class AIAnalysisRepository:
 
             return results
 
-    def get_pending_conforma_count(self, application):
-        # type: (str,) -> int
+    def get_pending_conforma_count(self, application=None):
+        # type: (Optional[str],) -> int
         """Count Conforma violations awaiting AI analysis.
 
         Args:
-            application: Application name
+            application: Application name. None = all apps.
 
         Returns:
             Count of pending violations
         """
         with self.db.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*)
-                FROM conforma_results
-                WHERE application = %s
-                  AND ai_analyzed = FALSE
-                  AND is_resolved = FALSE
-                  AND violation_summary IS NOT NULL
-                  AND ai_skip_reason IS NULL
-            """, (application,))
+            if application:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM conforma_results
+                    WHERE application = %s
+                      AND ai_analyzed = FALSE
+                      AND is_resolved = FALSE
+                      AND violation_summary IS NOT NULL
+                      AND ai_skip_reason IS NULL
+                """, (application,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM conforma_results
+                    WHERE ai_analyzed = FALSE
+                      AND is_resolved = FALSE
+                      AND violation_summary IS NOT NULL
+                      AND ai_skip_reason IS NULL
+                """)
 
             return cursor.fetchone()[0]
 
