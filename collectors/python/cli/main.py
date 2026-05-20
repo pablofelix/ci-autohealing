@@ -44,7 +44,27 @@ def get_components(refresh):
 @click.argument('name')
 def get_component(name):
     """Get component summary."""
-    _bash_fallback(['get', 'component', name])
+    from cli.db import require_db, sql
+    from cli.formatting import bold, cyan, red
+    if not require_db():
+        return
+    total = sql("SELECT COUNT(*) FROM build_failures WHERE component_name = '{}';".format(name))
+    if total == '0' or total is None:
+        print(red('Error: Component not found: {}'.format(name)))
+        raise SystemExit(1)
+    with_logs = sql("SELECT COUNT(*) FROM build_failures WHERE component_name = '{}' AND build_logs IS NOT NULL;".format(name))
+    first_seen = sql("SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '{}';".format(name))
+    last_seen = sql("SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '{}';".format(name))
+    print(bold('Component: ') + cyan(name))
+    print()
+    print(bold('Summary:'))
+    print('  Total failures: {}'.format(total))
+    print('  With logs: {}'.format(with_logs))
+    print('  First seen: {}'.format(first_seen))
+    print('  Last seen: {}'.format(last_seen))
+    print()
+    print(cyan('For full details with logs:') + ' ic describe component {}'.format(name))
+    print()
 
 
 @get.command('alerts')
@@ -111,7 +131,46 @@ def get_pipelinerun(name):
 @get.command('apps')
 def get_apps():
     """List available RHOAI applications."""
-    _bash_fallback(['get', 'apps'])
+    from cli.db import require_db, sql, sql_rows
+    from cli.formatting import bold, cyan, green, section_header, yellow
+    if not require_db():
+        return
+    section_header('Available RHOAI Applications')
+    print()
+    apps = []
+    try:
+        from openshift_auth import _ensure_k8s_config
+        from kubernetes import client as k8s
+        _ensure_k8s_config()
+        api = k8s.CustomObjectsApi()
+        result = api.list_namespaced_custom_object(
+            group='appstudio.redhat.com', version='v1alpha1',
+            namespace=cfg.NAMESPACE, plural='applications',
+        )
+        apps = sorted(
+            [item['metadata']['name'] for item in result.get('items', [])
+             if 'rhoai' in item['metadata']['name']],
+        )
+    except Exception:
+        print(yellow('⚠ Cluster unreachable — showing applications from database'))
+        print()
+        rows = sql_rows("SELECT DISTINCT application FROM build_failures ORDER BY application;")
+        apps = [r[0] for r in rows if r[0]]
+    if not apps:
+        print(yellow('No applications found'))
+        return
+    current = cfg.APPLICATION_NAME
+    for app in apps:
+        db_count = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app)) or '0'
+        if app == current:
+            print('  {} {} — {} records'.format(green('✓'), bold(app) + ' ' + cyan('(current)'), db_count))
+        else:
+            print('    {} — {} records'.format(app, db_count))
+    print()
+    print('Total: {} applications'.format(len(apps)))
+    print()
+    print(cyan('Switch:') + ' ic config set-app <app-name>')
+    print()
 
 
 @get.command('releases')
@@ -214,18 +273,65 @@ def describe_release(name, logs):
 def config(ctx):
     """Show or modify configuration."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['config'])
+        from cli.db import check_db, sql
+        from cli.formatting import bold, cyan, section_header
+        section_header('Current Configuration')
+        print()
+        print(bold('Environment:'))
+        print('  Namespace: {}'.format(cyan(cfg.NAMESPACE)))
+        print('  Application: {}'.format(cyan(cfg.APPLICATION_NAME)))
+        print('  Config: {}/.env'.format(cfg.PROJECT_DIR))
+        print()
+        if check_db():
+            print(bold('Database:'))
+            print('  Failures: {}'.format(sql('SELECT COUNT(*) FROM build_failures;')))
+            print('  Components: {}'.format(sql('SELECT COUNT(DISTINCT component_name) FROM build_failures;')))
+            print()
+        print(cyan('Commands:'))
+        print('  ic config set-app <app>  # Change application')
+        print('  ic get apps              # List applications')
+        print()
 
 
 @config.command('set-app')
 @click.argument('app_name')
-@click.argument('namespace', required=False, default='')
-def config_set_app(app_name, namespace):
+@click.option('--force', '-f', is_flag=True, help='Set even if not in DB')
+def config_set_app(app_name, force):
     """Set active application."""
-    args = ['config', 'set-app', app_name]
-    if namespace:
-        args.append(namespace)
-    _bash_fallback(args)
+    from cli.db import check_db, sql
+    from cli.formatting import cyan, green, red
+    if check_db():
+        in_db = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app_name))
+        if (in_db == '0' or in_db is None) and not force:
+            print(red("Error: Application '{}' not found in database".format(app_name)))
+            print()
+            _bash_fallback(['get', 'apps'])
+            return
+    env_file = os.path.join(str(cfg.PROJECT_DIR), '.env')
+    lines = []
+    found = False
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith('APPLICATION_NAME='):
+                    lines.append('APPLICATION_NAME={}\n'.format(app_name))
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append('APPLICATION_NAME={}\n'.format(app_name))
+    with open(env_file, 'w') as f:
+        f.writelines(lines)
+    cfg.APPLICATION_NAME = app_name
+    os.environ['APPLICATION_NAME'] = app_name
+    print(green('✓ Application set to: ') + cyan(app_name))
+    if check_db():
+        has_cache = sql("SELECT COUNT(*) FROM sync_status WHERE application = '{}';".format(app_name))
+        if has_cache == '0' or has_cache is None:
+            print('  No cached data yet. Run {} to sync.'.format(cyan('ic get components -r')))
+        else:
+            print('  Cached sync data available. Run {} to view.'.format(cyan('ic get components')))
+    print()
 
 
 # --- stats group ---
@@ -344,35 +450,227 @@ def ai_stats(fixes):
 @cli.command()
 def triage():
     """Currently failing components overview."""
-    _bash_fallback(['triage'])
+    from cli.db import require_db, sql, sql_table
+    from cli.formatting import bold, cyan, green, red, section_header
+    if not require_db():
+        return
+    app = cfg.APPLICATION_NAME
+    section_header('Triage Dashboard')
+    print()
+    total = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app))
+    failing = sql("""
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name, status, is_resolved
+            FROM build_failures WHERE application = '{}'
+            ORDER BY component_name, first_detected_at DESC
+        ) s WHERE status = 'Failed' AND is_resolved = FALSE;
+    """.format(app))
+    working_count = sql("""
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT ON (component_name) component_name, status
+            FROM build_failures WHERE application = '{}'
+            ORDER BY component_name, first_detected_at DESC
+        ) s WHERE status = 'Succeeded';
+    """.format(app))
+    print(bold('Overview:'))
+    print('  Total build records: {}'.format(total))
+    print('  Currently failing: {}'.format(red(str(failing))))
+    print('  Currently working: {}'.format(green(str(working_count))))
+    print()
+    print(bold(red('Currently Failing Components:')))
+    sql_table("""
+    WITH latest_builds AS (
+        SELECT DISTINCT ON (component_name)
+            component_name, pipelinerun_name, status,
+            first_detected_at, build_logs IS NOT NULL as has_logs
+        FROM build_failures WHERE application = '{app}'
+        ORDER BY component_name, first_detected_at DESC
+    )
+    SELECT
+        component_name as "Component",
+        first_detected_at::date as "Last Failure",
+        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as "Has Logs"
+    FROM latest_builds WHERE status = 'Failed'
+    ORDER BY first_detected_at DESC;
+    """.format(app=app))
+    print()
+    print(cyan('Next Steps:'))
+    print('  1. Pick a component from above')
+    print('  2. Run: {} for full details'.format(bold('ic describe component <name>')))
+    print('  3. Run: {} for complete logs'.format(bold('ic describe component <name> --log')))
+    print('  4. Use: {} to see components that are currently working'.format(bold('ic working')))
+    print()
 
 
 @cli.command()
 def resolved():
     """Resolved components."""
-    _bash_fallback(['resolved'])
+    from cli.db import require_db, sql_table
+    from cli.formatting import cyan, section_header
+    if not require_db():
+        return
+    section_header('Resolved Components')
+    print()
+    sql_table("""
+    SELECT DISTINCT
+        component_name as "Component",
+        MAX(resolved_at) as "Resolved At",
+        COUNT(*) as "Failures Fixed"
+    FROM build_failures
+    WHERE is_resolved = TRUE AND application = '{app}'
+    GROUP BY component_name
+    ORDER BY MAX(resolved_at) DESC;
+    """.format(app=cfg.APPLICATION_NAME))
+    print()
+    print(cyan('Tip:') + " Use 'ic history <component>' to see full history")
+    print()
 
 
 @cli.command()
 def working():
     """Components currently working."""
-    _bash_fallback(['working'])
+    from cli.db import require_db, sql_table
+    from cli.formatting import bold, cyan, green, section_header
+    if not require_db():
+        return
+    section_header('Currently Working Components')
+    print()
+    print(bold(green('Components with last build = Succeeded:')))
+    sql_table("""
+    WITH latest_builds AS (
+        SELECT DISTINCT ON (component_name)
+            component_name, pipelinerun_name, status,
+            commit_short_sha, commit_message, first_detected_at
+        FROM build_failures WHERE application = '{app}'
+        ORDER BY component_name, first_detected_at DESC
+    )
+    SELECT
+        component_name as "Component",
+        LEFT(commit_short_sha, 8) as "Commit",
+        LEFT(commit_message, 50) as "Message",
+        first_detected_at::date as "Last Build"
+    FROM latest_builds WHERE status = 'Succeeded'
+    ORDER BY first_detected_at DESC;
+    """.format(app=cfg.APPLICATION_NAME))
+    print()
+    print(cyan('Links:'))
+    print('  Use: {} to see full build history'.format(bold('ic history <component>')))
+    print('  Use: {} to see currently failing components'.format(bold('ic triage')))
+    print()
 
 
 @cli.command()
 @click.argument('component', required=False)
 def history(component):
     """Build history for a component."""
-    args = ['history']
-    if component:
-        args.append(component)
-    _bash_fallback(args)
+    if not component:
+        from cli.formatting import red
+        print(red('Error: Component name required'))
+        print('Usage: ic history <component-name>')
+        raise SystemExit(1)
+    from cli.db import require_db, sql, sql_table
+    from cli.formatting import bold, cyan, green, red, section_header
+    if not require_db():
+        return
+    app = cfg.APPLICATION_NAME
+    section_header('History: {}'.format(component))
+    print()
+    sql_table("""
+    SELECT
+        COUNT(*) as "Total Builds",
+        SUM(CASE WHEN status = 'Failed' THEN 1 ELSE 0 END) as "Failures",
+        SUM(CASE WHEN status = 'Succeeded' THEN 1 ELSE 0 END) as "Successes",
+        SUM(CASE WHEN is_resolved = TRUE THEN 1 ELSE 0 END) as "Resolved"
+    FROM build_failures
+    WHERE component_name = '{comp}' AND application = '{app}';
+    """.format(comp=component, app=app))
+    print()
+    print(bold('Recent Builds (Last 20):'))
+    print()
+    sql_table("""
+    SELECT
+        pipelinerun_name as "PipelineRun",
+        status as "Status",
+        CASE WHEN is_resolved THEN '✓' ELSE '' END as "Resolved",
+        LEFT(commit_short_sha, 8) as "Commit",
+        first_detected_at as "Date"
+    FROM build_failures
+    WHERE component_name = '{comp}' AND application = '{app}'
+    ORDER BY first_detected_at DESC LIMIT 20;
+    """.format(comp=component, app=app))
+    print()
+    last_status = sql("""
+        SELECT status FROM build_failures
+        WHERE component_name = '{comp}' AND application = '{app}'
+        ORDER BY first_detected_at DESC LIMIT 1;
+    """.format(comp=component, app=app))
+    if last_status == 'Failed':
+        print(red('✗ Currently failing') + ' (last build: Failed)')
+        print('  Run: {} to investigate'.format(cyan('ic why {}'.format(component))))
+    elif last_status == 'Succeeded':
+        print(green('✓ Currently working') + ' (last build: Succeeded)')
+    else:
+        print('? Status unknown (last build: {})'.format(last_status))
+    print()
 
 
 @cli.command()
 def dashboard():
     """Full dashboard view."""
-    _bash_fallback(['dashboard'])
+    from datetime import datetime
+    from cli.db import require_db, sql
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    if not require_db():
+        return
+    app = cfg.APPLICATION_NAME
+    section_header('CI Auto-Healing Dashboard')
+    print('  Application: {}'.format(cyan(app)))
+    print('  Date: {}'.format(datetime.now().strftime('%Y-%m-%d %H:%M')))
+    print()
+
+    print(bold('Analysis Queue'))
+    bp = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND ai_analyzed = FALSE AND is_resolved = FALSE AND ai_skip_reason IS NULL;".format(app)) or '0'
+    cp = sql("SELECT COUNT(*) FROM conforma_results WHERE application = '{}' AND ai_analyzed = FALSE AND ai_skip_reason IS NULL;".format(app)) or '0'
+    bd = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND ai_analyzed = TRUE;".format(app)) or '0'
+    cd = sql("SELECT COUNT(*) FROM conforma_results WHERE application = '{}' AND ai_analyzed = TRUE;".format(app)) or '0'
+    print('  Build:    {} analyzed  {} pending'.format(green(bd), yellow(bp)))
+    print('  Conforma: {} analyzed  {} pending'.format(green(cd), yellow(cp)))
+    print()
+
+    print(bold('Enrichment Coverage'))
+    et = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND is_resolved = FALSE;".format(app)) or '0'
+    ee = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND enriched_context IS NOT NULL;".format(app)) or '0'
+    ef = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND enrichment_error IS NOT NULL;".format(app)) or '0'
+    epct = int(ee) * 100 // max(int(et), 1)
+    print('  Enriched: {} ({}%)  Failed: {}'.format(green('{}/{}'.format(ee, et)), epct, red(ef)))
+    print()
+
+    print(bold('Pattern Library'))
+    pt = sql("SELECT COUNT(*) FROM error_patterns;") or '0'
+    pw = sql("SELECT COUNT(*) FROM error_patterns WHERE avg_confidence IS NOT NULL;") or '0'
+    pa = sql("SELECT COALESCE(ROUND(AVG(avg_confidence)::numeric * 100), 0) FROM error_patterns;") or '0'
+    po = sql("SELECT COALESCE(SUM(occurrence_count), 0) FROM error_patterns;") or '0'
+    print('  Patterns: {} total ({} with confidence data)'.format(pt, pw))
+    print('  Avg confidence: {}  Total occurrences: {}'.format(cyan('{}%'.format(pa)), po))
+    print()
+
+    print(bold('Fix Outcomes (last 30 days)'))
+    ft = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days';") or '0'
+    fs = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful = TRUE;") or '0'
+    ff = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful = FALSE;") or '0'
+    fp = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful IS NULL AND status = 'pr_created';") or '0'
+    resolved_count = int(fs) + int(ff)
+    frate = int(fs) * 100 // max(resolved_count, 1)
+    print('  Total: {}  {} Success: {}  {} Failed: {}  Pending: {}'.format(ft, '', green(fs), '', red(ff), fp))
+    print('  Success rate: {}'.format(cyan('{}%'.format(frate))))
+    print()
+
+    print(bold('API Costs (last 30 days)'))
+    ca = sql("SELECT COUNT(*) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0'
+    ct = sql("SELECT COALESCE(SUM(tokens_used), 0) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0'
+    cc = sql("SELECT ROUND(COALESCE(SUM(cost_usd), 0)::numeric, 2) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0.00'
+    print('  Analyses: {}  Tokens: {}  Cost: {}'.format(ca, ct, cyan('${}'.format(cc))))
+    print()
 
 
 @cli.command()
