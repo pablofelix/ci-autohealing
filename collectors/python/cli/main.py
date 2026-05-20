@@ -1327,4 +1327,7 @@ def main():
         args = ['conforma', 'scenarios'] + args[1:]
         sys.argv = [sys.argv[0]] + args
 
-    cli(standalone_mode=False)
+    try:
+        cli(standalone_mode=False)
+    except click.exceptions.UsageError:
+        _bash_fallback(args)
