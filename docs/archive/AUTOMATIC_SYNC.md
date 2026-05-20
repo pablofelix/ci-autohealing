@@ -377,11 +377,11 @@ ls -lht logs/cron/ | head -3
 PROJECT_DIR/cron/collect-comprehensive.sh
 
 # Solo comprehensive collector
-cd collectors/python
+cd src
 python3 collect_comprehensive.py --limit 3
 
 # Solo sync
-cd collectors/python
+cd src
 python3 sync_component_status.py
 ```
 
@@ -430,7 +430,7 @@ ls -lht logs/cron/ | head -5
 ./ic stats
 
 # Check sync funciona
-cd collectors/python && python3 sync_component_status.py
+cd src && python3 sync_component_status.py
 ```
 
 ### Manual Collection
@@ -440,11 +440,11 @@ cd collectors/python && python3 sync_component_status.py
 PROJECT_DIR/cron/collect-comprehensive.sh
 
 # Collector only
-cd collectors/python
+cd src
 python3 collect_comprehensive.py
 
 # Sync only
-cd collectors/python
+cd src
 python3 sync_component_status.py
 ```
 

@@ -238,7 +238,7 @@ ic history <component-name>
 ### Análisis Manual
 ```bash
 # Usar herramienta Python directamente
-python3 collectors/python/pipelinerun_details.py <pipelinerun-name>
+python3 src/pipelinerun_details.py <pipelinerun-name>
 
 # Output JSON con todos los detalles
 {

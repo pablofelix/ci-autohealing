@@ -10,7 +10,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PYTHON_DIR="$PROJECT_DIR/collectors/python"
+PYTHON_DIR="$PROJECT_DIR/src"
 LOG_DIR="$PROJECT_DIR/logs/cron"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 

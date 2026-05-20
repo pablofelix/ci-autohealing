@@ -45,7 +45,7 @@ PipelineRun: `odh-trustyai-nemo-guardrails-server-v3-4-ea-1-on-push-nkwtw` (buil
 
 ## Implementación Actual
 
-Archivo: `collectors/python/clients/pipelinerun_query.py`
+Archivo: `src/clients/pipelinerun_query.py`
 
 ```python
 def query_pipelineruns(namespace, label_selector,
@@ -105,7 +105,7 @@ def query_pipelineruns(namespace, label_selector,
 - 🔒 Requiere autenticación (OpenShift token)
 - 📊 Limit de 500 items por página
 
-**Cliente:** `collectors/python/clients/kubearchive.py`
+**Cliente:** `src/clients/kubearchive.py`
 
 ### K8s API (vía `oc`)
 
@@ -124,7 +124,7 @@ def query_pipelineruns(namespace, label_selector,
 - 🔒 Requiere autenticación (oc login)
 - 🐢 Lento si el pod no existe (timeout buscando)
 
-**Cliente:** `collectors/python/clients/kubernetes.py`
+**Cliente:** `src/clients/kubernetes.py`
 
 ## Conflux K8s API
 
@@ -140,7 +140,7 @@ def query_pipelineruns(namespace, label_selector,
 - ❌ TaskRuns
 - ❌ Logs
 
-**Cliente:** `collectors/python/clients/konflux_client.py`
+**Cliente:** `src/clients/konflux_client.py`
 
 ## Preguntas Frecuentes
 
@@ -223,16 +223,16 @@ NOTE: Shows components whose LATEST build failed.
 
 ## Archivos de Referencia
 
-- **Query combinado:** `collectors/python/clients/pipelinerun_query.py`
-- **KubeArchive client:** `collectors/python/clients/kubearchive.py`
-- **K8s client:** `collectors/python/clients/kubernetes.py`
-- **Konflux client:** `collectors/python/clients/konflux_client.py`
-- **Benchmark script:** `collectors/python/benchmark_api_speed.py`
+- **Query combinado:** `src/clients/pipelinerun_query.py`
+- **KubeArchive client:** `src/clients/kubearchive.py`
+- **K8s client:** `src/clients/kubernetes.py`
+- **Konflux client:** `src/clients/konflux_client.py`
+- **Benchmark script:** `src/benchmark_api_speed.py`
 
 ## Ejecución del Benchmark
 
 ```bash
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 
 # Test básico (query only)
 python3 benchmark_api_speed.py <component-name>

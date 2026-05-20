@@ -7,7 +7,7 @@ All notable changes to the CI Auto-Healing system.
 ### Fixed
 
 #### Critical Bug Fix: Container Name Prefix in KubeArchive
-**File**: `collectors/python/kubearchive_client.py:287`
+**File**: `src/kubearchive_client.py:287`
 
 - **Issue**: Logs were not being retrieved from KubeArchive due to incorrect container names
 - **Root Cause**: Tekton prefixes step names with `"step-"` when creating containers in Pods
@@ -125,7 +125,7 @@ ic triage                   # Triage dashboard
 
 ## Files Modified
 
-- `collectors/python/kubearchive_client.py` - Fixed container name prefix
+- `src/kubearchive_client.py` - Fixed container name prefix
 - `ic-current` - Added error context extraction and --log flag
 - `ic-current` - Updated help text with new options
 

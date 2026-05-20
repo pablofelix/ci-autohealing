@@ -225,8 +225,8 @@ python3 test_pipeline.py
    crontab -e
    
    # Add:
-   0 * * * * PROJECT_DIR/collectors/python/cron/batch_analysis.sh
-   */30 * * * * PROJECT_DIR/collectors/python/cron/enrich_context.sh
+   0 * * * * PROJECT_DIR/src/cron/batch_analysis.sh
+   */30 * * * * PROJECT_DIR/src/cron/enrich_context.sh
    ```
 
 4. **Monitor Queue Depth**

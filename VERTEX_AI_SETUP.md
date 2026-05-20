@@ -17,7 +17,7 @@ export ANTHROPIC_VERTEX_PROJECT_ID=itpc-gcp-ai-eng-claude
 ## Quick Test
 ```bash
 # List pending failures (no LLM call)
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 python3.11 -c "
 from config import CollectorConfig
 from analyzers.build_failure_analyzer import BuildFailureAnalyzer
@@ -33,7 +33,7 @@ for f in pending:
 ## Run AI Analysis
 ```bash
 # Analyze up to 5 failures (default)
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 ./analyze_failures.py
 
 # Or specify a limit

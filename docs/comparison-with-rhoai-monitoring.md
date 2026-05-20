@@ -56,7 +56,7 @@ for condition in conditions:
 
 **Repository:** `PROJECT_DIR`
 
-### Key Script: `collectors/python/collectors/build_failure_collector.py`
+### Key Script: `src/collectors/build_failure_collector.py`
 
 **Purpose:** Collect comprehensive build failure data for AI analysis
 
@@ -175,7 +175,7 @@ User mentioned: **7 failures in conforma for 3.5**
 Our system uses same ITS API approach as GitLab system. Need to verify:
 
 ```bash
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 python3 collectors/conforma_collector.py
 ```
 
@@ -276,7 +276,7 @@ curl -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 - `/tmp/rhoai-monitoring-compare/data/rhoai-component-data.yaml`
 
 **Our system:**
-- `PROJECT_DIR/collectors/python/collectors/build_failure_collector.py`
-- `PROJECT_DIR/collectors/python/clients/pipelinerun_query.py`
+- `PROJECT_DIR/src/collectors/build_failure_collector.py`
+- `PROJECT_DIR/src/clients/pipelinerun_query.py`
 - `PROJECT_DIR/.env`
 - `PROJECT_DIR/ic` (CLI tool)

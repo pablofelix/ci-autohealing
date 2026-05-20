@@ -154,7 +154,7 @@ All type checks pass with Python 3.6 compatibility.
 
 **Architecture:**
 ```
-collectors/python/
+src/
 ├── models.py           # Data models (immutable dataclasses)
 ├── config.py           # Configuration management
 ├── kubearchive_client.py # API client with session management

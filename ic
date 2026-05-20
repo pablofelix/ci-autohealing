@@ -181,7 +181,7 @@ fetch_gitlab_exceptions() {
 
     # Try K8s API first (faster, covers all 6 policies)
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[].value' | cut -d: -f1 | sort -u | tee "$cache_file"
         return
@@ -267,7 +267,7 @@ refresh_its_cache() {
     local cache_file="${cache_dir}/scenarios-${APPLICATION_NAME}"
     mkdir -p "$cache_dir"
     local its_json
-    its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$APPLICATION_NAME" 2>/dev/null || true)
+    its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$APPLICATION_NAME" 2>/dev/null || true)
     [ -z "$its_json" ] && return 1
     echo "$its_json" | jq -r '.scenarios[] | select(.policy_ref != "") | "\(.name)|\(.policy_ref | split("/") | last)|\(if .is_disabled then "disabled" else "active" end)"' > "$cache_file" 2>/dev/null
 }
@@ -286,7 +286,7 @@ fetch_k8s_exceptions_full() {
     fi
 
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[] | "\(.value)|\(.source_policy)|\(.gitlab_link)|\(.reference // "")"' | tee "$cache_file"
         return
@@ -463,7 +463,7 @@ fetch_expiring_exceptions() {
 
     # Try K8s API first (faster, covers all 6 policies)
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action expiring --name-filter rhoai --days "$days_window" 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action expiring --name-filter rhoai --days "$days_window" 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[] | "\(.days_left)|\(.effectiveUntil[:10])|\(.value)|\(.imageUrl // "")|\(.reference // "")|\(.source_policy)|\(.gitlab_link)"' | tee "$cache_file"
         return
@@ -899,7 +899,7 @@ trigger_background_sync() {
 
     (
         echo $$ > "$SYNC_PID_FILE"
-        cd "$SCRIPT_DIR/collectors/python"
+        cd "$SCRIPT_DIR/src"
         python3 check_sync_status.py > /dev/null 2>&1
         python3 check_conforma_status.py > /dev/null 2>&1
         # If out of sync, also launch collector
@@ -954,7 +954,7 @@ cmd_get_components() {
     # Force refresh if requested
     if [ "$refresh" = true ]; then
         echo -e "${CYAN}Refreshing sync status (querying KubeArchive)...${NC}"
-        python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
+        python3 "$SCRIPT_DIR/src/check_sync_status.py" > /dev/null 2>&1
 
         # If out of sync, also trigger comprehensive collection
         local refresh_sync=$(sql "SELECT in_sync FROM sync_status WHERE application = '$APPLICATION_NAME';" 2>/dev/null | tr -d ' ')
@@ -962,7 +962,7 @@ cmd_get_components() {
             echo -e "${CYAN}Out of sync — collecting missing component data...${NC}"
             "$SCRIPT_DIR/cron/collect-comprehensive.sh" > /dev/null 2>&1
             # Re-check sync after collection
-            python3 "$SCRIPT_DIR/collectors/python/check_sync_status.py" > /dev/null 2>&1
+            python3 "$SCRIPT_DIR/src/check_sync_status.py" > /dev/null 2>&1
         fi
 
         # Re-read cache
@@ -1420,7 +1420,7 @@ cmd_describe_component() {
         else
             echo -e "${CYAN}Fetching logs from cluster...${NC}"
             local fetch_result
-            fetch_result=$(cd "$SCRIPT_DIR/collectors/python" && timeout 45 python3 fetch_logs.py "$pr_name" 2>/dev/null)
+            fetch_result=$(cd "$SCRIPT_DIR/src" && timeout 45 python3 fetch_logs.py "$pr_name" 2>/dev/null)
             if [ $? -eq 0 ] && [ -n "$fetch_result" ]; then
                 local stored=$(echo "$fetch_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stored',False))" 2>/dev/null)
                 local log_len=$(echo "$fetch_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('logs_length',0))" 2>/dev/null)
@@ -1457,7 +1457,7 @@ cmd_describe_component() {
         # Build History from Tekton Results
         section_header "Build History (Tekton Results)"
         echo ""
-        local history=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 get_build_history.py "$component" --limit 8 --type build 2>/dev/null)
+        local history=$(cd "$SCRIPT_DIR/src" && python3.11 get_build_history.py "$component" --limit 8 --type build 2>/dev/null)
         if [ -n "$history" ]; then
             while IFS='|' read -r h_ts h_status h_commit h_failed_task h_image h_pr_name; do
                 h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
@@ -2055,7 +2055,7 @@ cmd_ai_analyze() {
         return 1
     fi
 
-    cd "$SCRIPT_DIR/collectors/python" || return 1
+    cd "$SCRIPT_DIR/src" || return 1
 
     if [ "$target" = "all" ]; then
         echo -e "${CYAN}Analyzing all pending failures and violations...${NC}"
@@ -2193,7 +2193,7 @@ cmd_ai_analyze_release() {
     echo -e "${CYAN}Analyzing release: $release_name${NC}"
     echo ""
 
-    cd "$SCRIPT_DIR/collectors/python" || return 1
+    cd "$SCRIPT_DIR/src" || return 1
 
     # Capture stderr (logs) separately from stdout (JSON)
     local log_file
@@ -2329,7 +2329,7 @@ cmd_ai_analyze_scenarios() {
     echo -e "${CYAN}Analyzing ITS scenario configuration: ${app_arg#--app }${NC}"
     echo ""
 
-    cd "$SCRIPT_DIR/collectors/python" || return 1
+    cd "$SCRIPT_DIR/src" || return 1
 
     local log_file
     log_file=$(mktemp)
@@ -2440,7 +2440,7 @@ cmd_ai_batch() {
         echo ""
     fi
 
-    cd "$SCRIPT_DIR/collectors/python" || return 1
+    cd "$SCRIPT_DIR/src" || return 1
     python3.11 analyze_batch.py $flags
 }
 
@@ -2707,7 +2707,7 @@ cmd_patterns() {
 cmd_patterns_learn() {
     echo -e "${BOLD}Discovering new patterns from repeated failures...${NC}"
     python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from repositories.error_pattern_repository import ErrorPatternRepository
@@ -2728,7 +2728,7 @@ else:
 cmd_patterns_stale() {
     echo -e "${BOLD}Stale patterns (unused 90+ days or low accuracy):${NC}"
     python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from repositories.error_pattern_repository import ErrorPatternRepository
@@ -2753,7 +2753,7 @@ cmd_patterns_shared() {
     if [ -n "$app_filter" ]; then
         echo -e "Patterns seen in ${CYAN}${app_filter}${NC} (with cross-app context):"
         python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from repositories.error_pattern_repository import ErrorPatternRepository
@@ -2775,7 +2775,7 @@ else:
     else
         echo "Patterns appearing across multiple applications:"
         python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from repositories.error_pattern_repository import ErrorPatternRepository
@@ -3036,7 +3036,7 @@ cmd_health_overview() {
     echo ""
 
     python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from proactive.health_monitor import HealthMonitor
@@ -3086,7 +3086,7 @@ cmd_health_warnings() {
     echo ""
 
     python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from proactive.health_monitor import HealthMonitor
@@ -3193,7 +3193,7 @@ cmd_alerts_check() {
     # Check component health warnings
     local hw
     hw=$(python3.11 -c "
-import sys; sys.path.insert(0, '$SCRIPT_DIR/collectors/python')
+import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
 from proactive.health_monitor import HealthMonitor
@@ -4030,7 +4030,7 @@ cmd_get_conforma() {
 
     if [ "$refresh" = true ]; then
         echo -e "${CYAN}Refreshing Conforma status (querying KubeArchive)...${NC}"
-        cd "$SCRIPT_DIR/collectors/python" && python3 check_conforma_status.py > /dev/null 2>&1
+        cd "$SCRIPT_DIR/src" && python3 check_conforma_status.py > /dev/null 2>&1
         python3 collect_conforma.py > /dev/null 2>&1
         cd "$SCRIPT_DIR"
     fi
@@ -4630,7 +4630,7 @@ cmd_get_alerts() {
 
     if [ "$refresh" = true ]; then
         echo -e "${CYAN}Refreshing builds and conforma (last 5 days)...${NC}"
-        cd "$SCRIPT_DIR/collectors/python"
+        cd "$SCRIPT_DIR/src"
 
         local sync_out_file=$(mktemp)
         local conforma_log=$(mktemp)
@@ -4819,7 +4819,7 @@ cmd_get_bindings() {
     section_header "RPA → EC Policy Bindings (rhoai)"
 
     local bindings_json
-    bindings_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 ec_policy_data.py --action bindings --name-filter rhoai 2>/dev/null || true)
+    bindings_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action bindings --name-filter rhoai 2>/dev/null || true)
 
     if [ -z "$bindings_json" ] || ! echo "$bindings_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo -e "${RED}Error: Could not fetch RPA bindings (oc login required)${NC}"
@@ -6214,7 +6214,7 @@ cmd_conforma_history() {
     echo ""
     echo -e "${BOLD}Conforma Test History (Tekton Results):${NC}"
     echo ""
-    local conforma_hist=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
+    local conforma_hist=$(cd "$SCRIPT_DIR/src" && python3.11 get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
     if [ -n "$conforma_hist" ]; then
         while IFS='|' read -r h_ts h_status h_scenario h_pr_name; do
             h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
@@ -7213,7 +7213,7 @@ cmd_release_status() {
     if [ "$stage_done" -eq "$stage_total" ] && [ "$prod_done" -eq "$prod_total" ] && \
        klist -s 2>/dev/null; then
         local advisory_output
-        advisory_output=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 advisory_status.py --target prod --page-size 5 2>/dev/null)
+        advisory_output=$(cd "$SCRIPT_DIR/src" && python3.11 advisory_status.py --target prod --page-size 5 2>/dev/null)
         if [ -n "$advisory_output" ]; then
             local adv_count
             adv_count=$(printf '%s\n' "$advisory_output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',0))" 2>/dev/null)
@@ -7385,7 +7385,7 @@ cmd_release_verify() {
     _release_require_kinit || return 1
 
     local output
-    output=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 verify_release.py --release "$name" --namespace "$NAMESPACE" 2>/dev/null)
+    output=$(cd "$SCRIPT_DIR/src" && python3.11 verify_release.py --release "$name" --namespace "$NAMESPACE" 2>/dev/null)
 
     if [ -z "$output" ]; then
         echo -e "${RED}Error: Pyxis verification failed.${NC}"
@@ -7474,11 +7474,11 @@ cmd_scenarios() {
 
     local its_json
     if $show_all; then
-        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action "$action" --namespace "$NAMESPACE" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action "$action" --namespace "$NAMESPACE" 2>/dev/null || true)
     elif [ "$action" = "gaps" ]; then
-        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action gaps --namespace "$NAMESPACE" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action gaps --namespace "$NAMESPACE" 2>/dev/null || true)
     else
-        its_json=$(cd "$SCRIPT_DIR/collectors/python" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$app_filter" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$app_filter" 2>/dev/null || true)
     fi
 
     if [ -z "$its_json" ] || [ "$(echo "$its_json" | jq -r '.source // empty' 2>/dev/null)" = "error" ]; then
@@ -7711,7 +7711,7 @@ cmd_jira_inbox() {
         local jira_key comment_id
         jira_key=$(echo "$target" | cut -d'|' -f1 | xargs)
         comment_id=$(echo "$target" | cut -d'|' -f2 | xargs)
-        python3.11 "$SCRIPT_DIR/collectors/python/jira_refine.py" "$jira_key" "$comment_id"
+        python3.11 "$SCRIPT_DIR/src/jira_refine.py" "$jira_key" "$comment_id"
         return
     fi
 
@@ -8034,7 +8034,7 @@ cmd_fix() {
         echo ""
         local jira_summary="Conforma violation: ${component} — ${error_type:-unknown} scenario (${failed_step:-0} violations)"
         export_jira "$component" "$export_type" | \
-            python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+            python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                 --mode jira \
                 --component "$component" \
                 --summary "$jira_summary"
@@ -8047,7 +8047,7 @@ cmd_fix() {
             read -r pr_choice
             if [ "$pr_choice" = "y" ] || [ "$pr_choice" = "Y" ]; then
                 echo ""
-                python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                     --mode pr \
                     --component "$component" \
                     --conforma-id "$failure_id" \
@@ -8058,7 +8058,7 @@ cmd_fix() {
                     printf "Push this PR to GitHub? [y/N]: "
                     read -r push_choice
                     if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
-                        python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                        python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                             --mode pr \
                             --component "$component" \
                             --conforma-id "$failure_id" \
@@ -8093,7 +8093,7 @@ cmd_fix() {
         case "$choice" in
             1)
                 echo ""
-                python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                     --mode pr \
                     --component "$component" \
                     --failure-id "$failure_id" \
@@ -8104,7 +8104,7 @@ cmd_fix() {
                     printf "Create this PR on GitHub? [y/N]: "
                     read -r push_choice
                     if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
-                        python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                        python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                             --mode pr \
                             --component "$component" \
                             --failure-id "$failure_id" \
@@ -8117,7 +8117,7 @@ cmd_fix() {
                 echo ""
                 local jira_summary="Build failure: ${component} — ${error_type:-unknown} in ${failed_step:-unknown}"
                 export_jira "$component" "$export_type" | \
-                    python3.11 "$SCRIPT_DIR/collectors/python/fixers/fix_generator.py" \
+                    python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                         --mode jira \
                         --component "$component" \
                         --summary "$jira_summary"

@@ -20,7 +20,7 @@
 5. Only parse logs for actual `Failed` status
 
 **Files Modified:**
-- `PROJECT_DIR/collectors/python/collectors/build_failure_collector.py`
+- `PROJECT_DIR/src/collectors/build_failure_collector.py`
 
 **Impact:**
 - AI analysis now correctly identifies timeout issues
@@ -51,7 +51,7 @@ Root cause: The pipeline timed out, but the build logs show both the x86-64 and
 **Test Results:**
 ```bash
 # Re-collect the failure
-python3 collectors/python/collectors/build_failure_collector.py
+python3 src/collectors/build_failure_collector.py
 
 # Verify DB
 SELECT error_message, error_type FROM build_failures 

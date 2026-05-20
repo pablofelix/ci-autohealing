@@ -9,7 +9,7 @@ Usage: /triage-build [component-name]
 
 ## Instructions
 
-You are triaging Konflux CI/CD **build failures** for the RHOAI project. Follow this workflow step by step. Use the `ic` CLI tool for ALL data — never hardcode or guess failure data.
+You are triaging Konflux CI/CD **build failures** for the RHOAI project. Your primary goal is to **find the root cause and solution** for each failure, not just classify them. Use the `ic` CLI tool for ALL data — never hardcode or guess failure data.
 
 The working directory is: PROJECT_DIR
 
@@ -41,53 +41,68 @@ Present a brief summary:
 - Z failures already have Jira tickets
 ```
 
-### Step 2: Investigate each build failure
+### Step 2: Investigate each build failure in depth
 
-For each build failure from the alert list, gather data using these `ic` commands. Run them in parallel where possible.
+For each build failure, gather data using ALL relevant `ic` commands. Run them in parallel where possible. The goal is to understand the failure deeply enough to suggest a concrete fix.
+
+**Core investigation commands (run for every failure):**
 
 ```bash
-./ic <N> 2>/dev/null                         # Full component details + build history
-./ic describe component <name> 2>/dev/null   # Detailed component info
-./ic describe component <name> --log 2>/dev/null  # Complete logs if needed
+./ic <N> 2>/dev/null                          # Full component details + build history + logs
+./ic history <component-name> 2>/dev/null     # Full build history (when did it start failing? was it ever green?)
 ```
 
-Key data to extract per failure:
+**Key data to extract per failure:**
 - Failed step (e.g., init-task, fips-check, build-images)
 - Error message from logs
-- How long it's been failing (build history timeline)
-- Whether logs are available
+- How long it's been failing (build history timeline — is this new or chronic?)
+- Whether it was ever green (important for new components vs regressions)
 - Whether AI analysis exists
 - Whether it already has a Jira ticket
+- What commit triggered the failure (look at the commit message for clues)
 
-### Step 3: Get AI analysis
+**When you need more detail on the error:**
+```bash
+./ic describe component <name> --log 2>/dev/null   # Complete logs (not just error context)
+```
 
-Check what analysis already exists:
+### Step 3: Run AI analysis for EVERY failure that doesn't have it
+
+This is critical — don't just note "AI analysis not available" and move on. Proactively generate analysis.
+
+First, check what analysis already exists:
 ```bash
 ./ic ai status 2>/dev/null
 ```
 
-For failures that have AI analysis, query the full recommended fix:
+**For each failure WITHOUT analysis — run it immediately:**
+```bash
+./ic ai analyze <component-name> 2>/dev/null
+```
+
+Run multiple `ic ai analyze` calls in parallel for different components to save time.
+
+**For failures that have AI analysis, query the full details:**
 ```bash
 ./ic db query "SELECT component_name, failure_category, confidence_score, root_cause, recommended_fix, can_auto_fix FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.component_name = '<component>' ORDER BY a.created_at DESC LIMIT 1" 2>/dev/null
 ```
 
-For failures WITHOUT analysis that have logs available:
-- Run `./ic ai analyze <component>` to generate analysis
-- Then query the results as above
+**For failures without logs:** Try to fetch them on-demand first:
+```bash
+cd src && python3 fetch_logs.py <pipelinerun-name> 2>/dev/null
+```
+Then run AI analysis. Only skip if log fetching also fails.
 
-For failures without logs: note them as "needs log collection" — do NOT run AI analysis on them.
+### Step 4: Synthesize the solution for each failure
 
-### Step 4: Assess each failure
+For each failure, combine all the evidence (logs, AI analysis, build history, commit info) to produce:
 
-For each failure, classify it:
+1. **Root cause** — What specifically is broken and why
+2. **Solution** — Concrete steps to fix it (not just "investigate further")
+3. **Confidence** — How sure are we about this diagnosis
+4. **Who should fix it** — Is this an infra issue, a code issue, or a config issue?
 
-| Classification | Criteria | Suggested Action |
-|---|---|---|
-| **Actionable — PR** | AI confidence >= 80%, can_auto_fix = true | Generate PR fix |
-| **Actionable — Jira** | AI confidence >= 70%, clear root cause, not auto-fixable | Create Jira ticket |
-| **Needs investigation** | AI confidence < 60%, or no analysis, or no logs | Manual investigation needed |
-| **Already covered** | Has Jira ticket linked | Note as covered, skip |
-| **Transient** | AI says infrastructure/retry, already resolved | Skip |
+Group failures by shared root cause — don't repeat the same analysis 5 times for 5 components with the same fips-check failure.
 
 ### Step 5: Present the assessment
 
@@ -96,17 +111,18 @@ Show a summary table:
 ```
 ## Build Triage Assessment
 
-| # | Component | Failed Step | Root Cause | AI Conf. | Action |
-|---|-----------|-------------|------------|----------|--------|
-| 1 | comp-a    | init-task  | SA missing | — | Needs logs |
-| 2 | comp-b    | fips-check  | base image | 90% | Jira ticket |
+| # | Component | Failed Step | Root Cause | AI Conf. | Solution |
+|---|-----------|-------------|------------|----------|----------|
+| 1 | comp-a    | init-task  | SA missing | 90% | Create SA in namespace |
+| 2 | comp-b    | fips-check  | base image | 85% | Update base image digest |
 | ...
 ```
 
-Then for each actionable failure, briefly explain:
-- What the root cause is
-- What the fix would be
-- Risk level (high confidence = low risk)
+Then for each failure (or group), provide a **detailed diagnosis**:
+- What the root cause is (with evidence from logs/AI)
+- What the concrete fix would be
+- Whether this is a regression (it used to work) or a new component issue
+- Whether a retry/retrigger might fix it (transient vs persistent)
 
 ### Step 6: Ask user what to do
 
@@ -115,7 +131,7 @@ Use AskUserQuestion to ask the user what actions to take. Group related failures
 For each actionable failure (or group), present these options:
 - **Create Jira ticket** — generate with `ic export <component> jira`
 - **Send Slack message** — generate with `ic export <component> slack`
-- **Generate PR fix** — suggest user runs `./ic fix <N>`
+- **Retrigger build** — suggest user retriggers if analysis indicates transient issue
 - **Skip** — move on
 
 **Show-then-confirm pattern for Jira and Slack:**
@@ -127,10 +143,6 @@ When the user selects "Create Jira ticket" or "Send Slack message":
 4. If edit: ask what to change, apply, show again, re-ask
 5. If send: show the formatted content for the user to copy
 
-When the user selects "Generate PR fix":
-- Note that `ic fix <N>` is interactive — suggest the user run it directly
-- Explain what it will do (dry-run diff, then ask to push)
-
 ### Step 7: Summary
 
 After processing all failures, show:
@@ -138,23 +150,27 @@ After processing all failures, show:
 ```
 ## Build Triage Complete
 
+Diagnosed:
+- Group A (fips-check, 5 components): [root cause + solution]
+- Group B (build-images, 1 component): [root cause + solution]
+
 Actions taken:
 - Jira content generated for: comp-a, comp-b
 - Slack messages generated for: comp-c
-- PR fix suggested for: comp-d (run: ./ic fix 2)
 
 Still pending:
-- comp-e: needs log collection first
-- comp-f: needs manual investigation (low AI confidence)
+- comp-e: needs manual investigation (reason)
 
 Next steps:
-- Collect logs: cd collectors/python && python3.11 fetch_archived_logs.py
-- Run pending AI analysis: ./ic ai analyze --all
+- [Specific actionable items based on the diagnosis]
 ```
 
 ## Notes
 
 - ALL failure data must come from `ic` commands — never hardcode or invent data
 - Do NOT create PRs or send Jira tickets automatically — always show and let user decide
-- Do NOT run `ic fix` directly — it's interactive, suggest user runs it
-- When multiple failures share a root cause, present them together with a single action
+- The goal is to FIND THE SOLUTION, not just classify failures
+- Run `ic ai analyze` proactively for any failure missing analysis — don't just report it's missing
+- When multiple failures share a root cause, investigate one deeply and apply findings to the group
+- Use `ic history <component>` to understand whether this is a regression or a chronic issue
+- Use the AI analysis `recommended_fix` field — it often contains the specific fix steps

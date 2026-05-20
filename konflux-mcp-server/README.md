@@ -16,7 +16,7 @@ Allows external AI agents (Claude Desktop, GitHub Copilot, Cursor, etc.) to quer
 **Design:** Application-agnostic, stateless tools
 - Each tool accepts `application` parameter (multi-version support)
 - No `CollectorConfig` dependency (reads DB config from env vars)
-- Reuses existing repositories from `collectors/python/repositories`
+- Reuses existing repositories from `src/repositories`
 - Pydantic response models (validated outputs)
 - Read-only (no orchestration, no writes)
 
@@ -453,6 +453,6 @@ pytest -v
 ```
 
 **See also:**
-- [collectors/python/docs/ARCHITECTURE.md](../collectors/python/docs/ARCHITECTURE.md) - Full system architecture
+- [src/docs/ARCHITECTURE.md](../src/docs/ARCHITECTURE.md) - Full system architecture
 - [docs/ROADMAP.md](../docs/ROADMAP.md) - Phase 1.7 MCP Server details
 - [STYLE.md](../STYLE.md) - Code style guide

@@ -32,7 +32,7 @@ logger = setup_logger(__name__)
 REFINER_PROMPT  = load_prompt('jira_reply_refiner')
 ANALYZER_PROMPT = load_prompt('jira_prompt_analyzer')
 
-PROMPTS_DIR = Path(__file__).parent.parent.parent / 'prompts'
+PROMPTS_DIR = Path(__file__).parent.parent / 'prompts'
 DRAFTER_FILE = PROMPTS_DIR / 'jira_reply_drafter.md'
 
 WIDTH = 72

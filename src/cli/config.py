@@ -3,8 +3,8 @@
 import os
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
-PYTHON_DIR = PROJECT_DIR / 'collectors' / 'python'
+PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
+PYTHON_DIR = PROJECT_DIR / 'src'
 
 NAMESPACE = os.environ.get('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
 APPLICATION_NAME = os.environ.get('APPLICATION_NAME', 'acme-v2-0')

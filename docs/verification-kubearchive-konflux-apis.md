@@ -112,22 +112,22 @@ All 34 components have:
 1. **KubeArchive** (primary for PipelineRuns):
    - URL: `https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN`
    - Purpose: Historical PipelineRun/TaskRun data
-   - Implementation: `collectors/python/clients/kubearchive.py`
+   - Implementation: `src/clients/kubearchive.py`
 
 2. **Kubernetes REST API** (via `oc`):
    - URL: Auto-discovered from `oc whoami --show-server`
    - Purpose: Live cluster state (Applications, Components, current PipelineRuns)
-   - Implementation: `collectors/python/clients/kubernetes.py`
+   - Implementation: `src/clients/kubernetes.py`
 
 3. **Konflux K8s API** (for EC policies):
    - URL: Same as K8s API + `/apis/appstudio.redhat.com/v1alpha1`
    - Purpose: EnterpriseContractPolicy CRDs, ReleasePlanAdmission CRDs
-   - Implementation: `collectors/python/clients/konflux_client.py`
+   - Implementation: `src/clients/konflux_client.py`
 
 4. **ITS (Integration Test Scenarios)**:
    - URL: Embedded in PipelineRun annotations
    - Purpose: Detailed test scenario results for conforma
-   - Implementation: `collectors/python/its_scenario_data.py`
+   - Implementation: `src/its_scenario_data.py`
 
 ### No Direct "Konflux API" for Builds
 

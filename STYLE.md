@@ -111,7 +111,7 @@ A reader should understand what a function does from its name alone, without rea
 ## Module Structure
 
 ```
-collectors/python/
+src/
     config.py                  # Frozen dataclasses for configuration
     models.py                  # Domain types (dataclasses, enums)
     exceptions.py              # Exception hierarchy
@@ -370,7 +370,7 @@ result=$(python3 lib/parse_exceptions.py <<< "$yaml_content")
 
 **Where to put extracted scripts:**
 - Data transformation helpers → `lib/` directory (new)
-- Domain logic → `collectors/python/` (existing)
+- Domain logic → `src/` (existing)
 
 ### No Inline SQL
 

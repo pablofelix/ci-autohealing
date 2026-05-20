@@ -108,7 +108,7 @@ If you want to force a sync without running `ic get components`:
 ./cron/collect-comprehensive.sh
 
 # Or just check status
-python3 collectors/python/check_sync_status.py | jq
+python3 src/check_sync_status.py | jq
 ```
 
 ---
@@ -165,7 +165,7 @@ This:
 ## Technical Details
 
 ### Files Involved
-- `collectors/python/check_sync_status.py` - Sync detection script
+- `src/check_sync_status.py` - Sync detection script
 - `ic` (cmd_get_components) - Modified to call sync check
 - `cron/collect-comprehensive.sh` - Auto-launched when out of sync
 
@@ -314,7 +314,7 @@ Then it will only show the sync status without auto-fixing.
 
 ### Change Sync Behavior
 
-Edit `collectors/python/check_sync_status.py` to customize:
+Edit `src/check_sync_status.py` to customize:
 - Which components to include
 - Sync criteria
 - Error handling

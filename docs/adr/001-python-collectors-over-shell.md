@@ -9,7 +9,7 @@ The initial implementation used bash shell scripts for collecting PipelineRun da
 
 ## Decision
 
-Replace all shell-based collectors with Python modules under `collectors/python/`. Shell scripts in `collectors/` are deprecated and removed.
+Replace all shell-based collectors with Python modules under `src/`. Shell scripts in `collectors/` are deprecated and removed.
 
 ## Consequences
 

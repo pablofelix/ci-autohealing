@@ -74,7 +74,7 @@ Most failures are 2+ days old:
 
 ### Core System
 
-**Python Collectors** (`collectors/python/`):
+**Python Collectors** (`src/`):
 - ✅ `collect_comprehensive.py` - Main collector with multi-API support
 - ✅ `sync_component_status.py` - Status synchronization
 - ✅ `unified_collector.py` - Multi-API orchestrator

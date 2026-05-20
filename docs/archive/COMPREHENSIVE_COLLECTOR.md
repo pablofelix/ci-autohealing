@@ -51,7 +51,7 @@ The comprehensive collector (`collect_comprehensive.py`) is optimized for **prob
 ### Manual Run
 
 ```bash
-cd collectors/python
+cd src
 
 # Collect all components
 python3 collect_comprehensive.py

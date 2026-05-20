@@ -58,12 +58,12 @@ What was done:
 ### 1.1 Build failure analyzer (COMPLETE)
 
 **Files:**
-- `collectors/python/analyzers/build_failure_analyzer.py` - Orchestrator
-- `collectors/python/clients/llm_provider.py` - Provider ABC
-- `collectors/python/clients/vertex_ai_provider.py` - Vertex AI adapter
-- `collectors/python/clients/langfuse_tracker.py` - Langfuse tracking
-- `collectors/python/repositories/ai_analysis_repository.py` - Database operations
-- `collectors/python/analyze_failures.py` - Entry point
+- `src/analyzers/build_failure_analyzer.py` - Orchestrator
+- `src/clients/llm_provider.py` - Provider ABC
+- `src/clients/vertex_ai_provider.py` - Vertex AI adapter
+- `src/clients/langfuse_tracker.py` - Langfuse tracking
+- `src/repositories/ai_analysis_repository.py` - Database operations
+- `src/analyze_failures.py` - Entry point
 
 **Implementation:**
 - Provider-independent architecture (LLMProvider ABC) - swap providers by changing config
@@ -80,8 +80,8 @@ Failure categories: `dependency_issue`, `build_error`, `test_failure`, `resource
 ### 1.2 Conforma analyzer (COMPLETE)
 
 **Files:**
-- `collectors/python/analyzers/conforma_analyzer.py` - Conforma analysis orchestrator
-- `collectors/python/analyze_conforma.py` - Entry point
+- `src/analyzers/conforma_analyzer.py` - Conforma analysis orchestrator
+- `src/analyze_conforma.py` - Entry point
 - `db/migrations/003_add_conforma_analysis.sql` - Schema migration for unified ai_analysis table
 
 **Implementation:**
@@ -129,7 +129,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 1.5 Langfuse integration (COMPLETE)
 
-**File:** `collectors/python/clients/langfuse_tracker.py`
+**File:** `src/clients/langfuse_tracker.py`
 - Creates traces per analysis run, generations per Claude call
 - Records tokens, cost, duration
 - Links trace IDs to `ai_analysis.langfuse_trace_id`
@@ -200,7 +200,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 2.1 Fix generator (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py`
+**File:** `src/fixers/fix_generator.py`
 
 **Two modes:**
 - `--mode pr` — Claude generates JSON fix spec, files fetched from GitHub, diff shown, PR created with `--execute`
@@ -216,7 +216,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 2.2 GitHub client (COMPLETE)
 
-**File:** `collectors/python/clients/github_client.py`
+**File:** `src/clients/github_client.py`
 
 **Read operations:** `get_commit`, `get_file_content`, `get_directory_listing`, `get_pr_for_commit`, `get_commit_context`, `get_pull_request`, `check_rate_limit`
 
@@ -224,7 +224,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 2.3 Fix verification loop (COMPLETE)
 
-**File:** `collectors/python/fixers/verify_fixes.py`
+**File:** `src/fixers/verify_fixes.py`
 
 **Cron step 2.5** (after sync_component_status.py, only if `GITHUB_TOKEN` set):
 - Checks `resolution_attempts WHERE pr_merged IS NULL AND status='pr_created'`
@@ -235,7 +235,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 2.4 Resolution tracking (COMPLETE)
 
-**File:** `collectors/python/repositories/resolution_attempt_repository.py`
+**File:** `src/repositories/resolution_attempt_repository.py`
 
 **Table:** `resolution_attempts` — tracks all PR fix attempts for both build and conforma failures.
 - `record_pr_created()` — build failure PR, marks `build_failures.ai_fix_attempted=TRUE`
@@ -299,7 +299,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - `prompts/fix_generator_pr.md` — JSON spec format for PR generation
 - `prompts/fix_generator_jira.md` — Jira editor persona
 
-**Loader:** `collectors/python/prompt_loader.py`
+**Loader:** `src/prompt_loader.py`
 - Strips YAML frontmatter (`---` ... `---`) automatically
 - Fails fast at import time if prompt file missing (startup-time error, not runtime)
 - Used by all three analyzers: `SYSTEM_PROMPT = load_prompt('build_failure_analyzer')`
@@ -314,7 +314,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - FK from `ai_analysis.error_pattern_id` to `error_patterns`
 - **Seeded with 17 known patterns** (7 build categories + 10 conforma categories) including `typical_fix` text for each
 
-**Repository:** `collectors/python/repositories/error_pattern_repository.py`
+**Repository:** `src/repositories/error_pattern_repository.py`
 - `find_or_create(failure_type, failure_category)` — upsert on unique key
 - `record_occurrence(pattern_id, confidence_score)` — increments count, updates rolling avg_confidence
 - `update_doc_context(pattern_id, doc_context)` — stores fetched doc excerpt
@@ -327,7 +327,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### Doc context collector
 
-**File:** `collectors/python/collect_doc_context.py`
+**File:** `src/collect_doc_context.py`
 - Fetches Konflux (`https://konflux.pages.redhat.com/docs/users/`) and Conforma (`https://conforma.dev/docs/user-guide/`) documentation pages for patterns that have `doc_url` but missing/stale `doc_context`
 - Uses stdlib `urllib.request` + `html.parser` — no external deps
 - Cache: `/tmp/konflux-docs-cache/<md5(url)>.txt`, 7-day TTL
@@ -339,7 +339,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### Bug fix: `sync_component_status.py` phantom failures
 
-**File:** `collectors/python/collectors/status_synchronizer.py`
+**File:** `src/collectors/status_synchronizer.py`
 
 **Problem:** If `oc get component <name>` failed (component renamed, deleted, or cluster timeout), `run()` skipped the entire component with "Component not found in cluster" — it never called `get_current_status()`, so the failure stayed `is_resolved=FALSE` forever even if all builds had succeeded.
 
@@ -347,7 +347,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 2.7 Commit context collection (COMPLETE)
 
-**File:** `collectors/python/collect_commit_context.py`
+**File:** `src/collect_commit_context.py`
 
 **Cron step 6** (only if `GITHUB_TOKEN` set): fetches commit diff, Dockerfile, .tekton configs, and associated PR info for each unanalyzed failure. Stored in `build_failures` for richer AI context.
 
@@ -381,7 +381,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 ### 3.3 Conforma fix generator — policy_deprecated_task (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_pr_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_pr_mode`)
 
 **Deterministic fix (no LLM):**
 1. Load `conforma_results` + AI analysis from DB (`load_conforma_and_analysis`)
@@ -397,7 +397,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### 3.4.1 `policy_hermetic_build` (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_hermetic_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_hermetic_mode`)
 
 **Fix:** Set `hermetic: "true"` in `.tekton/*.yaml` pipeline params. Deterministic — no LLM call.
 
@@ -410,7 +410,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### 3.4.2 `policy_unpinned_task` (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_unpinned_task_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_unpinned_task_mode`)
 
 **Fix:** Find all floating `quay.io/repo:tag` refs (no `@sha256:`) across `.tekton/*.yaml`, resolve the current digest via quay.io v2 API (`GET /v2/{repo}/manifests/{tag}`, read `Docker-Content-Digest` header), and append `@sha256:<digest>`. Works independently of `violation_details` structure — uses registry API directly.
 
@@ -421,7 +421,7 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### 3.4.3 `policy_untrusted_image` (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_untrusted_image_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_untrusted_image_mode`)
 
 **Fix:** Extract flagged pinned refs from `violation_details` (msg, solution, description fields); re-resolve each tag to the current digest via quay.io v2 API; substitute in both `.tekton/*.yaml` and Containerfile candidates. Uses `_refresh_pinned_ref()` helper.
 
@@ -432,13 +432,13 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 
 #### 3.4.4 `policy_sbom_vendor_label` (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_sbom_vendor_label_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_sbom_vendor_label_mode`)
 
 **Fix:** Insert `LABEL vendor="Red Hat, Inc."` into `Containerfile` after the last existing `LABEL` line, or before `CMD`/`ENTRYPOINT` if no labels exist, or append at end. Idempotent — skips if vendor label already present.
 
 #### 3.4.5 `policy_rpm_repository` (COMPLETE)
 
-**File:** `collectors/python/fixers/fix_generator.py` (`run_conforma_rpm_repo_id_mode`)
+**File:** `src/fixers/fix_generator.py` (`run_conforma_rpm_repo_id_mode`)
 
 **Fix:** Replace generic repo section IDs (`[ubi-N-foo-rpms]`) with arch-specific format (`[ubi-N-for-$basearch-foo-rpms]`) in `rpms.in.yaml` and `*.repo` files. Regex-only, no LLM.
 
@@ -498,7 +498,7 @@ All other violation categories (`policy_signing_key`, `policy_rpm_repository`, e
 
 **Goal:** Automatically improve patterns based on fix outcomes.
 
-**File:** `collectors/python/patterns/pattern_learner.py` (new)
+**File:** `src/patterns/pattern_learner.py` (new)
 
 **Features:**
 1. **Auto-update patterns after successful fixes**
@@ -539,7 +539,7 @@ All other violation categories (`policy_signing_key`, `policy_rpm_repository`, e
 
 **Design (ready for implementation when tokens available):**
 
-**File:** `collectors/python/notifiers/alert_service.py` (new)
+**File:** `src/notifiers/alert_service.py` (new)
 
 **Triggers:**
 1. **Queue depth alerts**
@@ -584,7 +584,7 @@ ALERT_QUEUE_THRESHOLD=100
 
 **Goal:** Use enriched context and pattern matches to improve fix quality.
 
-**File:** `collectors/python/fixers/fix_generator.py` (modify)
+**File:** `src/fixers/fix_generator.py` (modify)
 
 **Improvements:**
 
@@ -644,7 +644,7 @@ Remove the hard-wired `acme-v2-0` assumption so the tool works across all RHOAI 
 
 ### 4.2 Deterministic fixer test suite (COMPLETE)
 
-55 unit tests across 8 pure functions in `collectors/python/tests/test_fix_generator.py`. Two real production bugs found and fixed:
+55 unit tests across 8 pure functions in `src/tests/test_fix_generator.py`. Two real production bugs found and fixed:
 - `_FLOATING_REF_RE` backtracking: partial tags within pinned refs were incorrectly matched as floating
 - `apply_hermetic_fix` `\b` boundary: word-boundary fails for quoted `"false"` (non-word char on both sides)
 
@@ -657,12 +657,12 @@ When a Slack bot token is available, add `ic export <N> slack --send` to post di
 ### 4.4 Autonomous mode infrastructure (COMPLETE — disabled by default)
 
 **Files:**
-- `collectors/python/fixers/auto_fix.py` — NEW autonomous runner
+- `src/fixers/auto_fix.py` — NEW autonomous runner
 - `cron/collect-comprehensive.sh` — step 7.5 (guarded by `AUTONOMOUS_MODE=true`)
 - `ic-config.sh` — `AUTONOMOUS_MODE` variable (default: false)
-- `collectors/python/config.py` — `AUTO_FIX_MAX_PER_RUN` (3), `AUTO_FIX_MIN_CONFIDENCE` (0.95)
-- `collectors/python/fixers/fix_generator.py` — `attempted_by='ic-fix'` default added to 7 functions
-- `collectors/python/repositories/resolution_attempt_repository.py` — `attempted_by` param in 2 record functions
+- `src/config.py` — `AUTO_FIX_MAX_PER_RUN` (3), `AUTO_FIX_MIN_CONFIDENCE` (0.95)
+- `src/fixers/fix_generator.py` — `attempted_by='ic-fix'` default added to 7 functions
+- `src/repositories/resolution_attempt_repository.py` — `attempted_by` param in 2 record functions
 
 **Design:**
 - All 5 safety gates must pass: `can_auto_fix=TRUE`, `requires_human_review=FALSE`, `confidence_score ≥ 0.95`, `ai_fix_attempted=FALSE`, no open ci-autohealing branch on GitHub
@@ -685,18 +685,18 @@ When a Slack bot token is available, add `ic export <N> slack --send` to post di
 | `prompts/conforma_analyzer.md` | Conforma violation LLM system prompt with 12-violation catalog |
 | `prompts/fix_generator_pr.md` | PR fix spec generation prompt |
 | `prompts/fix_generator_jira.md` | Jira ticket editor persona |
-| `collectors/python/prompt_loader.py` | Loads prompt Markdown, strips frontmatter |
-| `collectors/python/repositories/error_pattern_repository.py` | Error pattern library CRUD |
-| `collectors/python/repositories/ai_analysis_repository.py` | AI analysis + attempt tracking + LATERAL JOIN for patterns |
-| `collectors/python/collect_doc_context.py` | Fetches doc pages for known error patterns (cron step 8) |
-| `collectors/python/analyzers/build_failure_analyzer.py` | Build failure orchestrator (prompts, state machine, pattern wiring) |
-| `collectors/python/analyzers/conforma_analyzer.py` | Conforma violation orchestrator (same) |
-| `collectors/python/fixers/fix_generator.py` | Build + conforma PR generator and Jira mode |
-| `collectors/python/fixers/verify_fixes.py` | PR merge + build success verification loop |
-| `collectors/python/clients/github_client.py` | GitHub Contents API (read + write) |
-| `collectors/python/repositories/resolution_attempt_repository.py` | Fix attempt tracking |
-| `collectors/python/collect_commit_context.py` | Commit context pre-fetcher |
-| `collectors/python/collectors/status_synchronizer.py` | Component status sync + failure resolution |
+| `src/prompt_loader.py` | Loads prompt Markdown, strips frontmatter |
+| `src/repositories/error_pattern_repository.py` | Error pattern library CRUD |
+| `src/repositories/ai_analysis_repository.py` | AI analysis + attempt tracking + LATERAL JOIN for patterns |
+| `src/collect_doc_context.py` | Fetches doc pages for known error patterns (cron step 8) |
+| `src/analyzers/build_failure_analyzer.py` | Build failure orchestrator (prompts, state machine, pattern wiring) |
+| `src/analyzers/conforma_analyzer.py` | Conforma violation orchestrator (same) |
+| `src/fixers/fix_generator.py` | Build + conforma PR generator and Jira mode |
+| `src/fixers/verify_fixes.py` | PR merge + build success verification loop |
+| `src/clients/github_client.py` | GitHub Contents API (read + write) |
+| `src/repositories/resolution_attempt_repository.py` | Fix attempt tracking |
+| `src/collect_commit_context.py` | Commit context pre-fetcher |
+| `src/collectors/status_synchronizer.py` | Component status sync + failure resolution |
 | `cron/collect-comprehensive.sh` | Cron orchestration (steps 1-8) |
 | `ic` | Main CLI (~5500 lines) |
 | `ic-config.sh` | Defaults + COMPONENT_DATA_URL, GITLAB_API_BASE |

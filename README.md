@@ -491,18 +491,18 @@ KONFLUX_UI_BASE=https://konflux-ui.apps.CLUSTER_DOMAIN
 | `ic` | Main CLI |
 | `ic-config.sh` | Configuration defaults (sourced by `ic`) |
 | `cron/collect-comprehensive.sh` | Cron orchestrator (9 steps) |
-| `collectors/python/analyzers/build_failure_analyzer.py` | Build failure LLM analysis |
-| `collectors/python/analyzers/conforma_analyzer.py` | Conforma violation LLM analysis |
-| `collectors/python/fixers/fix_generator.py` | PR and Jira fix generator |
-| `collectors/python/fixers/auto_fix.py` | Autonomous cron runner (step 7.5) |
-| `collectors/python/fixers/verify_fixes.py` | Fix verification loop |
-| `collectors/python/poll_jira_comments.py` | Jira comment polling + draft generation |
-| `collectors/python/jira_refine.py` | Interactive draft refinement |
-| `collectors/python/clients/jira_client.py` | Jira REST API (Basic auth) |
-| `collectors/python/clients/github_client.py` | GitHub Contents API |
-| `collectors/python/clients/llm_provider.py` | LLM provider abstraction (Vertex / Anthropic) |
-| `collectors/python/repositories/` | All DB repository classes |
-| `collectors/python/tests/` | Test suite |
+| `src/analyzers/build_failure_analyzer.py` | Build failure LLM analysis |
+| `src/analyzers/conforma_analyzer.py` | Conforma violation LLM analysis |
+| `src/fixers/fix_generator.py` | PR and Jira fix generator |
+| `src/fixers/auto_fix.py` | Autonomous cron runner (step 7.5) |
+| `src/fixers/verify_fixes.py` | Fix verification loop |
+| `src/poll_jira_comments.py` | Jira comment polling + draft generation |
+| `src/jira_refine.py` | Interactive draft refinement |
+| `src/clients/jira_client.py` | Jira REST API (Basic auth) |
+| `src/clients/github_client.py` | GitHub Contents API |
+| `src/clients/llm_provider.py` | LLM provider abstraction (Vertex / Anthropic) |
+| `src/repositories/` | All DB repository classes |
+| `src/tests/` | Test suite |
 | `prompts/*.md` | LLM system prompts (edit without code changes) |
 | `parsers/` | Standalone Python parsers called from bash |
 | `db/migrations/` | Schema migrations (001–009) |

@@ -58,7 +58,7 @@ Look for components with **"Build failed"** status.
 
 ```bash
 # Edit the file
-vi collectors/python/components.txt
+vi src/components.txt
 
 # Add missing components (one per line)
 rhai-on-openshift-chart-v3-4
@@ -72,7 +72,7 @@ acme-fbc-fragment-v3-4
 ./cron/collect-comprehensive.sh
 
 # Or just collect failures
-cd collectors/python
+cd src
 python3 collect_comprehensive.py
 ```
 
@@ -115,7 +115,7 @@ oc login <cluster-url>
 ./sync-components.sh <missing-component-name>
 
 # Or edit manually
-vi collectors/python/components.txt
+vi src/components.txt
 
 # Then sync
 ./cron/collect-comprehensive.sh

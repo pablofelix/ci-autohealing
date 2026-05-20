@@ -45,7 +45,7 @@ The frontmatter is metadata only — it is stripped before the prompt is sent to
 
 ### Loading
 
-`collectors/python/prompt_loader.py` provides a single function:
+`src/prompt_loader.py` provides a single function:
 
 ```python
 from prompt_loader import load_prompt

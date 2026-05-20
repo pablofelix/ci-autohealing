@@ -9,7 +9,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_SCRIPT="$SCRIPT_DIR/collectors/python/update_components.py"
+PYTHON_SCRIPT="$SCRIPT_DIR/src/update_components.py"
 
 echo "========================================================================"
 echo "Component Synchronization Helper"

@@ -150,7 +150,7 @@ analyzers.
 ## Component Architecture
 
 ```
-collectors/python/
+src/
   clients/
     kubearchive.py                # EXISTING — KubeArchive REST client
     kubernetes.py                 # EXISTING — oc CLI wrapper
@@ -456,10 +456,10 @@ Files fetched:
 
 | File | Action | Purpose |
 |------|--------|---------|
-| `collectors/python/clients/gitlab_client.py` | CREATE | GitLab REST client for RPA + EC policy files |
-| `collectors/python/analyzers/release_failure_analyzer.py` | CREATE | Main analyzer class (context collection + LLM) |
-| `collectors/python/analyze_release.py` | CREATE | CLI entry point |
-| `collectors/python/analyzers/models.py` | MODIFY | Add ReleaseAnalysisResult |
+| `src/clients/gitlab_client.py` | CREATE | GitLab REST client for RPA + EC policy files |
+| `src/analyzers/release_failure_analyzer.py` | CREATE | Main analyzer class (context collection + LLM) |
+| `src/analyze_release.py` | CREATE | CLI entry point |
+| `src/analyzers/models.py` | MODIFY | Add ReleaseAnalysisResult |
 | `prompts/release_failure_analyzer.md` | CREATE | System prompt with known patterns |
 | `ic` | MODIFY | Add `ic ai analyze release` (invokes Python, displays results) |
 | `db/migrations/NNN_add_release_analysis.sql` | CREATE | DB schema change |

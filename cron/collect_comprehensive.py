@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-PYTHON_DIR = PROJECT_DIR / 'collectors' / 'python'
+PYTHON_DIR = PROJECT_DIR / 'src'
 LOG_DIR = PROJECT_DIR / 'logs' / 'cron'
 PYTHON = sys.executable
 

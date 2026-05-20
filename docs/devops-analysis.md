@@ -319,7 +319,7 @@ spec:
 
 ```bash
 # Collect odh-dashboard-v3-4
-cd collectors/python
+cd src
 echo "odh-dashboard-v3-4" > /tmp/missing_component.txt
 python3 collect_comprehensive.py --components /tmp/missing_component.txt
 
@@ -378,7 +378,7 @@ for component in components:
 Since KubeArchive doesn't store logs, create our own:
 
 ```python
-# collectors/python/log_archiver.py
+# src/log_archiver.py
 
 class LogArchiver:
     """Archive logs to S3/MinIO for long-term storage."""
@@ -493,7 +493,7 @@ crontab -e
 # Change: */15 * * * * → */5 * * * *
 
 # 2. Collect missing component
-cd collectors/python
+cd src
 echo "odh-dashboard-v3-4" | python3 collect_comprehensive.py --components /dev/stdin
 
 # 3. Test new CLI

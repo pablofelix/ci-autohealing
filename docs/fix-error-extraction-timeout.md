@@ -11,7 +11,7 @@
 ## Root Cause
 
 ```python
-# collectors/python/collectors/build_failure_collector.py:316-317
+# src/collectors/build_failure_collector.py:316-317
 error_message, error_type = self.extract_error_messages(logs) if logs else (None, None)
 failed_step = self.extract_failed_step_from_logs(logs) if logs else None
 ```
@@ -82,7 +82,7 @@ def extract_error_from_logs(logs):
 After applying the fix, re-collect the failing build:
 
 ```bash
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 python3 -c "
 from collectors.build_failure_collector import BuildFailureCollector
 from config import CollectorConfig
@@ -134,10 +134,10 @@ Expected result:
 
 ## Files to Modify
 
-1. `PROJECT_DIR/collectors/python/collectors/build_failure_collector.py` (line 316-317)
-2. `PROJECT_DIR/collectors/python/tekton_parsers.py` (line 76-91) — optional improvement
+1. `PROJECT_DIR/src/collectors/build_failure_collector.py` (line 316-317)
+2. `PROJECT_DIR/src/tekton_parsers.py` (line 76-91) — optional improvement
 
 ## Related
 
 - Investigation doc: `PROJECT_DIR/docs/investigation-ai-analyzer-wrong-error.md`
-- Build status enum: `PROJECT_DIR/collectors/python/models.py` (BuildStatus)
+- Build status enum: `PROJECT_DIR/src/models.py` (BuildStatus)

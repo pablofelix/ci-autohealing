@@ -9,7 +9,7 @@ would mask configuration errors and make prompt regressions hard to detect.
 
 from pathlib import Path
 
-_PROMPTS_DIR = Path(__file__).parent.parent.parent / 'prompts'
+_PROMPTS_DIR = Path(__file__).parent.parent / 'prompts'
 
 
 def load_prompt(name):

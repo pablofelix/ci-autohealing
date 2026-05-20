@@ -6,4 +6,4 @@ select = ["E", "F", "W"]
 ignore = ["E501"]
 
 [lint.per-file-ignores]
-"collectors/python/clients/tekton_results.py" = ["E402"]
+"src/clients/tekton_results.py" = ["E402"]

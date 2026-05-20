@@ -294,7 +294,7 @@ ls -lt /tmp/ci-autohealing/batch_analysis_*.log | head -1
 
 Install anthropic module:
 ```bash
-cd collectors/python
+cd src
 pip install anthropic
 # OR
 pip install -r requirements.txt  # if anthropic was added
@@ -509,7 +509,7 @@ print(f"Pending: {estimate['total_pending']}, ETA: {estimate['eta_hours']}h")
 
 2. **Install Anthropic Module** (2 min)
    ```bash
-   cd collectors/python
+   cd src
    pip install anthropic
    ```
 

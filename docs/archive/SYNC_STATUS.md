@@ -182,7 +182,7 @@ To verify sync is working:
 # https://konflux-ui.apps.CLUSTER_DOMAIN/...
 
 # Check components.txt
-cat collectors/python/components.txt
+cat src/components.txt
 
 # Check cron is running
 crontab -l | grep collect-comprehensive

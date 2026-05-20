@@ -12,9 +12,9 @@ from typing import Generator
 import psycopg2
 from psycopg2 import pool
 
-# Add collectors/python to path to import config and repositories
-collectors_path = Path(__file__).parent.parent.parent.parent / "collectors" / "python"
-sys.path.insert(0, str(collectors_path))
+# Add src/ to path to import config and repositories
+src_path = Path(__file__).parent.parent.parent.parent / "src"
+sys.path.insert(0, str(src_path))
 
 from config import DatabaseConfig  # type: ignore
 from repositories.build_failure_repository import BuildFailureRepository  # type: ignore
@@ -64,7 +64,7 @@ class PooledDatabaseConnection:
 def create_db_config() -> DatabaseConfig:
     """Create DatabaseConfig from environment variables.
 
-    Reuses DatabaseConfig from collectors/python/config.py instead of
+    Reuses DatabaseConfig from collectors/config.py instead of
     duplicating the configuration class.
     """
     return DatabaseConfig(

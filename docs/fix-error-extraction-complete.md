@@ -84,11 +84,11 @@ if not error_message and failed_step:
 
 ## Files Modified
 
-1. **`collectors/python/tekton_parsers.py`:**
+1. **`src/tekton_parsers.py`:**
    - Enhanced `extract_error_from_logs()` with script source filtering
    - Added `extract_failed_step_from_pipelinerun()` for metadata-based detection
 
-2. **`collectors/python/collectors/build_failure_collector.py`:**
+2. **`src/collectors/build_failure_collector.py`:**
    - Added `_find_failed_taskrun()` - finds actual failed TaskRun
    - Added `_extract_taskrun_logs_section()` - extracts specific task logs
    - Updated error extraction logic in `collect_comprehensive_failure()`
@@ -114,7 +114,7 @@ Error: ERROR: The CONTEXT parameter ('$CONTEXT') is invalid...
 ./ic db query "DELETE FROM build_failures WHERE pipelinerun_name = '...'"
 
 # Re-collect
-cd collectors/python
+cd src
 python3 -c "
 from collectors.build_failure_collector import BuildFailureCollector
 from config import CollectorConfig
@@ -178,7 +178,7 @@ All 33 failing components need to be re-collected to apply the fix:
 
 Or selectively:
 ```bash
-cd collectors/python
+cd src
 python3 collectors/build_failure_collector.py
 ```
 

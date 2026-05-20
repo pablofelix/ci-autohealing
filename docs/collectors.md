@@ -14,7 +14,7 @@ Modern, maintainable Python implementation of the CI Auto-Healing collectors usi
 ## Architecture
 
 ```
-collectors/python/
+src/
 ├── __init__.py                   # Package initialization
 ├── config.py                     # Configuration management (from .env)
 ├── models.py                     # Data models (PipelineRun, TaskRun, etc.)
@@ -31,7 +31,7 @@ collectors/python/
 ### 1. Install Dependencies
 
 ```bash
-cd collectors/python
+cd src
 
 # Install required packages
 pip3 install -r requirements.txt
@@ -312,7 +312,7 @@ You can use Python collectors in cron jobs:
 
 ```bash
 # Add to crontab
-*/15 * * * * cd PROJECT_DIR/collectors/python && python3 collect_failures.py --fetch-logs >> /var/log/ci-autohealing/python-collector.log 2>&1
+*/15 * * * * cd PROJECT_DIR/src && python3 collect_failures.py --fetch-logs >> /var/log/ci-autohealing/python-collector.log 2>&1
 ```
 
 ## Comparison: Shell vs Python
@@ -354,7 +354,7 @@ docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring -c "SELECT 
 
 ```bash
 # Make sure you're in the python/ directory
-cd collectors/python
+cd src
 
 # Install dependencies
 pip3 install -r requirements.txt

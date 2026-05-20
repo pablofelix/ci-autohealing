@@ -35,8 +35,8 @@ Enriches failures with dependency changes and related failures.
 crontab -e
 
 # Add these lines (adjust paths):
-0 * * * * PROJECT_DIR/collectors/python/cron/batch_analysis.sh
-*/30 * * * * PROJECT_DIR/collectors/python/cron/enrich_context.sh
+0 * * * * PROJECT_DIR/src/cron/batch_analysis.sh
+*/30 * * * * PROJECT_DIR/src/cron/enrich_context.sh
 ```
 
 ### Environment Variables
@@ -78,7 +78,7 @@ BATCH_ANALYSIS_AUTO_JIRA=false
 ### Check Queue Depth
 
 ```bash
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 python3 analyze_batch.py --estimate
 ```
 
@@ -161,7 +161,7 @@ Run jobs manually for testing:
 
 ```bash
 # Batch analysis
-cd PROJECT_DIR/collectors/python
+cd PROJECT_DIR/src
 ./cron/batch_analysis.sh
 
 # Context enrichment

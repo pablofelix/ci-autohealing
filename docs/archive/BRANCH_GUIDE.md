@@ -60,7 +60,7 @@ git push origin main --tags
 **What's in develop**:
 
 **Core System**:
-- `collectors/python/` - Python data collectors
+- `src/` - Python data collectors
   - `collect_comprehensive.py` - Main collector
   - `sync_component_status.py` - Status synchronization
   - `unified_collector.py` - Multi-API orchestrator
