@@ -7,13 +7,11 @@ Provides:
 """
 
 import time
-from typing import List, Optional, Dict, Any, Set
 from dataclasses import replace
 
-from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, BuildFailureRepository
-from clients import KubernetesClient
+from clients import KubernetesClient, TektonResultsClient
 from clients.pipelinerun_query import query_pipelineruns
 from models import Component, BuildStatus
 from tekton_parsers import classify_build_status
@@ -25,8 +23,8 @@ logger = setup_logger(__name__)
 # Cluster query functions
 # ---------------------------------------------------------------------------
 
-def get_failing_build_components(config):
-    # type: (CollectorConfig) -> Dict[str, Any]
+def get_failing_build_components(config, recent_days=None):
+    # type: (CollectorConfig, int) -> Dict[str, Any]
     """Get failing components from KubeArchive + live cluster (push builds only).
 
     Groups by component, tracks latest push build and latest incoming build
@@ -38,7 +36,8 @@ def get_failing_build_components(config):
         'pipelines.appstudio.openshift.io/type=build'
     ).format(config.k8s.application_name)
 
-    pipelineruns = query_pipelineruns(config.k8s.namespace, label_selector)
+    pipelineruns = query_pipelineruns(config.k8s.namespace, label_selector,
+                                     recent_days=recent_days)
     if not pipelineruns:
         return {'failing': set(), 'retriggered': set(), 'running': {}}
 
@@ -54,6 +53,7 @@ def get_failing_build_components(config):
         event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
         ts = pr.get('metadata', {}).get('creationTimestamp', '')
         pr_name = pr.get('metadata', {}).get('name', '')
+        pr_uid = pr.get('metadata', {}).get('uid', '')
         conditions = pr.get('status', {}).get('conditions', [])
 
         if not conditions:
@@ -74,16 +74,23 @@ def get_failing_build_components(config):
 
         if event_type == 'push':
             if comp not in push_latest or ts > push_latest[comp][0]:
-                push_latest[comp] = (ts, status, reason)
+                push_latest[comp] = (ts, status, reason, pr_name, pr_uid)
         elif event_type == 'incoming':
             if comp not in incoming_latest or ts > incoming_latest[comp][0]:
                 incoming_latest[comp] = (ts, status, reason)
 
     failing = set()
     retriggered = set()
-    for comp, (push_ts, push_status, push_reason) in push_latest.items():
+    details = {}
+    for comp, (push_ts, push_status, push_reason, push_pr, push_uid) in push_latest.items():
         if push_status == 'False':
             failing.add(comp)
+            details[comp] = {
+                'pipelinerun_name': push_pr,
+                'pipelinerun_uid': push_uid,
+                'reason': push_reason,
+                'timestamp': push_ts,
+            }
             if comp in incoming_latest:
                 inc_ts, inc_status, inc_reason = incoming_latest[comp]
                 if inc_status == 'True' and inc_ts > push_ts:
@@ -99,11 +106,11 @@ def get_failing_build_components(config):
         if is_newer:
             active_running[comp] = {'timestamp': run_ts, 'pipelinerun_name': run_pr, 'type': 'build'}
 
-    return {'failing': failing, 'retriggered': retriggered, 'running': active_running}
+    return {'failing': failing, 'retriggered': retriggered, 'running': active_running, 'details': details}
 
 
-def get_failing_conforma_components(config):
-    # type: (CollectorConfig) -> Dict[str, Any]
+def get_failing_conforma_components(config, recent_days=None):
+    # type: (CollectorConfig, int) -> Dict[str, Any]
     """Query KubeArchive + live cluster for Conforma test PipelineRuns.
 
     Returns dict with:
@@ -116,7 +123,8 @@ def get_failing_conforma_components(config):
         'pipelines.appstudio.openshift.io/type=test'
     ).format(config.k8s.application_name)
 
-    pipelineruns = query_pipelineruns(config.k8s.namespace, label_selector)
+    pipelineruns = query_pipelineruns(config.k8s.namespace, label_selector,
+                                     recent_days=recent_days)
     if not pipelineruns:
         return {'failing': set(), 'details': {}, 'running': {}}
 
@@ -188,13 +196,14 @@ def get_failing_conforma_components(config):
 class StatusSynchronizer:
     """Synchronizes component status between Kubernetes and database."""
 
-    def __init__(self, config, db=None, build_repo=None, k8s=None):
+    def __init__(self, config, db=None, build_repo=None, k8s=None, tekton_results=None):
         # type: (CollectorConfig, ...) -> None
         self.config = config
         if db is None:
             db = DatabaseConnection(config.db)
         self.build_repo = build_repo or BuildFailureRepository(db)
         self.k8s = k8s or KubernetesClient(namespace=config.k8s.namespace)
+        self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
 
     def get_component_metadata(self, component_name):
         # type: (str,) -> Optional[Component]
@@ -208,23 +217,13 @@ class StatusSynchronizer:
             namespace=self.config.k8s.namespace
         )
 
-    def get_current_status(self, component_name):
-        # type: (str,) -> Optional[Dict[str, Any]]
-        """Get current push build status from live cluster + KubeArchive."""
-        label_selector = (
-            'appstudio.openshift.io/component={},'
-            'pipelines.appstudio.openshift.io/type=build'
-        ).format(component_name)
-
-        pipelineruns = query_pipelineruns(
-            self.config.k8s.namespace, label_selector,
-            max_pages=1, page_size=50,
-        )
-
+    def _find_latest_push(self, pipelineruns):
+        # type: (list) -> Optional[tuple]
         latest = None
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
-            if labels.get('pipelinesascode.tekton.dev/event-type', '') != 'push':
+            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+            if event_type not in ('push', 'incoming'):
                 continue
             conditions = pr.get('status', {}).get('conditions', [])
             if not conditions:
@@ -237,6 +236,34 @@ class StatusSynchronizer:
                     pr.get('metadata', {}).get('uid'),
                     conditions[-1].get('reason', ''),
                 )
+        return latest
+
+    def get_current_status(self, component_name):
+        # type: (str,) -> Optional[Dict[str, Any]]
+        """Get current push build status from cluster, KubeArchive, or Tekton Results."""
+        label_selector = (
+            'appstudio.openshift.io/component={},'
+            'pipelines.appstudio.openshift.io/type=build'
+        ).format(component_name)
+
+        pipelineruns = query_pipelineruns(
+            self.config.k8s.namespace, label_selector,
+            max_pages=1, page_size=50,
+        )
+
+        latest = self._find_latest_push(pipelineruns)
+
+        if not latest:
+            try:
+                tr_prs = self.tekton_results.query_component_build_history(
+                    application=self.config.k8s.application_name,
+                    component=component_name, page_size=5)
+                if tr_prs:
+                    latest = self._find_latest_push(tr_prs)
+                    if latest:
+                        logger.info("Got status from Tekton Results (KubeArchive empty)")
+            except Exception as e:
+                logger.debug("Tekton Results fallback for %s failed: %s", component_name, e)
 
         if not latest:
             return None
@@ -262,16 +289,10 @@ class StatusSynchronizer:
         current = self.get_current_status(component.name)
 
         if not current:
-            if result['was_failing']:
-                if self.build_repo.mark_resolved(component.name, app, ns, 'archived'):
-                    result['now_resolved'] = True
-                    logger.info("Marked as resolved (no PipelineRuns in cluster - likely archived)")
-                    result['current_status'] = 'archived'
-                    return result
-
             db_status = self.build_repo.get_last_status(component.name, app)
             result['current_status'] = db_status if db_status else 'unknown'
-            logger.info("Current status: %s (from DB, not in K8s)", result['current_status'])
+            logger.info("No PipelineRuns found in any source for %s — keeping DB status: %s",
+                        component.name, result['current_status'])
             return result
 
         result['current_status'] = current['status'].value

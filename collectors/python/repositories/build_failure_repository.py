@@ -1,9 +1,6 @@
 """Repository for build_failures table operations."""
 
-import psycopg2
-from typing import Optional, List, Set, Dict, Any
 
-from repositories.connection import DatabaseConnection
 
 
 class BuildFailureRepository:
@@ -196,9 +193,13 @@ class BuildFailureRepository:
                 d = details or {}
 
                 if exists:
+                    unresolve_clause = ""
+                    if status == 'Failed':
+                        unresolve_clause = "is_resolved = FALSE, resolved_at = NULL, resolution_type = NULL, resolution_pr_url = NULL,"
                     cursor.execute(
                         """
                         UPDATE build_failures SET
+                            {unresolve}
                             build_logs = COALESCE(%s, build_logs),
                             commit_sha = COALESCE(%s, commit_sha),
                             commit_short_sha = COALESCE(%s, commit_short_sha),
@@ -215,16 +216,25 @@ class BuildFailureRepository:
                             build_duration_seconds = COALESCE(%s, build_duration_seconds),
                             repository_url = COALESCE(%s, repository_url),
                             branch = COALESCE(%s, branch),
+                            output_image = COALESCE(%s, output_image),
+                            image_digest = COALESCE(%s, image_digest),
+                            task_summary = COALESCE(%s, task_summary),
+                            chains_git_url = COALESCE(%s, chains_git_url),
+                            chains_git_commit = COALESCE(%s, chains_git_commit),
                             last_updated_at = NOW()
                         WHERE pipelinerun_name = %s
-                        """,
+                        """.format(unresolve=unresolve_clause),
                         (logs, d.get('commit_sha'), d.get('commit_short_sha'),
                          d.get('commit_url'), d.get('commit_message'),
                          d.get('commit_author'), d.get('konflux_url'),
                          d.get('pipeline_url'), d.get('pr_number'),
                          d.get('pr_url'), error_message, error_type,
                          failed_step, duration, d.get('repository_url'),
-                         d.get('branch'), pr_name)
+                         d.get('branch'),
+                         d.get('output_image'), d.get('image_digest'),
+                         d.get('task_summary'),
+                         d.get('chains_git_url'), d.get('chains_git_commit'),
+                         pr_name)
                     )
                     return False
                 else:
@@ -237,10 +247,12 @@ class BuildFailureRepository:
                             commit_sha, commit_short_sha, commit_url, commit_message, commit_author,
                             pr_number, pr_url, status, error_message, error_type,
                             failed_step_name, build_duration_seconds,
-                            konflux_url, logs_full_url, build_logs
+                            konflux_url, logs_full_url, build_logs,
+                            output_image, image_digest, task_summary,
+                            chains_git_url, chains_git_commit
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         """,
                         (component_name, pr_name, pr_uid,
@@ -251,7 +263,10 @@ class BuildFailureRepository:
                          d.get('pr_url'), status,
                          error_message, error_type,
                          failed_step, duration, d.get('konflux_url'),
-                         d.get('pipeline_url'), logs)
+                         d.get('pipeline_url'), logs,
+                         d.get('output_image'), d.get('image_digest'),
+                         d.get('task_summary'),
+                         d.get('chains_git_url'), d.get('chains_git_commit'))
                     )
                     return True
         except Exception:

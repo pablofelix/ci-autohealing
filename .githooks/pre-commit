@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-commit hook: blocks commit if lint or tests fail.
+# Pre-commit hook: rh-pre-commit (secrets) + ruff (lint) + pytest (tests).
 # Install: git config core.hooksPath .githooks
 
 set -e
@@ -7,6 +7,16 @@ set -e
 PYTHON=python3.11
 ROOT=$(git rev-parse --show-toplevel)
 COLLECTORS="$ROOT/collectors/python"
+RH_PYTHON=RH_PRE_COMMIT_PYTHON
+
+echo "=== pre-commit: secrets (rh-gitleaks) ==="
+if [ -x "$RH_PYTHON" ]; then
+    "$RH_PYTHON" -m rh_pre_commit.multi
+elif command -v rh-multi-pre-commit > /dev/null; then
+    rh-multi-pre-commit
+else
+    echo "rh-multi-pre-commit not found, skipping secrets check" >&2
+fi
 
 echo "=== pre-commit: lint ==="
 $PYTHON -m ruff check "$COLLECTORS/" --exclude='__pycache__'

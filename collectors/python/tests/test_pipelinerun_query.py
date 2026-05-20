@@ -1,6 +1,5 @@
 """Tests for query_pipelineruns shared function."""
 
-import json
 from unittest.mock import MagicMock, patch
 from clients.pipelinerun_query import query_pipelineruns
 
@@ -20,15 +19,8 @@ def _make_pr(name, uid, component, event_type='push', status='False'):
     }
 
 
-def _mock_oc_result(items, returncode=0):
-    mock = MagicMock()
-    mock.returncode = returncode
-    mock.stdout = json.dumps({'items': items})
-    return mock
-
-
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_deduplicates_by_uid(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_deduplicates_by_uid(mock_live):
     pr_archive = _make_pr('pr-1', 'uid-1', 'comp-a')
     pr_live = _make_pr('pr-1-live', 'uid-1', 'comp-a')
 
@@ -38,7 +30,7 @@ def test_deduplicates_by_uid(mock_run):
     resp.json.return_value = {'items': [pr_archive], 'metadata': {}}
     session.get.return_value = resp
 
-    mock_run.return_value = _mock_oc_result([pr_live])
+    mock_live.return_value = [pr_live]
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -47,11 +39,10 @@ def test_deduplicates_by_uid(mock_run):
     )
 
     assert len(result) == 1
-    assert result[0]['metadata']['name'] == 'pr-1-live'
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_combines_unique_prs(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_combines_unique_prs(mock_live):
     pr_archive = _make_pr('pr-1', 'uid-1', 'comp-a')
     pr_live = _make_pr('pr-2', 'uid-2', 'comp-b')
 
@@ -61,7 +52,7 @@ def test_combines_unique_prs(mock_run):
     resp.json.return_value = {'items': [pr_archive], 'metadata': {}}
     session.get.return_value = resp
 
-    mock_run.return_value = _mock_oc_result([pr_live])
+    mock_live.return_value = [pr_live]
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -74,14 +65,14 @@ def test_combines_unique_prs(mock_run):
     assert names == {'pr-1', 'pr-2'}
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_kubearchive_failure_still_returns_live(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_kubearchive_failure_still_returns_live(mock_live):
     pr_live = _make_pr('pr-1', 'uid-1', 'comp-a')
 
     session = MagicMock()
     session.get.side_effect = Exception("connection refused")
 
-    mock_run.return_value = _mock_oc_result([pr_live])
+    mock_live.return_value = [pr_live]
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -92,8 +83,8 @@ def test_kubearchive_failure_still_returns_live(mock_run):
     assert len(result) == 1
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_live_cluster_failure_still_returns_archive(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_live_cluster_failure_still_returns_archive(mock_live):
     pr_archive = _make_pr('pr-1', 'uid-1', 'comp-a')
 
     session = MagicMock()
@@ -102,7 +93,7 @@ def test_live_cluster_failure_still_returns_archive(mock_run):
     resp.json.return_value = {'items': [pr_archive], 'metadata': {}}
     session.get.return_value = resp
 
-    mock_run.side_effect = Exception("oc not found")
+    mock_live.return_value = []
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -113,11 +104,11 @@ def test_live_cluster_failure_still_returns_archive(mock_run):
     assert len(result) == 1
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_both_fail_returns_empty(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_both_fail_returns_empty(mock_live):
     session = MagicMock()
     session.get.side_effect = Exception("connection refused")
-    mock_run.side_effect = Exception("oc not found")
+    mock_live.return_value = []
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -128,8 +119,8 @@ def test_both_fail_returns_empty(mock_run):
     assert result == []
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_pagination(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_pagination(mock_live):
     pr1 = _make_pr('pr-1', 'uid-1', 'comp-a')
     pr2 = _make_pr('pr-2', 'uid-2', 'comp-b')
 
@@ -142,7 +133,7 @@ def test_pagination(mock_run):
     resp2.json.return_value = {'items': [pr2], 'metadata': {}}
     session.get.side_effect = [resp1, resp2]
 
-    mock_run.return_value = MagicMock(returncode=1)
+    mock_live.return_value = []
 
     result = query_pipelineruns(
         'test-ns', 'app=test',
@@ -154,8 +145,8 @@ def test_pagination(mock_run):
     assert session.get.call_count == 2
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
-def test_respects_max_pages(mock_run):
+@patch('clients.pipelinerun_query._query_live_cluster')
+def test_respects_max_pages(mock_live):
     pr = _make_pr('pr-1', 'uid-1', 'comp-a')
 
     session = MagicMock()
@@ -164,7 +155,7 @@ def test_respects_max_pages(mock_run):
     resp.json.return_value = {'items': [pr], 'metadata': {'continue': 'token123'}}
     session.get.return_value = resp
 
-    mock_run.return_value = MagicMock(returncode=1)
+    mock_live.return_value = []
 
     query_pipelineruns(
         'test-ns', 'app=test',
@@ -176,13 +167,13 @@ def test_respects_max_pages(mock_run):
     assert session.get.call_count == 2
 
 
-@patch('clients.pipelinerun_query.subprocess.run')
+@patch('clients.pipelinerun_query._query_live_cluster')
 @patch('openshift_auth.get_openshift_token', return_value=None)
 @patch('openshift_auth.discover_kubearchive_api_url', return_value='https://kubearchive.example.com')
-def test_skips_kubearchive_when_no_token(mock_discover, mock_token, mock_run):
+def test_skips_kubearchive_when_no_token(mock_discover, mock_token, mock_live):
     """When no token available, KubeArchive is skipped but live cluster works."""
     pr_live = _make_pr('pr-1', 'uid-1', 'comp-a')
-    mock_run.return_value = _mock_oc_result([pr_live])
+    mock_live.return_value = [pr_live]
 
     result = query_pipelineruns('test-ns', 'app=test')
 

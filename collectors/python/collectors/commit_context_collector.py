@@ -9,9 +9,7 @@ No disk usage: all data fetched via GitHub REST API and stored in DB.
 
 import json
 import time
-from typing import Any, Dict, List
 
-from config import CollectorConfig
 from logger import setup_logger
 from clients.github_client import GitHubClient
 from repositories import DatabaseConnection

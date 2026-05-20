@@ -30,7 +30,7 @@ def setup_logger(
     logger.handlers = []
 
     # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.DEBUG)
 
     if log_format == 'json':

@@ -11,23 +11,21 @@ Collects everything needed to understand and fix CI build failures:
 - Konflux UI links
 """
 
-import sys
 import time
 import subprocess
 import json
-from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import replace
 from datetime import datetime
 
 from logger import setup_logger
-from config import CollectorConfig
 from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
 from clients.pipelinerun_query import query_pipelineruns
-from models import PipelineRun, BuildStatus, ScanResult, Component
+from models import ScanResult, Component
 from tekton_parsers import (
     extract_error_from_logs,
     extract_failed_step_from_logs,
+    extract_failed_step_from_pipelinerun,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
     classify_build_status,
@@ -55,16 +53,91 @@ class BuildFailureCollector:
         self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
         self.unified = unified or UnifiedPipelineClient(namespace=config.k8s.namespace)
 
+    _PUSH_EVENT_TYPES = {'push', 'incoming'}
+
+    def _collect_push_latest(self, pipelineruns):
+        # type: (List[Dict[str, Any]]) -> Dict[str, tuple]
+        """Build a map of component -> (timestamp, status, reason, annotations)
+        from the latest push PipelineRun per component."""
+        push_latest = {}  # type: Dict[str, tuple]
+        for pr in pipelineruns:
+            labels = pr.get('metadata', {}).get('labels', {})
+            comp = labels.get('appstudio.openshift.io/component')
+            if not comp:
+                continue
+            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+            if event_type not in self._PUSH_EVENT_TYPES:
+                continue
+            ts = pr.get('metadata', {}).get('creationTimestamp', '')
+            conditions = pr.get('status', {}).get('conditions', [])
+            if not conditions:
+                continue
+            c = conditions[-1]
+            if comp not in push_latest or ts > push_latest[comp][0]:
+                annotations = pr.get('metadata', {}).get('annotations', {})
+                push_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
+        return push_latest
+
+    def _enrich_component_metadata(self, component_name, push_latest):
+        # type: (str, Dict[str, tuple]) -> Component
+        """Get repository URL and branch for a component from cluster or annotations."""
+        repo_url = ''
+        branch = ''
+
+        try:
+            comp_result = subprocess.run(
+                ['oc', 'get', 'component', component_name,
+                 '-n', self.config.k8s.namespace,
+                 '-o', 'json'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=10
+            )
+            if comp_result.returncode == 0:
+                comp_data = json.loads(comp_result.stdout)
+                repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
+                branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
+        except Exception:
+            pass
+
+        if not repo_url and component_name in push_latest:
+            pr_annotations = push_latest[component_name][3]
+            repo_url = (
+                pr_annotations.get('pipelinesascode.tekton.dev/repo-url', '') or
+                pr_annotations.get('pipelinesascode.tekton.dev/source-repo-url', '')
+            )
+            branch = (
+                pr_annotations.get('build.appstudio.redhat.com/target_branch', '') or
+                pr_annotations.get('pipelinesascode.tekton.dev/branch', '')
+            )
+            if repo_url:
+                logger.info("%s: metadata from PipelineRun annotations (cluster unavailable)", component_name)
+
+        return Component(
+            name=component_name,
+            repository_url=repo_url,
+            branch=branch,
+            namespace=self.config.k8s.namespace
+        )
+
     def discover_components_from_cluster(self):
         # type: () -> List[Component]
-        """Discover components with failed latest push builds."""
+        """Discover components with failed latest push builds.
+
+        Queries both KubeArchive/cluster and Tekton Results to get the most
+        complete picture of failing components.
+        """
         try:
+            application = self.config.k8s.application_name
+
+            # Source 1: KubeArchive + live cluster
             label_selector = (
                 'appstudio.openshift.io/application={},'
                 'pipelines.appstudio.openshift.io/type=build'
-            ).format(self.config.k8s.application_name)
+            ).format(application)
 
-            logger.info("Querying for application %s...", self.config.k8s.application_name)
+            logger.info("Querying for application %s...", application)
             pipelineruns = query_pipelineruns(
                 self.config.k8s.namespace, label_selector,
                 kubearchive_url=self.kubearchive.api_url,
@@ -72,23 +145,24 @@ class BuildFailureCollector:
             )
             logger.info("Found %d PipelineRuns", len(pipelineruns))
 
-            push_latest = {}
-            for pr in pipelineruns:
-                labels = pr.get('metadata', {}).get('labels', {})
-                comp = labels.get('appstudio.openshift.io/component')
-                if not comp:
-                    continue
-                event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
-                if event_type != 'push':
-                    continue
-                ts = pr.get('metadata', {}).get('creationTimestamp', '')
-                conditions = pr.get('status', {}).get('conditions', [])
-                if not conditions:
-                    continue
-                c = conditions[-1]
-                if comp not in push_latest or ts > push_latest[comp][0]:
-                    annotations = pr.get('metadata', {}).get('annotations', {})
-                    push_latest[comp] = (ts, c.get('status'), c.get('reason'), annotations)
+            push_latest = self._collect_push_latest(pipelineruns)
+
+            # Source 2: Tekton Results (catches PipelineRuns that expired from KubeArchive)
+            try:
+                tr_pipelineruns = self.tekton_results.query_pipelinerun_records(
+                    application=application, page_size=100
+                )
+                if tr_pipelineruns:
+                    tr_push_latest = self._collect_push_latest(tr_pipelineruns)
+                    added = 0
+                    for comp, data in tr_push_latest.items():
+                        if comp not in push_latest or data[0] > push_latest[comp][0]:
+                            push_latest[comp] = data
+                            added += 1
+                    if added:
+                        logger.info("Tekton Results added %d component(s) not in KubeArchive", added)
+            except Exception as e:
+                logger.debug("Tekton Results query skipped: %s", e)
 
             failing_component_names = [
                 comp for comp, (ts, status, reason, _) in push_latest.items()
@@ -101,48 +175,10 @@ class BuildFailureCollector:
 
             logger.info("Found %d components with failed builds", len(failing_component_names))
 
-            failing_components = []
-            for component_name in failing_component_names:
-                repo_url = ''
-                branch = ''
-
-                try:
-                    comp_result = subprocess.run(
-                        ['oc', 'get', 'component', component_name,
-                         '-n', self.config.k8s.namespace,
-                         '-o', 'json'],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        universal_newlines=True,
-                        timeout=10
-                    )
-
-                    if comp_result.returncode == 0:
-                        comp_data = json.loads(comp_result.stdout)
-                        repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
-                        branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
-                except Exception:
-                    pass
-
-                if not repo_url:
-                    pr_annotations = push_latest[component_name][3]
-                    repo_url = (
-                        pr_annotations.get('pipelinesascode.tekton.dev/repo-url', '') or
-                        pr_annotations.get('pipelinesascode.tekton.dev/source-repo-url', '')
-                    )
-                    branch = (
-                        pr_annotations.get('build.appstudio.redhat.com/target_branch', '') or
-                        pr_annotations.get('pipelinesascode.tekton.dev/branch', '')
-                    )
-                    if repo_url:
-                        logger.info("%s: metadata from PipelineRun annotations (cluster unavailable)", component_name)
-
-                failing_components.append(Component(
-                    name=component_name,
-                    repository_url=repo_url,
-                    branch=branch,
-                    namespace=self.config.k8s.namespace
-                ))
+            failing_components = [
+                self._enrich_component_metadata(name, push_latest)
+                for name in failing_component_names
+            ]
 
             logger.info("Retrieved metadata for %d components", len(failing_components))
             return failing_components
@@ -166,9 +202,45 @@ class BuildFailureCollector:
             namespace=self.config.k8s.namespace
         )
 
+    def _extract_latest_failed(self, pipelineruns):
+        # type: (List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
+        """Find the latest failed push PipelineRun from a list."""
+        latest_failed = None
+        for pr in pipelineruns:
+            labels = pr.get('metadata', {}).get('labels', {})
+            if labels.get('pipelinesascode.tekton.dev/event-type', '') not in self._PUSH_EVENT_TYPES:
+                continue
+            conditions = pr.get('status', {}).get('conditions', [])
+            if not conditions or conditions[-1].get('status') != 'False':
+                continue
+            ts = pr.get('metadata', {}).get('creationTimestamp', '')
+            if not latest_failed or ts > latest_failed[0]:
+                reason = conditions[-1].get('reason', '')
+                latest_failed = (
+                    ts,
+                    pr.get('metadata', {}).get('name'),
+                    pr.get('metadata', {}).get('uid'),
+                    classify_build_status(reason),
+                    reason,
+                )
+
+        if latest_failed:
+            return {
+                'name': latest_failed[1],
+                'uid': latest_failed[2],
+                'status': latest_failed[3],
+                'started': latest_failed[0],
+                'reason': latest_failed[4] if len(latest_failed) > 4 else None,
+            }
+        return None
+
     def get_last_failed_pipelinerun(self, component_name):
         # type: (str) -> Optional[Dict[str, Any]]
-        """Get the most recent failed push PipelineRun for a component."""
+        """Get the most recent failed push PipelineRun for a component.
+
+        Queries both KubeArchive/cluster and Tekton Results, returns the
+        most recent failure across all sources.
+        """
         label_selector = (
             'appstudio.openshift.io/component={},'
             'pipelines.appstudio.openshift.io/type=build'
@@ -181,32 +253,27 @@ class BuildFailureCollector:
             max_pages=1, page_size=50,
         )
 
-        latest_failed = None
-        for pr in pipelineruns:
-            labels = pr.get('metadata', {}).get('labels', {})
-            if labels.get('pipelinesascode.tekton.dev/event-type', '') != 'push':
-                continue
-            conditions = pr.get('status', {}).get('conditions', [])
-            if not conditions or conditions[-1].get('status') != 'False':
-                continue
-            ts = pr.get('metadata', {}).get('creationTimestamp', '')
-            if not latest_failed or ts > latest_failed[0]:
-                latest_failed = (
-                    ts,
-                    pr.get('metadata', {}).get('name'),
-                    pr.get('metadata', {}).get('uid'),
-                    classify_build_status(conditions[-1].get('reason', '')),
-                )
+        ka_result = self._extract_latest_failed(pipelineruns)
 
-        if latest_failed:
-            return {
-                'name': latest_failed[1],
-                'uid': latest_failed[2],
-                'status': latest_failed[3],
-                'started': latest_failed[0],
-            }
+        # Also check Tekton Results for a potentially newer failure
+        tr_result = None
+        try:
+            tr_prs = self.tekton_results.query_pipelinerun_records(
+                application=self.config.k8s.application_name,
+                component=component_name,
+                page_size=10
+            )
+            tr_result = self._extract_latest_failed(tr_prs)
+        except Exception as e:
+            logger.debug("Tekton Results query for %s failed: %s", component_name, e)
 
-        return None
+        if ka_result and tr_result:
+            if tr_result['started'] > ka_result['started']:
+                logger.info("Tekton Results has newer failure than KubeArchive")
+                return tr_result
+            return ka_result
+
+        return ka_result or tr_result
 
     def extract_all_details(self, pr_data, source='kubearchive'):
         # type: (Dict[str, Any], str) -> Dict[str, Any]
@@ -226,17 +293,118 @@ class BuildFailureCollector:
         # type: (str) -> Optional[str]
         return extract_failed_step_from_logs(logs)
 
+    def _extract_taskrun_logs_section(self, logs, task_name):
+        # type: (str, str) -> Optional[str]
+        """Extract the log section for a specific TaskRun from PipelineRun logs.
+
+        Args:
+            logs: Complete PipelineRun logs
+            task_name: Name of the TaskRun to extract (e.g., 'fips-check')
+
+        Returns:
+            Logs section for that TaskRun, or None if not found
+        """
+        if not logs or not task_name:
+            return None
+
+        # Look for markers like: ===== TaskRun: ...-fips-check-0 / Step: ... =====
+        import re
+        pattern = r'(===== TaskRun: [^/]*{task}[^/]* /.*?(?=\n=====|$))'.format(task=re.escape(task_name))
+
+        matches = re.findall(pattern, logs, re.DOTALL)
+        if matches:
+            # Return all sections for this TaskRun concatenated
+            return '\n'.join(matches)
+
+        return None
+
+    def _find_failed_taskrun(self, pr_name, pr_data):
+        # type: (str, Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str], Optional[str]]
+        """Find the TaskRun that actually failed and extract its error and logs.
+
+        Tries KubeArchive first, then falls back to Tekton Results.
+
+        Returns:
+            Tuple of (failed_task_name, error_from_taskrun, failed_task_logs)
+        """
+        if not pr_data:
+            return None, None, None
+
+        child_refs = pr_data.get('status', {}).get('childReferences', [])
+
+        for ref in child_refs:
+            if ref.get('kind') != 'TaskRun':
+                continue
+
+            task_name = ref.get('pipelineTaskName')
+            tr_name = ref.get('name')
+
+            if not tr_name:
+                continue
+
+            try:
+                tr_data = self.kubearchive.get_taskrun(tr_name)
+                if tr_data:
+                    conditions = tr_data.get('status', {}).get('conditions', [])
+                    if conditions and conditions[-1].get('status') == 'False':
+                        logger.info("Found failed TaskRun: %s (task: %s)", tr_name, task_name)
+
+                        condition_msg = conditions[-1].get('message', '')
+
+                        pod_name = tr_data.get('status', {}).get('podName')
+                        tr_logs = None
+                        if pod_name:
+                            tr_logs = self.kubearchive.get_pod_logs(pod_name, namespace=self.config.k8s.namespace)
+
+                        error_msg = None
+                        if tr_logs:
+                            error_msg, _ = self.extract_error_messages(tr_logs)
+                        if not error_msg and condition_msg:
+                            error_msg = condition_msg
+
+                        return task_name, error_msg, tr_logs
+            except Exception as e:
+                logger.debug("Could not fetch TaskRun %s: %s", tr_name, e)
+                continue
+
+        # Fallback 1: Tekton Results (has records KubeArchive may have lost)
+        try:
+            task_name, logs, _ = self.tekton_results.find_failed_taskrun(pr_name)
+            if task_name:
+                logger.info("Found failed TaskRun via Tekton Results (task: %s)", task_name)
+                error_msg = None
+                if logs:
+                    error_msg, _ = self.extract_error_messages(logs)
+                return task_name, error_msg, logs
+        except Exception as e:
+            logger.debug("Tekton Results fallback failed: %s", e)
+
+        # Fallback 2: simple metadata-based approach
+        return extract_failed_step_from_pipelinerun(pr_data), None, None
+
     def get_comprehensive_logs(self, pr_name):
         # type: (str) -> Optional[str]
-        """Fetch comprehensive logs from all TaskRuns and steps."""
+        """Fetch comprehensive logs from all TaskRuns and steps.
+
+        Tries KubeArchive/cluster first, then falls back to Tekton Results.
+        """
         logs, source = self.unified.get_logs_complete(pr_name)
 
         if logs:
             logger.info("Got logs from %s (%d chars)", source, len(logs))
-        else:
-            logger.error("No logs available from any source")
+            return logs
 
-        return logs
+        # Fallback: Tekton Results stores logs in cloud storage (S3)
+        try:
+            logs = self.tekton_results.get_pipelinerun_logs(pr_name)
+            if logs:
+                logger.info("Got logs from TektonResults (%d chars)", len(logs))
+                return logs
+        except Exception as e:
+            logger.debug("Tekton Results logs fallback failed: %s", e)
+
+        logger.error("No logs available from any source")
+        return None
 
     def get_logs_from_active_pods(self, pr_name):
         # type: (str) -> Optional[str]
@@ -306,6 +474,22 @@ class BuildFailureCollector:
         logger.info("Fetching PipelineRun metadata...")
         pr_data, data_source = self.unified.get_pipelinerun_complete(pr_name)
 
+        # Fallback: Tekton Results for PipelineRun metadata
+        if not pr_data:
+            try:
+                tr_prs = self.tekton_results.query_pipelinerun_records(
+                    application=self.config.k8s.application_name,
+                    component=component.name,
+                    page_size=5
+                )
+                for tr_pr in tr_prs:
+                    if tr_pr.get('metadata', {}).get('name') == pr_name:
+                        pr_data = tr_pr
+                        data_source = 'TektonResults'
+                        break
+            except Exception as e:
+                logger.debug("Tekton Results metadata fallback failed: %s", e)
+
         details = {}
         if pr_data:
             details = self.extract_all_details(pr_data, source=data_source)
@@ -313,9 +497,7 @@ class BuildFailureCollector:
         else:
             logger.warning("Could not fetch metadata from any source, using partial data")
 
-        error_message, error_type = self.extract_error_messages(logs) if logs else (None, None)
-        failed_step = self.extract_failed_step_from_logs(logs) if logs else None
-
+        # Calculate duration first (needed for timeout messages)
         duration = None
         if details.get('start_time') and details.get('completion_time'):
             try:
@@ -324,6 +506,71 @@ class BuildFailureCollector:
                 duration = int((end - start).total_seconds())
             except Exception:
                 pass
+
+        # Check PipelineRun failure reason before parsing logs
+        failure_reason = pr_info.get('reason', '')
+
+        if failure_reason in ('PipelineRunTimeout', 'TaskRunTimeout'):
+            # Timeout: use timeout-specific message, don't parse logs
+            error_message = f"Build timed out after {duration}s" if duration else "Build timed out"
+            error_type = "Timeout"
+            failed_step = None
+        elif failure_reason == 'PipelineRunCancelled':
+            # Cancelled: use cancellation message
+            error_message = "Build was cancelled"
+            error_type = "Cancelled"
+            failed_step = None
+        else:
+            # Failed or other: find the TaskRun that failed
+            failed_step, taskrun_error, failed_task_logs = self._find_failed_taskrun(pr_name, pr_data)
+
+            # Append failed task's logs if they're missing from comprehensive logs
+            if failed_step and failed_task_logs:
+                task_section_header = "===== TaskRun:"
+                task_in_logs = (
+                    logs and failed_step in logs
+                    and task_section_header in logs
+                    and any(
+                        failed_step in line
+                        for line in logs.split('\n')
+                        if line.startswith(task_section_header)
+                    )
+                )
+                if not task_in_logs:
+                    section = "\n\n===== TaskRun: {}-{} / Step: run-{} =====\n{}".format(
+                        pr_name, failed_step, failed_step, failed_task_logs
+                    )
+                    logs = (logs or '') + section
+                    log_length = len(logs)
+                    logger.info("Appended %d chars of %s logs (missing from comprehensive logs)",
+                                len(section), failed_step)
+
+            # Extract error from the failed TaskRun's section in logs
+            error_message = None
+            error_type = None
+
+            if failed_step and logs:
+                task_logs = self._extract_taskrun_logs_section(logs, failed_step)
+                if task_logs:
+                    error_message, error_type = self.extract_error_messages(task_logs)
+
+            # If no error found in task-specific logs, try all logs
+            if not error_message and logs:
+                error_message, error_type = self.extract_error_messages(logs)
+
+            # Use the error from _find_failed_taskrun (includes condition messages)
+            if not error_message and taskrun_error:
+                error_message = taskrun_error
+                error_type = "Task Failure"
+
+            # If still no error, use a generic message
+            if not error_message and failed_step:
+                error_message = f"{failed_step} task failed - check Konflux UI for details"
+                error_type = "Task Failure"
+
+            # Fallback to log parsing for the step name if metadata didn't have it
+            if not failed_step and logs:
+                failed_step = self.extract_failed_step_from_logs(logs)
 
         inserted = False
         try:
@@ -352,6 +599,109 @@ class BuildFailureCollector:
         self.build_repo.update_component_health(component.name)
 
         return True, inserted, log_length
+
+    def check_resolution_via_history(self, component_name):
+        # type: (str) -> Optional[Dict[str, Any]]
+        """Check if a component's failure is resolved by querying build history.
+
+        Queries Tekton Results for the component's recent builds. If the newest
+        push build succeeded, the failure is resolved.
+
+        Returns:
+            Dict with resolution info if resolved, None if still failing.
+        """
+        try:
+            history = self.tekton_results.query_component_build_history(
+                application=self.config.k8s.application_name,
+                component=component_name,
+                page_size=10
+            )
+            if not history:
+                return None
+
+            newest = max(history,
+                         key=lambda p: p.get('metadata', {}).get('creationTimestamp', ''))
+            conditions = newest.get('status', {}).get('conditions', [])
+            if not conditions:
+                return None
+
+            last_condition = conditions[-1]
+            if last_condition.get('status') == 'True':
+                pr_name = newest.get('metadata', {}).get('name', '')
+                ts = newest.get('metadata', {}).get('creationTimestamp', '')
+                return {
+                    'resolved': True,
+                    'resolution_pr_name': pr_name,
+                    'resolution_timestamp': ts,
+                    'resolution_type': 'auto-detected',
+                }
+        except Exception as e:
+            logger.debug("Resolution check failed for %s: %s", component_name, e)
+
+        return None
+
+    def get_component_build_history(self, component_name, limit=10):
+        # type: (str, int) -> List[Dict[str, Any]]
+        """Get build history for a component from Tekton Results.
+
+        Returns list of dicts with: name, timestamp, status, commit_sha, failed_task.
+        """
+        try:
+            history = self.tekton_results.query_component_build_history(
+                application=self.config.k8s.application_name,
+                component=component_name,
+                page_size=limit
+            )
+        except Exception as e:
+            logger.debug("Build history query failed for %s: %s", component_name, e)
+            return []
+
+        results = []
+        for pr in history:
+            metadata = pr.get('metadata', {})
+            conditions = pr.get('status', {}).get('conditions', [])
+            if not conditions:
+                continue
+
+            last_condition = conditions[-1]
+            status_flag = last_condition.get('status')
+            reason = last_condition.get('reason', '')
+
+            if status_flag == 'True':
+                status = 'Succeeded'
+            elif status_flag == 'False':
+                status = classify_build_status(reason).value
+            else:
+                continue
+
+            annotations = metadata.get('annotations', {})
+            commit_sha = (
+                annotations.get('build.appstudio.redhat.com/commit_sha') or
+                annotations.get('pipelinesascode.tekton.dev/sha')
+            )
+
+            failed_task = None
+            if status != 'Succeeded':
+                for ref in pr.get('status', {}).get('childReferences', []):
+                    if ref.get('kind') == 'TaskRun':
+                        failed_task = ref.get('pipelineTaskName')
+
+            # Extract output image from status.results
+            pr_results = pr.get('status', {}).get('results', [])
+            image_url = next(
+                (r['value'] for r in pr_results if r.get('name') == 'IMAGE_URL'), None
+            )
+
+            results.append({
+                'name': metadata.get('name', ''),
+                'timestamp': metadata.get('creationTimestamp', ''),
+                'status': status,
+                'commit_sha': commit_sha[:8] if commit_sha else None,
+                'failed_task': failed_task,
+                'image_url': image_url,
+            })
+
+        return results
 
     def run(self, components=None, limit=None):
         # type: (Optional[List[Component]], Optional[int]) -> ScanResult
@@ -407,6 +757,31 @@ class BuildFailureCollector:
                 total_log_chars += log_chars
             if inserted:
                 total_new += 1
+
+        # Check for resolved failures via build history
+        total_resolved = 0
+        try:
+            unresolved = self.build_repo.find_unresolved_component_names(
+                self.config.k8s.application_name
+            )
+            currently_failing = {c.name for c in components}
+            candidates = unresolved - currently_failing
+
+            for comp_name in candidates:
+                resolution = self.check_resolution_via_history(comp_name)
+                if resolution:
+                    if self.build_repo.mark_resolved(
+                        comp_name, self.config.k8s.application_name,
+                        self.config.k8s.namespace, resolution['resolution_pr_name']
+                    ):
+                        total_resolved += 1
+                        logger.info("Auto-resolved %s (successful build: %s)",
+                                    comp_name, resolution['resolution_pr_name'])
+        except Exception as e:
+            logger.debug("Resolution check phase failed: %s", e)
+
+        if total_resolved:
+            logger.info("Auto-resolved %d component(s) via build history", total_resolved)
 
         duration = time.time() - start_time
         result = ScanResult(

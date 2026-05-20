@@ -6,6 +6,9 @@ from clients.kubernetes import KubernetesClient
 from clients.tekton_results import TektonResultsClient
 from clients.unified import UnifiedPipelineClient
 from clients.pipelinerun_query import query_pipelineruns
+from clients.gitlab_client import GitLabClient
+from clients.pyxis_client import PyxisClient
+from clients.konflux_client import KonfluxClient
 
 __all__ = [
     'PipelineRunSource',
@@ -14,4 +17,7 @@ __all__ = [
     'TektonResultsClient',
     'UnifiedPipelineClient',
     'query_pipelineruns',
+    'GitLabClient',
+    'PyxisClient',
+    'KonfluxClient',
 ]

@@ -8,6 +8,7 @@ import subprocess
 
 from clients.kubernetes import KubernetesClient
 from clients.kubearchive import KubeArchiveClient
+from clients.tekton_results import TektonResultsClient
 
 
 class UnifiedPipelineClient:
@@ -27,6 +28,10 @@ class UnifiedPipelineClient:
             try:
                 self.sources.append(KubeArchiveClient(namespace=namespace))
             except RuntimeError:
+                pass
+            try:
+                self.sources.append(TektonResultsClient(namespace=namespace))
+            except Exception:
                 pass
 
     def get_pipelinerun_complete(self, pr_name):

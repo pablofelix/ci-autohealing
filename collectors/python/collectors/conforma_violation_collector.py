@@ -8,16 +8,12 @@ For each component with a failing Conforma test:
 5. Insert/update in conforma_results table
 """
 
-import sys
 import json
-import subprocess
 import time
-from typing import Dict, Any, Optional, List, Set, Tuple
 
-from config import CollectorConfig
 from logger import setup_logger
 from repositories import DatabaseConnection, ConformaRepository
-from clients import KubeArchiveClient, KubernetesClient
+from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient
 from clients.pipelinerun_query import query_pipelineruns
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
@@ -27,7 +23,8 @@ logger = setup_logger(__name__)
 class ConformaViolationCollector:
     """Collects Conforma test violation details."""
 
-    def __init__(self, config, db=None, conforma_repo=None, kubearchive=None, k8s=None):
+    def __init__(self, config, db=None, conforma_repo=None, kubearchive=None, k8s=None,
+                 tekton_results=None):
         # type: (CollectorConfig, ...) -> None
         self.config = config
         if db is None:
@@ -38,21 +35,11 @@ class ConformaViolationCollector:
             namespace=config.k8s.namespace
         )
         self.k8s = k8s or KubernetesClient(namespace=config.k8s.namespace)
+        self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
 
-    def get_conforma_pipelineruns(self):
-        # type: () -> Dict[Tuple[str, str], Dict[str, Any]]
-        """Get latest Conforma PipelineRun status per (component, scenario)."""
-        label_selector = (
-            'appstudio.openshift.io/application={},'
-            'pipelines.appstudio.openshift.io/type=test'
-        ).format(self.config.k8s.application_name)
-
-        pipelineruns = query_pipelineruns(
-            self.config.k8s.namespace, label_selector,
-            kubearchive_url=self.kubearchive.api_url,
-            session=self.kubearchive.session,
-        )
-
+    def _collect_conforma_latest(self, pipelineruns):
+        # type: (List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]
+        """Build a map of (component, scenario) -> latest conforma PipelineRun info."""
         latest_per_key = {}  # type: Dict[Tuple[str, str], Dict[str, Any]]
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
@@ -86,6 +73,45 @@ class ConformaViolationCollector:
                     'status': status,
                     'pr_data': pr
                 }
+        return latest_per_key
+
+    def get_conforma_pipelineruns(self):
+        # type: () -> Dict[Tuple[str, str], Dict[str, Any]]
+        """Get latest Conforma PipelineRun status per (component, scenario).
+
+        Queries both KubeArchive/cluster and Tekton Results, merging by
+        (component, scenario) key and keeping the newest per pair.
+        """
+        label_selector = (
+            'appstudio.openshift.io/application={},'
+            'pipelines.appstudio.openshift.io/type=test'
+        ).format(self.config.k8s.application_name)
+
+        pipelineruns = query_pipelineruns(
+            self.config.k8s.namespace, label_selector,
+            kubearchive_url=self.kubearchive.api_url,
+            session=self.kubearchive.session,
+        )
+
+        latest_per_key = self._collect_conforma_latest(pipelineruns)
+
+        # Merge Tekton Results (catches test PipelineRuns that expired from KubeArchive)
+        try:
+            tr_pipelineruns = self.tekton_results.query_conforma_records(
+                application=self.config.k8s.application_name,
+                page_size=100
+            )
+            if tr_pipelineruns:
+                tr_latest = self._collect_conforma_latest(tr_pipelineruns)
+                added = 0
+                for key, info in tr_latest.items():
+                    if key not in latest_per_key or info['timestamp'] > latest_per_key[key]['timestamp']:
+                        latest_per_key[key] = info
+                        added += 1
+                if added:
+                    logger.info("Tekton Results added/updated %d conforma pair(s)", added)
+        except Exception as e:
+            logger.debug("Tekton Results conforma query skipped: %s", e)
 
         return latest_per_key
 
@@ -100,7 +126,10 @@ class ConformaViolationCollector:
 
     def extract_violation_details(self, pr_name, pr_data):
         # type: (str, Dict[str, Any]) -> Dict[str, Any]
-        """Extract violation details from Conforma PipelineRun logs."""
+        """Extract violation details from Conforma PipelineRun logs.
+
+        Tries KubeArchive first, falls back to Tekton Results for logs.
+        """
         result = {
             'violations_count': 0,
             'warnings_count': 0,
@@ -115,16 +144,33 @@ class ConformaViolationCollector:
             return result
 
         tr_data = self.kubearchive.get_taskrun(verify_tr_name)
-        if not tr_data:
-            logger.warning("Cannot fetch TaskRun: %s", verify_tr_name)
-            return result
 
-        pod_name = tr_data.get('status', {}).get('podName')
-        if not pod_name:
-            logger.warning("No pod name in TaskRun")
-            return result
+        pod_name = None
+        if tr_data:
+            pod_name = tr_data.get('status', {}).get('podName')
 
-        summary_logs = self.get_step_logs(pod_name, 'summary')
+        if pod_name:
+            summary_logs = self.get_step_logs(pod_name, 'summary')
+            detailed_logs = self.get_step_logs(pod_name, 'detailed-report')
+            report_logs = self.get_step_logs(pod_name, 'report-json')
+        else:
+            logger.info("KubeArchive TaskRun unavailable, trying Tekton Results")
+            summary_logs = None
+            detailed_logs = None
+            report_logs = None
+
+            # Fallback: fetch all logs from Tekton Results and parse sections
+            try:
+                tr_logs = self.tekton_results.get_pipelinerun_logs(pr_name, max_log_size=200000)
+                if tr_logs:
+                    summary_logs = self._extract_step_section(tr_logs, 'summary')
+                    detailed_logs = self._extract_step_section(tr_logs, 'detailed-report')
+                    report_logs = self._extract_step_section(tr_logs, 'report-json')
+                    if summary_logs or detailed_logs:
+                        logger.info("Got conforma logs from Tekton Results")
+            except Exception as e:
+                logger.debug("Tekton Results logs fallback failed: %s", e)
+
         if summary_logs:
             try:
                 summary = json.loads(summary_logs.strip())
@@ -136,12 +182,10 @@ class ConformaViolationCollector:
             except json.JSONDecodeError:
                 logger.warning("Could not parse summary step")
 
-        detailed_logs = self.get_step_logs(pod_name, 'detailed-report')
         if detailed_logs:
             result['violation_summary'] = detailed_logs[:10000]
             logger.info("Detailed report: %d chars", len(detailed_logs))
 
-        report_logs = self.get_step_logs(pod_name, 'report-json')
         if report_logs:
             try:
                 report_json = json.loads(report_logs.strip())
@@ -151,6 +195,17 @@ class ConformaViolationCollector:
                 logger.warning("Could not parse report-json step")
 
         return result
+
+    @staticmethod
+    def _extract_step_section(logs, step_name):
+        # type: (str, str) -> Optional[str]
+        """Extract a specific step's output from combined TaskRun logs."""
+        import re
+        pattern = r'===== TaskRun: [^=]*/ Step: {step}\b[^=]*=====(.*?)(?=\n===== |$)'.format(
+            step=re.escape(step_name)
+        )
+        match = re.search(pattern, logs, re.DOTALL)
+        return match.group(1).strip() if match else None
 
     def get_component_repo_url(self, component_name):
         # type: (str) -> str
@@ -164,12 +219,19 @@ class ConformaViolationCollector:
 
     def save_to_db(self, component, scenario, pr_name, pr_uid, violations, comp_info):
         # type: (str, str, str, str, Dict[str, Any], Dict[str, Any]) -> bool
+        """Save violation to DB. Detects future scenarios by -future suffix."""
         try:
+            # Detect if this is a future-policy scenario (informational, non-blocking)
+            is_future = '-future' in scenario
+            if is_future:
+                logger.info("Future scenario detected (informational, non-blocking)")
+
             result = self.conforma_repo.upsert_violation(
                 application=self.config.k8s.application_name,
                 component=component, scenario=scenario,
                 pr_name=pr_name, pr_uid=pr_uid,
-                violations=violations, comp_info=comp_info
+                violations=violations, comp_info=comp_info,
+                is_future=is_future
             )
             if result:
                 logger.info("Saved to DB")
@@ -177,6 +239,50 @@ class ConformaViolationCollector:
         except Exception as e:
             logger.error("DB error: %s", e)
             return False
+
+    def get_conforma_history(self, component_name, limit=10):
+        # type: (str, int) -> List[Dict[str, Any]]
+        """Get conforma test history for a component from Tekton Results.
+
+        Returns list of dicts with: name, timestamp, scenario, status, violations_count.
+        """
+        try:
+            records = self.tekton_results.query_conforma_records(
+                application=self.config.k8s.application_name,
+                component=component_name,
+                page_size=limit
+            )
+        except Exception as e:
+            logger.debug("Conforma history query failed for %s: %s", component_name, e)
+            return []
+
+        results = []
+        for pr in records:
+            metadata = pr.get('metadata', {})
+            labels = metadata.get('labels', {})
+            scenario = labels.get('test.appstudio.openshift.io/scenario', '')
+            if not scenario.startswith('conforma-'):
+                continue
+
+            conditions = pr.get('status', {}).get('conditions', [])
+            if not conditions:
+                continue
+
+            last_condition = conditions[-1]
+            status_flag = last_condition.get('status')
+            if status_flag == 'Unknown':
+                continue
+
+            status = 'Passed' if status_flag == 'True' else 'Failed'
+
+            results.append({
+                'name': metadata.get('name', ''),
+                'timestamp': metadata.get('creationTimestamp', ''),
+                'scenario': scenario,
+                'status': status,
+            })
+
+        return results
 
     def resolve_fixed_components(self, currently_failing, all_seen):
         # type: (Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int

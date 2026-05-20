@@ -1,7 +1,7 @@
 # Roadmap: CI-Autohealing — From Monitoring to Auto-Resolution
 
-**Created:** 2026-04-22
-**Last Updated:** 2026-05-11 (session 5)
+**Created:** 2026-04-22  
+**Last Updated:** 2026-05-18 (P0 complete, P1 added)
 
 ## Context
 
@@ -16,12 +16,18 @@ The ci-autohealing project has evolved into a solid failure detection and diagno
 | Phase 2 | **Complete** | Auto-resolution of build failures via PRs |
 | Phase 3 | **Complete** | Auto-resolution of Conforma compliance violations |
 | Phase 4 | **In Progress** | Hardening: multi-app support, test coverage, Slack API, autonomous mode |
+| **P0** | **Complete** | Context enrichment, pattern matching, batch analysis (infrastructure) |
+| **P1** | **In Progress** | Complete P0 integration, pattern learning, fix improvements, notifications |
 
 ## Sequencing
 
 ```
 Phase 0 (Cleanup) ──> Phase 1 (AI Analysis) ──┬──> Phase 2 (Build Fixes) ✓
-                                               └──> Phase 3 (Conforma Fixes) ←─ here
+                                               └──> Phase 3 (Conforma Fixes) ✓
+                                                              ↓
+                                               Phase 4 (Hardening) ✓ (mostly)
+                                                              ↓
+                       P0 (Infrastructure) ──> P1 (Intelligence) ←─ here
 ```
 
 ---
@@ -445,6 +451,180 @@ All other violation categories (`policy_signing_key`, `policy_rpm_repository`, e
 `docs/adr/006-conforma-fix-strategy.md` — documents the separate fix code paths, Jira-first flow rationale, and deterministic vs LLM fix strategy per violation type.
 
 ---
+
+---
+
+## P1: AI Analysis Infrastructure Improvements (In Progress)
+
+**Goal:** Complete P0 integration, add pattern learning automation, improve auto-fix generation, and prepare notification infrastructure.
+
+**Context:** P0 introduced context enrichment, pattern matching, and batch analysis. P1 focuses on making these systems production-ready and adding intelligence/automation.
+
+### P1.1 Complete P0 Integration (In Progress)
+
+**Goal:** Validate and complete the P0 improvements end-to-end.
+
+**Tasks:**
+1. **Populate pattern confidence** — Run AI analyses to populate `avg_confidence` in `error_patterns` table
+   - Current: Patterns exist but `avg_confidence` is NULL (needs real analyses)
+   - Target: 10+ analyses per pattern to establish baseline confidence
+   - Enables pattern boost to work (currently inactive)
+
+2. **Install anthropic module** — Enable batch analysis functionality
+   - Current: `ModuleNotFoundError: No module named 'anthropic'`
+   - Fix: `pip install anthropic` or add to `requirements.txt`
+   - Validates `BatchAnalysisService` works end-to-end
+
+3. **Run full enrichment** — Process all 58 pending failures
+   - Current: 2.6% coverage (1/38 enriched)
+   - Target: 100% coverage
+   - Command: `./enrich_context.py --limit 100`
+   - Validates both enrichment sources (dependency_changes + related_failures)
+
+4. **Verify pattern boost** — Confirm confidence boost works with real data
+   - Current: Infrastructure ready, needs `avg_confidence` populated
+   - Validation: Query for analyses with `analysis_json->'pattern_boost'`
+   - Measure: % of analyses that received boost
+
+5. **Measure real metrics**
+   - Enrichment coverage: X% → 100%
+   - Pattern reuse: 0% → Y%
+   - Batch throughput: measure actual analyses/hour
+   - Queue ETA accuracy: compare predicted vs actual
+
+**Blocked by:** None (all code complete)
+
+### P1.2 Pattern Learning Automation (Not Started)
+
+**Goal:** Automatically improve patterns based on fix outcomes.
+
+**File:** `collectors/python/patterns/pattern_learner.py` (new)
+
+**Features:**
+1. **Auto-update patterns after successful fixes**
+   - When `resolution_attempts.was_successful = TRUE`, update linked pattern
+   - Increment `success_count`, update `avg_confidence` upward
+   - Extract `typical_fix` from successful PR if not set
+
+2. **Track pattern accuracy**
+   - New columns: `error_patterns.success_count`, `error_patterns.fail_count`
+   - Calculate accuracy: `success / (success + fail)`
+   - Decay patterns with accuracy < 50% over 10+ attempts
+
+3. **Auto-generate new patterns**
+   - After 3 successful fixes with same `failure_category` but no pattern match
+   - Create new pattern with `typical_fix` from most recent successful PR
+   - Initial `avg_confidence` = mean of the 3 analyses
+
+4. **Pattern decay/archival**
+   - Mark patterns as `archived = TRUE` if:
+     - No occurrences in last 90 days
+     - Accuracy < 30% over 20+ attempts
+   - Archived patterns excluded from matching but kept for historical data
+
+**Integration:**
+- `verify_fixes.py` calls `PatternLearner.update_from_resolution()` after marking success/fail
+- `BuildFailureAnalyzer` calls `PatternLearner.suggest_new_pattern()` after each analysis
+- `ic patterns list --show-archived` flag to view archived patterns
+
+**Cron:** Step 2.6 (after `verify_fixes.py`)
+
+### P1.3 Notification & Alerting System (Blocked — no Slack/email)
+
+**Goal:** Automated alerts for queue health and analysis failures.
+
+**Blocked by:** 
+- Slack: No `SLACK_BOT_TOKEN` available (same blocker as Phase 4.3)
+- Email: No SMTP server configured
+
+**Design (ready for implementation when tokens available):**
+
+**File:** `collectors/python/notifiers/alert_service.py` (new)
+
+**Triggers:**
+1. **Queue depth alerts**
+   - Threshold: `build_pending > 100` OR `conforma_pending > 50`
+   - Frequency: Once per day (don't spam)
+   - Message: Queue depth, ETA, link to `ic ai status`
+
+2. **Enrichment failures**
+   - Threshold: `failed_enrichments > 10` in last hour
+   - Message: Count, sample failure IDs, link to logs
+
+3. **Analysis failures**
+   - Threshold: `ai_skip_reason='max_retries'` count > 5 in last run
+   - Message: Count, categories affected, suggest increasing `MAX_RETRIES`
+
+4. **Daily summary** (optional)
+   - Analyses completed: X
+   - Fixes created: Y
+   - Queue status: Z pending
+   - Coverage: enrichment A%, analysis B%
+
+**Channels:**
+- Slack: Post to `#rhoai-ci-autohealing` (when token available)
+- Email: Send to distribution list (when SMTP configured)
+- Webhook: POST JSON to configurable URL (token-less option)
+
+**Configuration:**
+```bash
+# .env additions (when available)
+ALERT_SLACK_CHANNEL=#rhoai-ci-autohealing
+ALERT_EMAIL_TO=team@example.com
+ALERT_WEBHOOK_URL=https://...  # Alternative if no Slack/email
+ALERT_QUEUE_THRESHOLD=100
+```
+
+**Workaround until tokens available:**
+- Write alerts to `/tmp/ci-autohealing/alerts.log`
+- `ic alerts check` command to view recent alerts
+- Manual review of log file
+
+### P1.4 Auto-fix Generation Improvements (Not Started)
+
+**Goal:** Use enriched context and pattern matches to improve fix quality.
+
+**File:** `collectors/python/fixers/fix_generator.py` (modify)
+
+**Improvements:**
+
+1. **Inject enriched_context into LLM prompts**
+   - Current: Only uses `build_logs`, `commit_context`
+   - Add: `enriched_context` (dependency_changes + related_failures)
+   - Benefit: LLM sees related failures and their fixes, dependency changes that triggered failure
+
+2. **Use pattern matches for fix suggestions**
+   - Current: LLM generates fix from scratch
+   - Add: If pattern match exists with `typical_fix`, inject as "known solution"
+   - Prompt: "This failure matches pattern X. Previous fix: Y. Consider adapting this approach."
+
+3. **Track fix success rate by pattern**
+   - New table: `pattern_fix_outcomes` links `resolution_attempts` to `error_patterns`
+   - Metrics: success rate per pattern, avg time-to-merge
+   - Query: `ic patterns stats <name>` shows fix outcomes
+
+4. **Learn from failed fixes**
+   - When `was_successful = FALSE`, store failure reason
+   - New column: `resolution_attempts.failure_reason TEXT`
+   - Categories: "tests still failing", "PR rejected", "conflict with main", "wrong approach"
+   - Feed back to pattern: decrement confidence, mark pattern as needing review
+
+**Integration points:**
+```python
+# In build_analysis_prompt()
+if enriched_context:
+    prompt += format_enriched_context(enriched_context)
+    
+# In fix_generator.py
+if pattern_boost_metadata:
+    typical_fix = pattern_boost_metadata['pattern_name']
+    prompt += f"Known solution: {typical_fix}\n"
+```
+
+**Expected impact:**
+- Fix success rate: current unknown → target 70%+
+- Time to fix: measure baseline → reduce by suggesting known solutions
+- Pattern accuracy: track and improve over time
 
 ---
 

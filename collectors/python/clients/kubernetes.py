@@ -69,15 +69,16 @@ class KubernetesClient(PipelineRunSource):
         """Fetch component repository URL and branch from cluster."""
         ns = namespace or self.namespace
         try:
-            result = subprocess.run(
-                ['oc', 'get', 'component', component_name, '-n', ns, '-o', 'json'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, check=True, timeout=15
+            from kubernetes import client, config
+            config.load_kube_config()
+            api = client.CustomObjectsApi()
+            data = api.get_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=ns, plural='components', name=component_name,
             )
-            data = json.loads(result.stdout)
             return {
                 'repository_url': data.get('spec', {}).get('source', {}).get('git', {}).get('url', ''),
                 'branch': data.get('spec', {}).get('source', {}).get('git', {}).get('revision', ''),
             }
-        except (subprocess.CalledProcessError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        except Exception:
             return None

@@ -1,9 +1,7 @@
 """Repository for conforma_results table operations."""
 
 import json
-from typing import Optional, Set, Dict, Any, Tuple
 
-from repositories.connection import DatabaseConnection
 
 
 class ConformaRepository:
@@ -13,26 +11,46 @@ class ConformaRepository:
         # type: (DatabaseConnection,) -> None
         self.db = db
 
-    def find_unresolved_component_names(self, application):
-        # type: (str,) -> Set[str]
+    def find_unresolved_component_names(self, application, include_future=True):
+        # type: (str, bool) -> Set[str]
+        """Find unresolved components. By default includes both current and future scenarios.
+
+        Args:
+            application: Application name to filter by
+            include_future: If False, only returns current-policy violations (gate-blocking)
+        """
         try:
             with self.db.connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT DISTINCT component_name FROM conforma_results
-                    WHERE application = %s AND is_resolved = FALSE
-                    """,
-                    (application,)
-                )
+                if include_future:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT component_name FROM conforma_results
+                        WHERE application = %s AND is_resolved = FALSE
+                        """,
+                        (application,)
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT component_name FROM conforma_results
+                        WHERE application = %s AND is_resolved = FALSE AND is_future = FALSE
+                        """,
+                        (application,)
+                    )
                 return {row[0] for row in cursor.fetchall()}
         except Exception:
             return set()
 
     def upsert_violation(self, application, component, scenario,
-                         pr_name, pr_uid, violations, comp_info):
-        # type: (str, str, str, str, str, Dict[str, Any], Dict[str, Any]) -> bool
-        """Insert or update a Conforma violation. Returns True on success."""
+                         pr_name, pr_uid, violations, comp_info, is_future=False):
+        # type: (str, str, str, str, str, Dict[str, Any], Dict[str, Any], bool) -> bool
+        """Insert or update a Conforma violation. Returns True on success.
+
+        Args:
+            is_future: True if scenario uses future EC policy (informational),
+                      False if current policy (gate-blocking)
+        """
         try:
             with self.db.connection() as conn:
                 cursor = conn.cursor()
@@ -98,8 +116,8 @@ class ConformaRepository:
                             status, violations_count, warnings_count, successes_count,
                             violation_summary, violation_details,
                             snapshot_name, container_image, repository_url, commit_sha, commit_url,
-                            jira_key
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            jira_key, is_future
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (application, component, scenario,
                          pr_name, pr_uid, 'Failed',
@@ -109,7 +127,7 @@ class ConformaRepository:
                          comp_info.get('snapshot_name'), comp_info.get('container_image'),
                          comp_info.get('repository_url'), comp_info.get('commit_sha'),
                          comp_info.get('commit_url'),
-                         prev_jira_key)
+                         prev_jira_key, is_future)
                     )
                     return True
         except Exception:

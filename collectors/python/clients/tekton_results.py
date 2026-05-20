@@ -164,6 +164,9 @@ class TektonResultsClient:
         # type: (str) -> Tuple[Optional[str], Optional[str], Optional[str]]
         """Find the failed TaskRun in a PipelineRun and fetch its logs.
 
+        When no logs are available (e.g. PodCreationFailed, ImagePullFailed),
+        falls back to the TaskRun condition message as the log content.
+
         Returns:
             (task_name, logs, record_name) or (None, None, None)
         """
@@ -180,6 +183,11 @@ class TektonResultsClient:
                 'tekton.dev/pipelineTask', ''
             )
             logs = self.get_taskrun_logs(record_name)
+            if not logs:
+                condition_msg = conditions[-1].get('message', '')
+                condition_reason = conditions[-1].get('reason', '')
+                if condition_msg:
+                    logs = "{}: {}".format(condition_reason, condition_msg)
             logger.info("Found failed TaskRun via Tekton Results: %s (task: %s)", record_name, task_name)
             return task_name, logs, record_name
 
@@ -234,9 +242,13 @@ class TektonResultsClient:
                 results.append(decoded)
         return results
 
-    def get_pipelinerun_logs(self, pipelinerun_name, max_log_size=200000):
-        # type: (str, int) -> Optional[str]
-        """Fetch combined logs for all TaskRuns in a PipelineRun from Tekton Results."""
+    def get_pipelinerun_logs(self, pipelinerun_name, max_log_size=200000, failed_only=False):
+        # type: (str, int, bool) -> Optional[str]
+        """Fetch combined logs for TaskRuns in a PipelineRun from Tekton Results.
+
+        When failed_only=True, only downloads logs from failed TaskRuns —
+        dramatically faster for on-demand fetching (1-2 TaskRuns vs 30+).
+        """
         taskruns = self.query_taskrun_records(pipelinerun_name)
         if not taskruns:
             return None
@@ -245,10 +257,20 @@ class TektonResultsClient:
         total_size = 0
 
         for tr_data, record_name in taskruns:
+            if failed_only:
+                conditions = tr_data.get('status', {}).get('conditions', [])
+                if not conditions or conditions[-1].get('status') != 'False':
+                    continue
+
             task_name = tr_data.get('metadata', {}).get('labels', {}).get(
                 'tekton.dev/pipelineTask', 'unknown'
             )
             logs = self.get_taskrun_logs(record_name)
+            if not logs and failed_only:
+                condition_msg = tr_data.get('status', {}).get('conditions', [{}])[-1].get('message', '')
+                condition_reason = tr_data.get('status', {}).get('conditions', [{}])[-1].get('reason', '')
+                if condition_msg:
+                    logs = "{}: {}".format(condition_reason, condition_msg)
             if logs:
                 section = "===== TaskRun: {} / Task: {} =====\n{}".format(
                     tr_data.get('metadata', {}).get('name', ''), task_name, logs
