@@ -432,17 +432,140 @@ def ai_batch(args):
 @ai.command('status')
 def ai_status():
     """Show AI analysis summary."""
-    _bash_fallback(['ai', 'status'])
+    from cli.db import require_db, sql, sql_table
+    from cli.formatting import bold, cyan, green, section_header
+    if not require_db():
+        return
+    app = cfg.APPLICATION_NAME
+    section_header('AI Analysis Status')
+    print()
+
+    bp = sql("SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
+    bnl = sql("SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
+    bsk = sql("SELECT COUNT(*) FROM build_failures WHERE ai_skip_reason IS NOT NULL AND application = '{}';".format(app)) or '0'
+    ba = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+    blc = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+    baf = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+
+    cp = sql("SELECT COUNT(*) FROM conforma_results WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND violation_summary IS NOT NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
+    csk = sql("SELECT COUNT(*) FROM conforma_results WHERE ai_skip_reason IS NOT NULL AND application = '{}';".format(app)) or '0'
+    ca = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+    clc = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+    caf = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
+
+    tc = sql("SELECT COALESCE(SUM(a.cost_usd), 0) FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
+
+    print(bold('Build Failures:'))
+    print('  Pending:        {} awaiting analysis'.format(bp))
+    if int(bnl) > 0:
+        print('  No logs yet:    {} (waiting for commit context collector)'.format(bnl))
+    if int(bsk) > 0:
+        print('  Skipped:        {} (max retries or no-logs timeout)'.format(bsk))
+    print('  Analyzed:       {} (last 30 days)'.format(ba))
+    if int(ba) > 0:
+        bh = int(ba) - int(blc)
+        print('    High conf (>=70%): {}'.format(bh))
+        if int(blc) > 0:
+            print('    Low conf  (<70%):  {}  <- needs human review'.format(blc))
+        bpct = int(baf) * 100 // max(int(ba), 1)
+        print('  Auto-fixable:   {} ({}%)'.format(baf, bpct))
+
+    print()
+    print(bold('Conforma Violations:'))
+    print('  Pending:        {} awaiting analysis'.format(cp))
+    if int(csk) > 0:
+        print('  Skipped:        {} (max retries)'.format(csk))
+    print('  Analyzed:       {} (last 30 days)'.format(ca))
+    if int(ca) > 0:
+        ch = int(ca) - int(clc)
+        print('    High conf (>=70%): {}'.format(ch))
+        if int(clc) > 0:
+            print('    Low conf  (<70%):  {}  <- needs human review'.format(clc))
+        cpct = int(caf) * 100 // max(int(ca), 1)
+        print('  Auto-fixable:   {} ({}%)'.format(caf, cpct))
+
+    print()
+    print(bold('Total cost:') + '   ${} (last 30 days)'.format(tc))
+    print()
+
+    sql_table("""
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY a.analyzed_at DESC) as "#",
+            COALESCE(b.component_name, c.component_name) as "Component",
+            CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END as "Type",
+            a.failure_category as "Category",
+            ROUND(a.confidence_score * 100) || '%' as "Confidence",
+            CASE WHEN a.can_auto_fix THEN '✓' ELSE '✗' END as "Fixable"
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '{app}' OR c.application = '{app}')
+          AND a.analyzed_at > NOW() - INTERVAL '7 days'
+        ORDER BY a.analyzed_at DESC LIMIT 10;
+    """.format(app=app))
+    print()
+
+    total_pending = int(bp) + int(cp)
+    if total_pending > 0:
+        print(cyan("Run 'ic ai analyze --all' to analyze pending failures and violations"))
+    else:
+        print(green('✓ No pending failures or violations to analyze'))
+    print()
 
 
 @ai.command('stats')
 @click.option('--fixes', is_flag=True)
 def ai_stats(fixes):
     """Detailed AI statistics."""
-    args = ['ai', 'stats']
     if fixes:
-        args.append('--fixes')
-    _bash_fallback(args)
+        _bash_fallback(['ai', 'stats', '--fixes'])
+        return
+    from cli.db import require_db, sql, sql_table
+    from cli.formatting import bold, section_header
+    if not require_db():
+        return
+    app = cfg.APPLICATION_NAME
+    section_header('AI Analysis Statistics')
+    print()
+    print(bold('Analyses by Category (last 30 days):'))
+    sql_table("""
+        SELECT
+            CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END as "Type",
+            a.failure_category as "Category",
+            COUNT(*) as "Count",
+            ROUND(AVG(a.confidence_score * 100)) || '%' as "Avg Confidence",
+            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as "Auto-fixable"
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '{app}' OR c.application = '{app}')
+          AND a.analyzed_at > NOW() - INTERVAL '30 days'
+        GROUP BY CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END, a.failure_category
+        ORDER BY COUNT(*) DESC;
+    """.format(app=app))
+    print()
+    print(bold('Analyses by Date (last 7 days):'))
+    sql_table("""
+        SELECT
+            DATE(a.analyzed_at) as "Date",
+            COUNT(*) as "Analyzed",
+            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as "Auto-fixable",
+            COALESCE(SUM(a.cost_usd), 0)::numeric(10,2) as "Cost USD"
+        FROM ai_analysis a
+        LEFT JOIN build_failures b ON a.build_failure_id = b.id
+        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+        WHERE (b.application = '{app}' OR c.application = '{app}')
+          AND a.analyzed_at > NOW() - INTERVAL '7 days'
+        GROUP BY DATE(a.analyzed_at)
+        ORDER BY DATE(a.analyzed_at) DESC;
+    """.format(app=app))
+    print()
+    tt = sql("SELECT COALESCE(SUM(a.tokens_used), 0) FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
+    at = sql("SELECT COALESCE(AVG(a.tokens_used), 0)::int FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
+    print(bold('Token Usage (last 30 days):'))
+    print('  Total tokens: {}'.format(tt))
+    print('  Avg per analysis: {} tokens'.format(at))
+    print()
 
 
 # --- Top-level commands ---
@@ -791,13 +914,84 @@ def report_conforma(args):
 def health(ctx):
     """Component health."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['health'])
+        from cli.db import require_db
+        from cli.formatting import section_header
+        if not require_db():
+            return
+        section_header('Component Health')
+        print()
+        try:
+            from config import CollectorConfig
+            from repositories.connection import DatabaseConnection
+            from proactive.health_monitor import HealthMonitor
+            db_config = CollectorConfig.from_env()
+            db = DatabaseConnection(db_config.db)
+            summary = HealthMonitor(db).get_component_health_summary()
+            if not summary:
+                print('  No component health data. Run data collection first.')
+                return
+            by_status = {}
+            for s in summary:
+                st = s.get('health_status') or 'unknown'
+                by_status[st] = by_status.get(st, 0) + 1
+            print('  Total components: {}'.format(len(summary)))
+            for st in ['critical', 'warning', 'healthy', 'unknown']:
+                if st in by_status:
+                    print('  {:10s}: {}'.format(st, by_status[st]))
+            print()
+            unhealthy = [s for s in summary if (s.get('health_status') or '') in ('critical', 'warning')
+                         or (s.get('consecutive_failures') or 0) >= 2]
+            if unhealthy:
+                print('  Unhealthy components:')
+                fmt = '  {:<55s} {:>5s} {:>10s} {:>5s} {:>8s}'
+                print(fmt.format('COMPONENT', 'SCORE', 'STATUS', 'FAILS', '7D RATE'))
+                print('  ' + '-' * 87)
+                for s in unhealthy:
+                    score = str(s['health_score']) if s['health_score'] is not None else 'N/A'
+                    status = s.get('health_status') or 'unknown'
+                    fails = str(s.get('consecutive_failures') or 0)
+                    rate = '{:.0f}%'.format(s['success_rate_last_7d']) if s.get('success_rate_last_7d') is not None else 'N/A'
+                    print(fmt.format(s['component_name'][:55], score, status, fails, rate))
+            else:
+                print('  All components healthy.')
+        except Exception as e:
+            print('  Error: {}'.format(e))
 
 
 @health.command('warnings')
 def health_warnings():
     """Health warnings."""
-    _bash_fallback(['health', 'warnings'])
+    from cli.db import require_db
+    from cli.formatting import section_header
+    if not require_db():
+        return
+    section_header('Proactive Warnings')
+    print()
+    try:
+        from config import CollectorConfig
+        from repositories.connection import DatabaseConnection
+        from proactive.health_monitor import HealthMonitor
+        db_config = CollectorConfig.from_env()
+        db = DatabaseConnection(db_config.db)
+        warnings_list = HealthMonitor(db).run_checks()
+        if not warnings_list:
+            print('  No warnings — all clear.')
+            return
+        by_type = {}
+        for w in warnings_list:
+            by_type.setdefault(w.signal_type, []).append(w)
+        for signal_type, group in by_type.items():
+            label = signal_type.replace('_', ' ').title()
+            print('  {} ({}):'.format(label, len(group)))
+            for w in group:
+                icon = '!!' if w.severity == 'critical' else ' >'
+                print('    {} {}'.format(icon, w.message))
+            print()
+        crit = sum(1 for w in warnings_list if w.severity == 'critical')
+        warn = sum(1 for w in warnings_list if w.severity == 'warning')
+        print('  Summary: {} critical, {} warning'.format(crit, warn))
+    except Exception as e:
+        print('  Error: {}'.format(e))
 
 
 # --- jira group ---
@@ -850,13 +1044,52 @@ def patterns(ctx):
 @patterns.command('learn')
 def patterns_learn():
     """Learn patterns from analysis."""
-    _bash_fallback(['patterns', 'learn'])
+    from cli.db import require_db
+    from cli.formatting import bold
+    if not require_db():
+        return
+    print(bold('Discovering new patterns from repeated failures...'))
+    try:
+        from config import CollectorConfig
+        from repositories.connection import DatabaseConnection
+        from repositories.error_pattern_repository import ErrorPatternRepository
+        db_config = CollectorConfig.from_env()
+        db = DatabaseConnection(db_config.db)
+        created = ErrorPatternRepository(db).discover_new_patterns()
+        if created:
+            print('Created {} new pattern(s):'.format(len(created)))
+            for p in created:
+                print('  - {} (category: {})'.format(p['pattern_name'], p['failure_category']))
+        else:
+            print('No new patterns to create (need 3+ occurrences of same category)')
+    except Exception as e:
+        print('Error: {}'.format(e))
 
 
 @patterns.command('stale')
 def patterns_stale():
     """Show stale patterns."""
-    _bash_fallback(['patterns', 'stale'])
+    from cli.db import require_db
+    from cli.formatting import bold
+    if not require_db():
+        return
+    print(bold('Stale patterns (unused 90+ days or low accuracy):'))
+    try:
+        from config import CollectorConfig
+        from repositories.connection import DatabaseConnection
+        from repositories.error_pattern_repository import ErrorPatternRepository
+        db_config = CollectorConfig.from_env()
+        db = DatabaseConnection(db_config.db)
+        stale = ErrorPatternRepository(db).get_stale_patterns()
+        if stale:
+            for p in stale:
+                conf = '{:.2f}'.format(p['avg_confidence']) if p['avg_confidence'] else 'N/A'
+                print('  {:30s}  conf={}  last_used={}'.format(
+                    p['pattern_name'], conf, p['last_used_at'] or 'never'))
+        else:
+            print('  No stale patterns found')
+    except Exception as e:
+        print('  Error: {}'.format(e))
 
 
 @patterns.command('shared')
@@ -868,14 +1101,83 @@ def patterns_shared():
 @patterns.command('list')
 def patterns_list():
     """List all patterns."""
-    _bash_fallback(['patterns', 'list'])
+    from cli.db import require_db, sql, sql_table
+    from cli.formatting import section_header
+    if not require_db():
+        return
+    section_header('Error Pattern Library')
+    print()
+    sql_table("""
+        SELECT
+            failure_type AS "Type",
+            failure_category AS "Category",
+            occurrence_count AS "Seen",
+            CASE WHEN avg_confidence IS NULL THEN '  —  '
+                 ELSE ROUND(avg_confidence * 100)::text || '%' END AS "Avg Conf",
+            CASE WHEN doc_context IS NOT NULL THEN 'yes' ELSE 'no ' END AS "Doc",
+            CASE WHEN last_seen_at IS NULL THEN '—'
+                 ELSE TO_CHAR(last_seen_at, 'YYYY-MM-DD') END AS "Last Seen",
+            LEFT(pattern_name, 40) AS "Pattern"
+        FROM error_patterns
+        ORDER BY occurrence_count DESC, failure_type, failure_category;
+    """)
+    print()
+    total = sql("SELECT COUNT(*) FROM error_patterns;") or '0'
+    print("  {} patterns total. Run 'ic patterns show <pattern_name>' for details.".format(total))
+    print()
 
 
 @patterns.command('show')
 @click.argument('name')
 def patterns_show(name):
     """Show pattern details."""
-    _bash_fallback(['patterns', 'show', name])
+    from cli.db import require_db, sql_dict_rows
+    from cli.formatting import bold, section_header
+    if not require_db():
+        return
+    rows = sql_dict_rows("""
+        SELECT id, failure_type, failure_category, pattern_name, description,
+               typical_fix, doc_url, doc_context, doc_fetched_at,
+               occurrence_count, avg_confidence, first_seen_at, last_seen_at, created_by
+        FROM error_patterns
+        WHERE pattern_name = '{}' OR failure_category = '{}'
+        LIMIT 1;
+    """.format(name, name))
+    if not rows:
+        print('Pattern not found: {}'.format(name))
+        print("Run 'ic patterns list' to see all patterns.")
+        raise SystemExit(1)
+    p = rows[0]
+    section_header('Pattern: {}'.format(p['pattern_name']))
+    print()
+    print('  Type:          {}'.format(p['failure_type']))
+    print('  Category:      {}'.format(p['failure_category']))
+    print('  Created by:    {}'.format(p['created_by']))
+    print('  Occurrences:   {}'.format(p.get('occurrence_count') or 0))
+    if p.get('avg_confidence') is not None:
+        print('  Avg confidence: {}%'.format(int(p['avg_confidence'] * 100)))
+    print('  First seen:    {}'.format(p.get('first_seen_at') or '—'))
+    print('  Last seen:     {}'.format(p.get('last_seen_at') or '—'))
+    print()
+    if p.get('description'):
+        print(bold('Description:'))
+        print('  {}'.format(p['description'][:200]))
+        print()
+    if p.get('typical_fix'):
+        print(bold('Typical Fix:'))
+        print('  {}'.format(p['typical_fix'][:200]))
+        print()
+    if p.get('doc_url'):
+        print('  Doc URL:       {}'.format(p['doc_url']))
+    if p.get('doc_context'):
+        print()
+        print(bold('Documentation Excerpt:'))
+        lines = p['doc_context'].split('\n')[:20]
+        for line in lines:
+            print('  {}'.format(line[:80]))
+        if len(p['doc_context'].split('\n')) > 20:
+            print('  ... (truncated)')
+    print()
 
 
 # --- components group ---
@@ -888,7 +1190,26 @@ def components():
 @components.command('health')
 def components_health():
     """All components with build/conforma status."""
-    _bash_fallback(['components', 'health'])
+    from cli.db import require_db, sql_table
+    from cli.formatting import section_header
+    if not require_db():
+        return
+    section_header('Component Health')
+    print()
+    sql_table("""
+        SELECT
+            component_name as "Component",
+            application as "App",
+            current_status as "Status",
+            health_score as "Score",
+            health_status as "Health",
+            consecutive_failures as "Consec. Fails",
+            success_rate_last_7d as "7d Rate",
+            total_failures_last_7d as "7d Fails"
+        FROM component_health
+        ORDER BY health_score ASC NULLS FIRST;
+    """)
+    print()
 
 
 # --- db group ---
