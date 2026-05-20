@@ -5,7 +5,7 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
@@ -705,191 +705,177 @@ extract_error_context() {
 
 # Show usage
 usage() {
-    cat << EOF
-${BOLD}IC - Infrastructure/CI Build Monitoring Tool${NC}
-${CYAN}kubectl-style interface for Konflux CI/CD monitoring${NC}
-
-${BOLD}USAGE:${NC}
-    ic get <resource> [name] [options]
-    ic describe <resource> <name>
-    ic <number>                              Shortcut: describe Nth component
-
-${BOLD}RESOURCES:${NC}
-
-  ${CYAN}components${NC}           Components with build failures
-  ${CYAN}alerts${NC}               Unified view: build failures + Conforma violations
-  ${CYAN}exceptions${NC}           Policy exceptions expiring soon or already expired
-  ${CYAN}conforma${NC}             Conforma (Enterprise Contract) test failures
-  ${CYAN}pipelineruns, pr${NC}     PipelineRun failures
-  ${CYAN}failures${NC}             Build failures (alias for pipelineruns)
-  ${CYAN}apps${NC}                 Available applications (versions)
-  ${CYAN}releases${NC}             Release CRs (push to stage/prod status)
-
-${BOLD}COMMANDS:${NC}
-
-  ${CYAN}get <resource>${NC}
-    ic get components                        List all failing components
-    ic get component <name>                  Get component summary
-    ic get alerts                            Unified view: builds + Conforma
-    ic get alerts --group                    Group failures by root cause
-    ic get alerts --all                      Alerts across all applications
-    ic get alerts --date <date>              Alerts on a specific date
-    ic get alerts --from <date> --to <date>  Changes between two dates
-    ic get exceptions                        Policy exceptions expiring/expired
-    ic get bindings                          RPA → EC policy mappings
-    ic get conforma [--current|--future|--all]  Conforma test failures
-                                             --current: Current policy (blocking, default)
-                                             --future: Future policy (informational)
-                                             --all: Both current and future
-
-  ${CYAN}report <resource>${NC}
-    ic report build                          Daily build failures standup table
-    ic report build --summary               Summary only (no per-component detail)
-    ic report build 3.4                     Build report for v3.4 only
-    ic report conforma [version...]         Daily Conforma violations report (alias)
-    ic conforma report [version...]            Daily Conforma violations report
-    ic conforma report 3.4                    Report for v3.4 only
-    ic conforma report 3.4 3.5-ea-1           Report for specific versions
-    ic conforma report --summary              Summary only (no per-component detail)
-    ic get pipelineruns [--limit N]          List all PipelineRun failures
-    ic get pipelinerun <name>                Get PipelineRun details
-    ic get pr <name>                         Alias for pipelinerun
-    ic get apps                              List available RHOAI applications
-    ic get failures [--limit N]              List recent failures
-
-  ${CYAN}describe <resource> <name> [options]${NC}
-    ic describe component <name> [--log]     Full component details + logs
-                                             --log: Show complete logs (default: error context)
-    ic describe conforma <name>              Conforma violation details for component
-    ic describe pipelinerun <name>           Full PipelineRun details + logs
-    ic describe pr <name>                    Alias for pipelinerun
-
-  ${CYAN}Quick shortcuts:${NC}
-    ic <1-N> [--log]                         Describe Nth failing component
-                                             (e.g., "ic 1" for component #1)
-                                             --log: Show complete logs
-
-  ${CYAN}Releases:${NC}
-    ic get releases                          List recent Release CRs by epoch
-    ic get releases --stage                  Stage releases only
-    ic get releases --prod                   Prod releases only
-    ic get releases --limit 10               Show more release groups
-    ic describe release <name>               Release CR details + error diagnosis
-    ic describe release <name> --logs        Include pipeline failure logs
-    ic release status                        Process checklist (latest epoch)
-    ic release status <epoch>                Checklist for specific epoch
-    ic release status --verbose              Include Konflux UI links per step
-    ic release diff <epoch1> <epoch2>        Compare snapshots between releases
-    ic release verify <name>                 Check image availability in target registry (Pyxis)
-
-  ${CYAN}Configuration:${NC}
-    ic config                                Show current configuration
-    ic config set-app <app-name>             Set application version
-    ic apps                                  Alias for 'ic get apps'
-    ic versions                              Alias for 'ic get apps'
-
-  ${CYAN}Statistics:${NC}
-    ic stats                                 Overall statistics
-    ic stats daily                           Failures by day
-    ic stats resolved                        Resolved failures statistics
-    ic stats components                      Failures by component
-
-  ${CYAN}Triage & Analysis:${NC}
-    ic triage                                Currently failing components (last build = failed)
-    ic why <component>                       Why is this component failing?
-    ic analyze <component>                   Deep failure analysis
-    ic errors <component>                    Extract error messages
-
-  ${CYAN}Fix Actions:${NC}
-    ic fix <num|component>                   Triage a failure: choose PR / Jira / Slack
-                                             Shows AI recommendation, prompts for action
-                                             PR: dry-run diff (no push yet)
-                                             Jira: edit loop → confirm → post
-    ic get fixes                             List recent PR fix attempts and outcomes
-    ic get fixes --all                       All fix attempts (no date limit)
-
-  ${CYAN}Scenarios:${NC}
-    ic scenarios                             List ITS scenarios for current app
-    ic scenarios --active                    Only active scenarios
-    ic scenarios --disabled                  Only disabled scenarios
-    ic scenarios --gaps                      Detect missing scenarios across apps
-    ic scenarios --all                       All apps in namespace
-    ic scenarios --app <name>                Scenarios for specific app
-
-  ${CYAN}Component Health:${NC}
-    ic components health                     All components with build/conforma status
-    ic conforma categories                   Violation categories across components
-
-  ${CYAN}AI Analysis:${NC}
-    ic ai analyze <num|component>            Analyze failure with AI
-    ic ai analyze --all                      Analyze all pending failures
-    ic ai analyze release <name>             Analyze a failed release
-    ic ai analyze scenarios [app]            Proactive ITS scenario analysis
-    ic ai status                             Show AI analysis summary
-    ic ai stats                              Detailed AI statistics
-
-  ${CYAN}Batch Analysis (Manual):${NC}
-    cd collectors/python
-    ./analyze_batch.py --estimate            Show queue depth (no API calls)
-    ./analyze_batch.py --limit 20            Analyze 20 failures (15 build + 5 conforma)
-    ./analyze_batch.py --limit 50            Larger batch (37 build + 13 conforma)
-                                             ${YELLOW}Note: Uses Anthropic API - manual execution recommended${NC}
-
-  ${CYAN}Export to Tickets:${NC}
-    ic export <num|component> jira           Export to Jira format
-    ic export <num|component> slack          Generate Slack help-request message
-    ic export <num|component> slack --jira KEY  Include Jira ticket link in message
-    ic export <num|component> markdown       Export to Markdown (GitHub)
-    ic export <num|component> json           Export to JSON
-    ic export <num|component> --clipboard    Copy to clipboard
-
-  ${CYAN}Component Status:${NC}
-    ic working                               Components currently working (last build = success)
-    ic resolved                              Components that were resolved
-    ic history <component>                   Full build history (successes + failures)
-
-  ${CYAN}Database:${NC}
-    ic db status                             Check database connection
-    ic db query "<sql>"                      Execute custom SQL query
-
-${BOLD}EXAMPLES:${NC}
-
-  ${CYAN}Basic workflow:${NC}
-    ic get components                        # List all failing components
-    ic 1                                     # Describe component #1
-    ic describe component odh-spark-v3-4     # Full details for specific component
-
-  ${CYAN}PipelineRun investigation:${NC}
-    ic get pipelineruns --limit 10           # List 10 recent failures
-    ic get pr odh-feature-server-v3-4-abc123 # Get PR summary
-    ic describe pr odh-feature-server-v3-4-abc123  # Full details + logs
-
-  ${CYAN}Version management:${NC}
-    ic get apps                              # List RHOAI versions
-    ic config set-app rhoai-v3-3             # Switch to v3.3
-    ic get components                        # Now shows v3.3 data
-
-  ${CYAN}Statistics:${NC}
-    ic stats                                 # Overall stats
-    ic stats daily                           # Failures by day
-    ic db query "SELECT component_name, COUNT(*) FROM build_failures GROUP BY component_name"
-
-  ${CYAN}Triage workflow:${NC}
-    ic triage                                # Overview of what's ready to triage
-    ic why odh-spark-operator-v3-4           # Why is it failing?
-    ic analyze odh-spark-operator-v3-4       # Deep analysis with timeline
-    ic errors odh-spark-operator-v3-4        # Extract just the errors
-
-${BOLD}BACKWARD COMPATIBILITY:${NC}
-
-  Old commands still work:
-    ic build status      → ic get components
-    ic component list    → ic get components
-    ic component show    → ic describe component
-    ic build get         → ic get pipelinerun
-    ic build logs        → ic describe pipelinerun
-
-EOF
+    echo -e "${BOLD}IC - Infrastructure/CI Build Monitoring Tool${NC}"
+    echo -e "${CYAN}kubectl-style interface for Konflux CI/CD monitoring${NC}"
+    echo ""
+    echo -e "${BOLD}USAGE:${NC}"
+    echo "    ic get <resource> [name] [options]"
+    echo "    ic describe <resource> <name>"
+    echo "    ic <number>                              Shortcut: describe Nth component"
+    echo ""
+    echo -e "${BOLD}RESOURCES:${NC}"
+    echo ""
+    echo -e "  ${CYAN}components${NC}           Components with build failures"
+    echo -e "  ${CYAN}alerts${NC}               Unified view: build failures + Conforma violations"
+    echo -e "  ${CYAN}exceptions${NC}           Policy exceptions expiring soon or already expired"
+    echo -e "  ${CYAN}conforma${NC}             Conforma (Enterprise Contract) test failures"
+    echo -e "  ${CYAN}pipelineruns, pr${NC}     PipelineRun failures"
+    echo -e "  ${CYAN}failures${NC}             Build failures (alias for pipelineruns)"
+    echo -e "  ${CYAN}apps${NC}                 Available applications (versions)"
+    echo -e "  ${CYAN}releases${NC}             Release CRs (push to stage/prod status)"
+    echo ""
+    echo -e "${BOLD}COMMANDS:${NC}"
+    echo ""
+    echo -e "  ${CYAN}get <resource>${NC}"
+    echo "    ic get components                        List all failing components"
+    echo "    ic get component <name>                  Get component summary"
+    echo "    ic get alerts                            Unified view: builds + Conforma"
+    echo "    ic get alerts --group                    Group failures by root cause"
+    echo "    ic get alerts --all                      Alerts across all applications"
+    echo "    ic get alerts --date <date>              Alerts on a specific date"
+    echo "    ic get alerts --from <date> --to <date>  Changes between two dates"
+    echo "    ic get exceptions                        Policy exceptions expiring/expired"
+    echo "    ic get bindings                          RPA → EC policy mappings"
+    echo "    ic get conforma [--current|--future|--all]  Conforma test failures"
+    echo "                                             --current: Current policy (blocking, default)"
+    echo "                                             --future: Future policy (informational)"
+    echo "                                             --all: Both current and future"
+    echo ""
+    echo -e "  ${CYAN}report <resource>${NC}"
+    echo "    ic report build                          Daily build failures standup table"
+    echo "    ic report build --summary               Summary only (no per-component detail)"
+    echo "    ic report build 3.4                     Build report for v3.4 only"
+    echo "    ic report conforma [version...]         Daily Conforma violations report (alias)"
+    echo "    ic conforma report [version...]            Daily Conforma violations report"
+    echo "    ic conforma report 3.4                    Report for v3.4 only"
+    echo "    ic conforma report 3.4 3.5-ea-1           Report for specific versions"
+    echo "    ic conforma report --summary              Summary only (no per-component detail)"
+    echo "    ic get pipelineruns [--limit N]          List all PipelineRun failures"
+    echo "    ic get pipelinerun <name>                Get PipelineRun details"
+    echo "    ic get pr <name>                         Alias for pipelinerun"
+    echo "    ic get apps                              List available RHOAI applications"
+    echo "    ic get failures [--limit N]              List recent failures"
+    echo ""
+    echo -e "  ${CYAN}describe <resource> <name> [options]${NC}"
+    echo "    ic describe component <name> [--log]     Full component details + logs"
+    echo "                                             --log: Show complete logs (default: error context)"
+    echo "    ic describe conforma <name>              Conforma violation details for component"
+    echo "    ic describe pipelinerun <name>           Full PipelineRun details + logs"
+    echo "    ic describe pr <name>                    Alias for pipelinerun"
+    echo ""
+    echo -e "  ${CYAN}Quick shortcuts:${NC}"
+    echo "    ic <1-N> [--log]                         Describe Nth failing component"
+    echo "                                             (e.g., \"ic 1\" for component #1)"
+    echo "                                             --log: Show complete logs"
+    echo "    ic triage                                Currently failing components overview"
+    echo ""
+    echo -e "  ${CYAN}Releases:${NC}"
+    echo "    ic get releases                          List recent Release CRs by epoch"
+    echo "    ic get releases --stage                  Stage releases only"
+    echo "    ic get releases --prod                   Prod releases only"
+    echo "    ic get releases --limit 10               Show more release groups"
+    echo "    ic describe release <name>               Release CR details + error diagnosis"
+    echo "    ic describe release <name> --logs        Include pipeline failure logs"
+    echo "    ic release status                        Process checklist (latest epoch)"
+    echo "    ic release status <epoch>                Checklist for specific epoch"
+    echo "    ic release status --verbose              Include Konflux UI links per step"
+    echo "    ic release diff <epoch1> <epoch2>        Compare snapshots between releases"
+    echo "    ic release verify <name>                 Check image availability in target registry (Pyxis)"
+    echo ""
+    echo -e "  ${CYAN}Configuration:${NC}"
+    echo "    ic config                                Show current configuration"
+    echo "    ic config set-app <app-name>             Set application version"
+    echo "    ic apps                                  Alias for 'ic get apps'"
+    echo "    ic versions                              Alias for 'ic get apps'"
+    echo ""
+    echo -e "  ${CYAN}Statistics:${NC}"
+    echo "    ic stats                                 Overall statistics"
+    echo "    ic stats daily                           Failures by day"
+    echo "    ic stats resolved                        Resolved failures statistics"
+    echo "    ic stats components                      Failures by component"
+    echo ""
+    echo -e "  ${CYAN}Fix Actions:${NC}"
+    echo -e "    ic fix <num|component>                   Triage a failure: choose PR / Jira / Slack"
+    echo "                                             Shows AI recommendation, prompts for action"
+    echo "                                             PR: dry-run diff (no push yet)"
+    echo "                                             Jira: edit loop → confirm → post"
+    echo "    ic get fixes                             List recent PR fix attempts and outcomes"
+    echo "    ic get fixes --all                       All fix attempts (no date limit)"
+    echo ""
+    echo -e "  ${CYAN}Conforma:${NC}"
+    echo "    ic conforma report [version...]          Daily Conforma violations report"
+    echo "    ic conforma categories                   Violation categories across components"
+    echo "    ic conforma scenarios                    List ITS scenarios for current app"
+    echo "    ic conforma scenarios --active           Only active scenarios"
+    echo "    ic conforma scenarios --disabled         Only disabled scenarios"
+    echo "    ic conforma scenarios --gaps             Detect missing scenarios across apps"
+    echo "    ic conforma scenarios --all              All apps in namespace"
+    echo "    ic conforma scenarios --app <name>       Scenarios for specific app"
+    echo ""
+    echo -e "  ${CYAN}Component Health:${NC}"
+    echo "    ic components health                     All components with build/conforma status"
+    echo ""
+    echo -e "  ${CYAN}AI Analysis:${NC}"
+    echo "    ic ai analyze <num|component>            Analyze failure with AI"
+    echo "    ic ai analyze --all                      Analyze all pending failures"
+    echo "    ic ai analyze release <name>             Analyze a failed release"
+    echo "    ic ai analyze scenarios [app]            Proactive ITS scenario analysis"
+    echo "    ic ai status                             Show AI analysis summary"
+    echo "    ic ai stats                              Detailed AI statistics"
+    echo -e "    ic ai batch --estimate               Show queue depth (no API calls)"
+    echo "    ic ai batch --limit 20               Analyze 20 failures (15 build + 5 conforma)"
+    echo "    ic ai batch --limit 50 --all         Larger batch across all apps"
+    echo -e "                                         ${YELLOW}Note: Uses Anthropic API - manual only${NC}"
+    echo ""
+    echo -e "  ${CYAN}Export to Tickets:${NC}"
+    echo "    ic export <num|component> jira           Export to Jira format"
+    echo "    ic export <num|component> slack          Generate Slack help-request message"
+    echo "    ic export <num|component> slack --jira KEY  Include Jira ticket link in message"
+    echo "    ic export <num|component> markdown       Export to Markdown (GitHub)"
+    echo "    ic export <num|component> json           Export to JSON"
+    echo "    ic export <num|component> --clipboard    Copy to clipboard"
+    echo ""
+    echo -e "  ${CYAN}Component Status:${NC}"
+    echo "    ic working                               Components currently working (last build = success)"
+    echo "    ic resolved                              Components that were resolved"
+    echo "    ic history <component>                   Full build history (successes + failures)"
+    echo ""
+    echo -e "  ${CYAN}Database:${NC}"
+    echo "    ic db status                             Check database connection"
+    echo "    ic db query \"<sql>\"                      Execute custom SQL query"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${NC}"
+    echo ""
+    echo -e "  ${CYAN}Basic workflow:${NC}"
+    echo "    ic get components                        # List all failing components"
+    echo "    ic 1                                     # Describe component #1"
+    echo "    ic describe component odh-spark-v3-4     # Full details for specific component"
+    echo ""
+    echo -e "  ${CYAN}PipelineRun investigation:${NC}"
+    echo "    ic get pipelineruns --limit 10           # List 10 recent failures"
+    echo "    ic get pr odh-feature-server-v3-4-abc123 # Get PR summary"
+    echo "    ic describe pr odh-feature-server-v3-4-abc123  # Full details + logs"
+    echo ""
+    echo -e "  ${CYAN}Version management:${NC}"
+    echo "    ic get apps                              # List RHOAI versions"
+    echo "    ic config set-app rhoai-v3-3             # Switch to v3.3"
+    echo "    ic get components                        # Now shows v3.3 data"
+    echo ""
+    echo -e "  ${CYAN}Triage workflow:${NC}"
+    echo "    ic get alerts                            # See all current failures"
+    echo "    ic describe component <name>             # Investigate a build failure"
+    echo "    ic describe conforma <name>              # Investigate a conforma violation"
+    echo "    ic ai analyze <name>                     # Run AI analysis"
+    echo ""
+    echo -e "${BOLD}BACKWARD COMPATIBILITY:${NC}"
+    echo ""
+    echo "  Old commands still work:"
+    echo "    ic build status      → ic get components"
+    echo "    ic component list    → ic get components"
+    echo "    ic component show    → ic describe component"
+    echo "    ic build get         → ic get pipelinerun"
+    echo "    ic build logs        → ic describe pipelinerun"
+    echo ""
     return 0
 }
 
@@ -1427,9 +1413,40 @@ cmd_describe_component() {
                 echo ""
             fi
         else
-            echo -e "${YELLOW}⚠ No logs stored in database${NC}"
-            echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
-            echo ""
+            echo -e "${CYAN}Fetching logs from cluster...${NC}"
+            local fetch_result
+            fetch_result=$(cd "$SCRIPT_DIR/collectors/python" && timeout 45 python3 fetch_logs.py "$pr_name" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$fetch_result" ]; then
+                local stored=$(echo "$fetch_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stored',False))" 2>/dev/null)
+                local log_len=$(echo "$fetch_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('logs_length',0))" 2>/dev/null)
+                local log_src=$(echo "$fetch_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null)
+                if [ "$stored" = "True" ]; then
+                    echo -e "${CYAN}Fetched ${log_len} chars from ${log_src}${NC}"
+                    # Re-read logs from DB
+                    logs=$(sql "SELECT build_logs FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
+                    local log_size=$(echo "$logs" | wc -c)
+                    if [ "$log_size" -gt 10 ]; then
+                        section_header "Build Logs"
+                        echo ""
+                        if [ "$show_full_log" = true ]; then
+                            echo "$logs"
+                        elif [ "$log_size" -lt 1000 ]; then
+                            echo "$logs"
+                        else
+                            extract_error_context "$logs"
+                            echo ""
+                            echo -e "${CYAN}💡 Tip: Add --log flag to see the complete build log${NC}"
+                        fi
+                        echo ""
+                    fi
+                else
+                    echo -e "${YELLOW}⚠ Logs fetched but not new (already stored)${NC}"
+                fi
+            else
+                echo -e "${YELLOW}⚠ Could not fetch logs from cluster${NC}"
+                echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
+                echo ""
+            fi
         fi
 
         # Build History from Tekton Results
@@ -1893,246 +1910,9 @@ cmd_triage() {
 
     echo -e "${CYAN}Next Steps:${NC}"
     echo "  1. Pick a component from above"
-    echo "  2. Run: ${BOLD}ic why <component>${NC} to see why it's failing"
-    echo "  3. Run: ${BOLD}ic analyze <component>${NC} for deep analysis"
-    echo "  4. Use: ${BOLD}ic working${NC} to see components that are currently working"
-    echo ""
-}
-
-cmd_why() {
-    local component="$1"
-    if [ -z "$component" ]; then
-        echo -e "${RED}Error: Component name required${NC}"
-        echo "Usage: ic why <component-name>"
-        echo ""
-        echo "Example:"
-        echo "  ic why odh-spark-operator-v3-4"
-        return 1
-    fi
-
-    # Check if component exists
-    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
-    if [ "$total" = "0" ]; then
-        echo -e "${RED}Error: Component not found: $component${NC}"
-        echo ""
-        echo "Available components:"
-        sql "SELECT DISTINCT component_name FROM build_failures ORDER BY component_name;" | head -10
-        return 1
-    fi
-
-    section_header "Why is $component failing?"
-    echo ""
-
-    # Get latest PipelineRun
-    local pr_data=$(sql "
-        SELECT pipelinerun_name, repository_url, branch, first_detected_at
-        FROM build_failures
-        WHERE component_name = '$component'
-        ORDER BY first_detected_at DESC
-        LIMIT 1;
-    ")
-
-    if [ -z "$pr_data" ]; then
-        echo -e "${RED}No build failures found${NC}"
-        return 1
-    fi
-
-    IFS='|' read -r pr_name repo_url branch detected_at <<< "$pr_data"
-
-    echo -e "${BOLD}Latest Failure:${NC}"
-    echo "  PipelineRun: ${CYAN}$pr_name${NC}"
-    echo "  Repository: $repo_url"
-    echo "  Branch: $branch"
-    echo "  Detected: $detected_at"
-    echo ""
-
-    # Get commit info and logs from DB
-    local commit_data=$(sql "
-        SELECT commit_sha, commit_url, konflux_logs_url, build_logs
-        FROM build_failures
-        WHERE pipelinerun_name = '$pr_name'
-        LIMIT 1;
-    ")
-
-    if [ -n "$commit_data" ]; then
-        IFS='|' read -r commit_sha commit_url log_url build_logs <<< "$commit_data"
-
-        section_header "Commit Information"
-        echo ""
-        if [ -n "$commit_sha" ] && [ "$commit_sha" != "" ]; then
-            echo "  Commit SHA: ${CYAN}${commit_sha:0:8}${NC}"
-        fi
-        if [ -n "$commit_url" ] && [ "$commit_url" != "" ]; then
-            echo "  Commit URL: ${CYAN}$commit_url${NC}"
-        fi
-        if [ -n "$log_url" ] && [ "$log_url" != "" ]; then
-            echo "  Konflux UI: ${CYAN}$log_url${NC}"
-        fi
-        echo ""
-
-        # Show log excerpt if available
-        if [ -n "$build_logs" ] && [ ${#build_logs} -gt 500 ]; then
-            section_header "Log Excerpt"
-            echo ""
-            extract_error_context "$build_logs"
-            echo ""
-        else
-            echo -e "${YELLOW}⚠ No logs available in database${NC}"
-            echo -e "${CYAN}→ View logs in Konflux UI (link above)${NC}"
-            echo ""
-        fi
-    fi
-
-    echo -e "${CYAN}Next Steps:${NC}"
-    echo "  • Use ${BOLD}ic describe component $component${NC} for full details"
-    echo "  • Use ${BOLD}ic describe component $component --log${NC} for complete logs"
-    echo ""
-}
-
-cmd_analyze() {
-    local component="$1"
-    if [ -z "$component" ]; then
-        echo -e "${RED}Error: Component name required${NC}"
-        echo "Usage: ic analyze <component-name>"
-        return 1
-    fi
-
-    local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
-    if [ "$total" = "0" ]; then
-        echo -e "${RED}Error: Component not found: $component${NC}"
-        return 1
-    fi
-
-    section_header "Deep Analysis: $component"
-    echo ""
-
-    # Failure timeline
-    echo -e "${BOLD}Failure Timeline (last 7 days):${NC}"
-    sql_table "
-    SELECT
-        DATE(first_detected_at) as \"Date\",
-        COUNT(*) as \"Failures\",
-        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"With Logs\"
-    FROM build_failures
-    WHERE component_name = '$component'
-      AND first_detected_at > NOW() - INTERVAL '7 days'
-    GROUP BY DATE(first_detected_at)
-    ORDER BY DATE(first_detected_at) DESC;
-    "
-    echo ""
-
-    # Repository info
-    local repo_info=$(sql "
-        SELECT DISTINCT repository_url, branch
-        FROM build_failures
-        WHERE component_name = '$component'
-        LIMIT 1;
-    " | head -1)
-
-    if [ -n "$repo_info" ]; then
-        IFS='|' read -r repo branch <<< "$repo_info"
-        echo -e "${BOLD}Repository:${NC}"
-        echo "  URL: $repo"
-        echo "  Branch: $branch"
-        echo ""
-    fi
-
-    # All recent failures
-    echo -e "${BOLD}All Failures (recent):${NC}"
-    sql_table "
-    SELECT
-        pipelinerun_name as \"PipelineRun\",
-        first_detected_at::timestamp(0) as \"When\",
-        CASE
-            WHEN build_logs IS NOT NULL THEN 'Yes'
-            ELSE 'No'
-        END as \"Logs\"
-    FROM build_failures
-    WHERE component_name = '$component'
-    ORDER BY first_detected_at DESC
-    LIMIT 10;
-    "
-    echo ""
-
-    # Pattern analysis
-    local with_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")
-
-    if [ "$with_logs" != "0" ]; then
-        echo -e "${BOLD}Pattern Analysis:${NC}"
-
-        # Count resource not found
-        local resource_not_found=$(sql "
-            SELECT COUNT(*)
-            FROM build_failures
-            WHERE component_name = '$component'
-              AND build_logs LIKE '%resource not found%';
-        ")
-
-        if [ "$resource_not_found" != "0" ]; then
-            echo "  - $resource_not_found failures show 'resource not found' (logs already archived)"
-        fi
-
-        # Sample error from latest
-        local latest_error=$(sql "
-            SELECT SUBSTRING(build_logs FROM 'ERROR[^\n]*')
-            FROM build_failures
-            WHERE component_name = '$component'
-              AND build_logs IS NOT NULL
-              AND build_logs LIKE '%ERROR%'
-            ORDER BY first_detected_at DESC
-            LIMIT 1;
-        " | head -1)
-
-        if [ -n "$latest_error" ] && [ "$latest_error" != "" ]; then
-            echo "  - Sample error: $latest_error"
-        fi
-        echo ""
-    fi
-
-    echo -e "${CYAN}Recommendations:${NC}"
-    if [ "$with_logs" = "0" ]; then
-        echo "  1. ${BOLD}Fetch logs${NC} to understand failure reasons"
-        echo "     python3 collectors/python/fetch_archived_logs.py"
-    else
-        echo "  1. ${BOLD}Review error patterns${NC} above"
-        echo "  2. ${BOLD}Check latest failure${NC}: ic describe pr <pipelinerun>"
-        echo "  3. ${BOLD}Compare with Konflux UI${NC} for full pipeline view"
-    fi
-    echo ""
-}
-
-cmd_errors() {
-    local component="$1"
-    if [ -z "$component" ]; then
-        echo -e "${RED}Error: Component name required${NC}"
-        echo "Usage: ic errors <component-name>"
-        return 1
-    fi
-
-    section_header "Error Extraction: $component"
-    echo ""
-
-    # Get all logs for this component
-    local logs=$(sql "
-        SELECT build_logs
-        FROM build_failures
-        WHERE component_name = '$component'
-          AND build_logs IS NOT NULL
-        ORDER BY first_detected_at DESC;
-    ")
-
-    if [ -z "$logs" ]; then
-        echo -e "${YELLOW}No logs available for this component${NC}"
-        return 0
-    fi
-
-    # Extract unique error patterns
-    echo -e "${BOLD}Error Patterns:${NC}"
-    echo "$logs" | grep -iE "error|fail|exception" | sort | uniq -c | sort -rn | head -10
-    echo ""
-
-    echo -e "${BOLD}Exit Codes:${NC}"
-    echo "$logs" | grep -iE "exit code|exitcode" | head -5
+    echo -e "  2. Run: ${BOLD}ic describe component <name>${NC} for full details"
+    echo -e "  3. Run: ${BOLD}ic describe component <name> --log${NC} for complete logs"
+    echo -e "  4. Use: ${BOLD}ic working${NC} to see components that are currently working"
     echo ""
 }
 
@@ -2142,6 +1922,10 @@ cmd_ai() {
         analyze)
             shift
             cmd_ai_analyze "$@"
+            ;;
+        batch)
+            shift
+            cmd_ai_batch "$@"
             ;;
         status)
             cmd_ai_status
@@ -2156,13 +1940,16 @@ cmd_ai() {
         *)
             echo -e "${BOLD}IC AI - AI Analysis Commands${NC}"
             echo ""
-            echo "Usage: ic ai {analyze|status|stats}"
+            echo "Usage: ic ai {analyze|batch|status|stats}"
             echo ""
             echo "Commands:"
             echo "  analyze <num|component>  Analyze a specific failure"
             echo "  analyze --all            Analyze all pending failures"
             echo "  analyze release <name>   Analyze a failed release"
             echo "  analyze scenarios [app]  Analyze ITS scenario config"
+            echo "  batch --estimate         Show queue depth (no API calls)"
+            echo "  batch --limit N          Analyze N failures in batch"
+            echo "  batch --limit N --all    Batch across all applications"
             echo "  status                   Show analysis summary"
             echo "  stats                    Show detailed statistics"
             echo ""
@@ -2171,8 +1958,8 @@ cmd_ai() {
             echo "  ic ai analyze component acme-automl-v3-4 # Analyze specific component"
             echo "  ic ai analyze --all                     # Analyze all pending"
             echo "  ic ai analyze release acme-v2-0-prod-1778657574"
-            echo "  ic ai analyze scenarios                 # Analyze current app ITS"
-            echo "  ic ai analyze scenarios acme-v2-0      # Analyze specific app ITS"
+            echo "  ic ai batch --estimate                  # Queue depth"
+            echo "  ic ai batch --limit 20                  # Batch 20 failures"
             echo "  ic ai status                            # Show summary"
             return 1
             ;;
@@ -2600,6 +2387,56 @@ for line in a.get('recommendations', '').split('\n'):
     echo ""
     echo "$json_output"
     echo ""
+}
+
+cmd_ai_batch() {
+    local flags=""
+    local is_estimate=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --estimate) flags="$flags --estimate"; is_estimate=true; shift ;;
+            --limit)    flags="$flags --limit $2"; shift 2 ;;
+            --all)      flags="$flags --all"; shift ;;
+            *)          shift ;;
+        esac
+    done
+
+    if [ -z "$flags" ]; then
+        echo -e "${BOLD}IC AI Batch - Batch Analysis${NC}"
+        echo ""
+        echo "Usage: ic ai batch {--estimate|--limit N} [--all]"
+        echo ""
+        echo "Options:"
+        echo "  --estimate     Show queue depth (no API calls)"
+        echo "  --limit N      Analyze N failures (75% build, 25% conforma)"
+        echo "  --all          Across all applications (default: current app)"
+        echo ""
+        echo "Examples:"
+        echo "  ic ai batch --estimate           # Check queue depth"
+        echo "  ic ai batch --limit 20           # Analyze 20 failures"
+        echo "  ic ai batch --limit 50 --all     # 50 failures, all apps"
+        echo ""
+        echo -e "${YELLOW}Note: Uses Anthropic API - costs money per analysis${NC}"
+        return 1
+    fi
+
+    if ! $is_estimate; then
+        if [ -z "${LLM_PROVIDER:-}" ] && [ -z "${ANTHROPIC_VERTEX_PROJECT_ID:-}" ]; then
+            echo -e "${RED}Error: LLM not configured${NC}"
+            echo ""
+            echo "Set LLM provider in .env or environment:"
+            echo "  export LLM_PROVIDER=vertex_ai"
+            echo "  export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id"
+            echo "  export CLOUD_ML_REGION=us-east5"
+            return 1
+        fi
+        echo -e "${YELLOW}Note: This uses the Anthropic API and costs money${NC}"
+        echo ""
+    fi
+
+    cd "$SCRIPT_DIR/collectors/python" || return 1
+    python3.11 analyze_batch.py $flags
 }
 
 cmd_ai_status() {
@@ -4787,11 +4624,40 @@ cmd_get_alerts() {
     echo ""
 
     if [ "$refresh" = true ]; then
-        echo -e "${CYAN}Refreshing (querying KubeArchive)...${NC}"
+        echo -e "${CYAN}Refreshing builds and conforma (last 5 days)...${NC}"
         cd "$SCRIPT_DIR/collectors/python"
-        python3 check_sync_status.py > /dev/null 2>&1
-        python3 check_conforma_status.py > /dev/null 2>&1
-        python3 collect_conforma.py > /dev/null 2>&1
+
+        local sync_out_file=$(mktemp)
+        local conforma_log=$(mktemp)
+        local t_start=$SECONDS
+
+        # Run builds and conforma refresh in parallel (5-day window, 180s per script)
+        # Note: collect_conforma.py is too slow for refresh — only sync status
+        timeout 180 python3 check_sync_status.py --recent-days 5 > "$sync_out_file" 2>/dev/null &
+        local pid_sync=$!
+        timeout 180 python3 check_conforma_status.py --recent-days 5 > "$conforma_log" 2>/dev/null &
+        local pid_conforma=$!
+
+        # Wait for both
+        local sync_ok=true conforma_ok=true
+        wait $pid_sync 2>/dev/null || sync_ok=false
+        wait $pid_conforma 2>/dev/null || conforma_ok=false
+        local t_elapsed=$((SECONDS - t_start))
+
+        if [ "$sync_ok" = true ] && [ -s "$sync_out_file" ]; then
+            local missing_count
+            missing_count=$(python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('missing_in_db',[])))" < "$sync_out_file" 2>/dev/null)
+            if [ -n "$missing_count" ] && [ "$missing_count" -gt 0 ] 2>/dev/null; then
+                echo -e "${CYAN}Collected ${missing_count} component(s) missing from DB${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Build sync timed out or failed (${t_elapsed}s)${NC}"
+        fi
+
+        [ "$conforma_ok" = true ] || echo -e "${YELLOW}Conforma refresh timed out or failed (${t_elapsed}s)${NC}"
+        echo -e "${CYAN}Refresh completed in ${t_elapsed}s${NC}"
+
+        rm -f "$sync_out_file" "$conforma_log"
         cd "$SCRIPT_DIR"
         echo ""
     fi
@@ -8714,15 +8580,6 @@ case "${1:-}" in
             *) cmd_alerts_check ;;
         esac
         ;;
-    why)
-        cmd_why "$2"
-        ;;
-    analyze)
-        cmd_analyze "$2"
-        ;;
-    errors)
-        cmd_errors "$2"
-        ;;
     resolved)
         cmd_resolved
         ;;
@@ -8770,6 +8627,7 @@ case "${1:-}" in
             categories) shift 2; cmd_conforma_categories "$@" ;;
             csv)        shift 2; cmd_conforma_csv "$@" ;;
             snapshot)   shift 2; cmd_conforma_snapshot "$@" ;;
+            scenarios)  shift 2; cmd_scenarios "$@" ;;
             *) cmd_get_conforma "${2:-}" ;;
         esac
         ;;
