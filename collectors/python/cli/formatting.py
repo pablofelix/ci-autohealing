@@ -1,0 +1,51 @@
+"""Output formatting for IC CLI — colors, headers, and tables."""
+
+import sys
+
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+BLUE = '\033[0;34m'
+CYAN = '\033[0;36m'
+BOLD = '\033[1m'
+NC = '\033[0m'
+
+_use_color = sys.stdout.isatty()
+
+
+def _c(code, text):
+    # type: (str, str) -> str
+    if _use_color:
+        return '{}{}{}'.format(code, text, NC)
+    return text
+
+
+def red(text):
+    return _c(RED, text)
+
+
+def green(text):
+    return _c(GREEN, text)
+
+
+def yellow(text):
+    return _c(YELLOW, text)
+
+
+def blue(text):
+    return _c(BLUE, text)
+
+
+def cyan(text):
+    return _c(CYAN, text)
+
+
+def bold(text):
+    return _c(BOLD, text)
+
+
+def section_header(text):
+    # type: (str) -> None
+    print(bold('=' * 40))
+    print(bold(text))
+    print(bold('=' * 40))
