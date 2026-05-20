@@ -7,6 +7,11 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# Delegate to Python CLI unless we're being called back from it
+if [ "${IC_PYTHON_FALLBACK:-}" != "1" ]; then
+    exec python3.11 "$SCRIPT_DIR/ic.py" "$@"
+fi
+
 # Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
