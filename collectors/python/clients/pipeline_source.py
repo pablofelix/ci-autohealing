@@ -2,7 +2,7 @@
 
 Defines the contract that all pipeline data adapters must implement.
 Concrete implementations adapt different transports (HTTP to KubeArchive,
-subprocess to oc CLI) behind this common interface.
+Python kubernetes client) behind this common interface.
 """
 
 from abc import ABC, abstractmethod

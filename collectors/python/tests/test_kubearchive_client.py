@@ -2,7 +2,6 @@
 
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-import subprocess
 import requests
 from clients.kubearchive import KubeArchiveClient
 
@@ -29,22 +28,22 @@ class TestKubeArchiveClient(unittest.TestCase):
         client = KubeArchiveClient()
         self.assertIn("kubearchive-api-server", client.api_url)
 
-    @patch('openshift_auth.subprocess.run')
-    def test_get_openshift_token_success(self, mock_run):
+    @patch('openshift_auth._ensure_k8s_config')
+    @patch('openshift_auth.client')
+    def test_get_openshift_token_success(self, mock_client, mock_config):
         """Test successful token retrieval via openshift_auth."""
         from openshift_auth import get_openshift_token
-        mock_run.return_value = MagicMock(
-            stdout="sha256~test-token-123",
-            returncode=0
-        )
+        mock_configuration = MagicMock()
+        mock_configuration.api_key = {'authorization': 'Bearer sha256~test-token-123'}
+        mock_client.Configuration.get_default_copy.return_value = mock_configuration
         token = get_openshift_token()
         self.assertEqual(token, "sha256~test-token-123")
 
-    @patch('openshift_auth.subprocess.run')
-    def test_get_openshift_token_failure(self, mock_run):
+    @patch('openshift_auth._ensure_k8s_config')
+    def test_get_openshift_token_failure(self, mock_config):
         """Test token retrieval failure returns None."""
         from openshift_auth import get_openshift_token
-        mock_run.side_effect = subprocess.CalledProcessError(1, 'oc')
+        mock_config.side_effect = Exception("No kubeconfig")
         token = get_openshift_token()
         self.assertIsNone(token)
 

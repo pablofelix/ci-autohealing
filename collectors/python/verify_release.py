@@ -8,13 +8,15 @@ registry. Outputs JSON to stdout for consumption by the ic shell script.
 
 import json
 import logging
-import subprocess
 import sys
 import argparse
+
+from kubernetes import client
 
 from clients.pyxis_client import PyxisClient
 from config import CollectorConfig
 from logger import setup_logger
+from openshift_auth import _ensure_k8s_config
 
 for name in list(logging.Logger.manager.loggerDict) + ['root']:
     lg = logging.getLogger(name) if name != 'root' else logging.getLogger()
@@ -31,17 +33,28 @@ for h in logger.handlers:
         h.stream = sys.stderr
 
 
-def _oc_get_json(kind, name, namespace):
-    """Fetch a Kubernetes resource as JSON dict."""
-    cmd = ['oc', 'get', kind, name, '-n', namespace, '-o', 'json']
+_CRD_PLURALS = {
+    'release': 'releases',
+    'snapshot': 'snapshots',
+}
+
+
+def _k8s_get_json(kind, name, namespace):
+    """Fetch a Kubernetes CRD resource as a dict via the Python API."""
+    plural = _CRD_PLURALS.get(kind)
+    if not plural:
+        logger.error("Unknown CRD kind: %s", kind)
+        return None
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            logger.error("oc get %s %s failed: %s", kind, name, result.stderr.strip())
-            return None
-        return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
-        logger.error("oc get %s %s error: %s", kind, name, e)
+        _ensure_k8s_config()
+        api = client.CustomObjectsApi()
+        return api.get_namespaced_custom_object(
+            group='appstudio.redhat.com', version='v1alpha1',
+            namespace=namespace, plural=plural, name=name,
+            _request_timeout=30,
+        )
+    except Exception as e:
+        logger.error("k8s get %s %s error: %s", kind, name, e)
         return None
 
 
@@ -74,7 +87,7 @@ def main():
 
         # 1. Get Release CR
         logger.info("Fetching Release CR: %s", args.release)
-        release_cr = _oc_get_json('release', args.release, ns)
+        release_cr = _k8s_get_json('release', args.release, ns)
         if not release_cr:
             raise RuntimeError("Release CR not found: {}".format(args.release))
 
@@ -91,7 +104,7 @@ def main():
             raise RuntimeError("No snapshot in Release spec")
 
         logger.info("Fetching Snapshot: %s", snapshot_name)
-        snapshot_cr = _oc_get_json('snapshot', snapshot_name, ns)
+        snapshot_cr = _k8s_get_json('snapshot', snapshot_name, ns)
         if not snapshot_cr:
             raise RuntimeError("Snapshot not found: {}".format(snapshot_name))
 

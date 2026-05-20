@@ -2,11 +2,14 @@
 
 Consolidates auth token retrieval, KubeArchive URL discovery, and
 authenticated session creation used across all clients and collectors.
+
+Uses the Python kubernetes client library to read kubeconfig instead of
+shelling out to the oc CLI.
 """
 
-import subprocess
-
 import requests
+
+from kubernetes import client, config
 
 
 KUBEARCHIVE_FALLBACK_URL = (
@@ -14,38 +17,41 @@ KUBEARCHIVE_FALLBACK_URL = (
     ".apps.CLUSTER_DOMAIN"
 )
 
+_k8s_loaded = False
+
+
+def _ensure_k8s_config():
+    # type: () -> None
+    global _k8s_loaded
+    if not _k8s_loaded:
+        config.load_kube_config()
+        _k8s_loaded = True
+
 
 def is_logged_in():
     # type: () -> bool
-    """Check if user is logged into OpenShift."""
+    """Check if user has a valid kubeconfig (equivalent to oc whoami)."""
     try:
-        result = subprocess.run(
-            ['oc', 'whoami'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5
-        )
-        return result.returncode == 0
+        _ensure_k8s_config()
+        v1 = client.CoreV1Api()
+        v1.get_api_resources(_request_timeout=5)
+        return True
     except Exception:
         return False
 
 
 def get_openshift_token():
     # type: () -> Optional[str]
-    """Get OpenShift authentication token via `oc whoami -t`."""
+    """Get the Bearer token from kubeconfig."""
     try:
-        result = subprocess.run(
-            ['oc', 'whoami', '-t'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        _ensure_k8s_config()
+        configuration = client.Configuration.get_default_copy()
+        token = configuration.api_key.get('authorization', '')
+        if token.startswith('Bearer '):
+            return token[7:]
+        return token or None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
@@ -55,37 +61,27 @@ def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
     Falls back to a known URL if the ConfigMap is not accessible.
     """
     try:
-        result = subprocess.run(
-            ['oc', 'get', 'cm', '-n', 'product-kubearchive', 'kubearchive-api-url',
-             '-o', 'jsonpath={.data.URL}'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=10
+        _ensure_k8s_config()
+        v1 = client.CoreV1Api()
+        cm = v1.read_namespaced_config_map(
+            'kubearchive-api-url', 'product-kubearchive',
+            _request_timeout=10,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        url = (cm.data or {}).get('URL', '')
+        return url if url else fallback_url
     except Exception:
-        pass
-    return fallback_url
+        return fallback_url
 
 
 def discover_openshift_api_url(fallback_url="https://api.CLUSTER_DOMAIN:6443"):
     # type: (str) -> str
-    """Discover the OpenShift API server URL."""
+    """Discover the OpenShift API server URL from kubeconfig."""
     try:
-        result = subprocess.run(
-            ['oc', 'whoami', '--show-server'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=5
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+        _ensure_k8s_config()
+        configuration = client.Configuration.get_default_copy()
+        return configuration.host or fallback_url
     except Exception:
-        pass
-    return fallback_url
+        return fallback_url
 
 
 def create_authenticated_session(token):

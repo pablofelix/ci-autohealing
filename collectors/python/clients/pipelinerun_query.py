@@ -16,8 +16,9 @@ def _query_live_cluster(namespace, label_selector):
     # type: (str, str) -> list
     """Query live cluster for PipelineRuns via Kubernetes Python API."""
     try:
-        from kubernetes import client, config
-        config.load_kube_config()
+        from kubernetes import client
+        from openshift_auth import _ensure_k8s_config
+        _ensure_k8s_config()
         api = client.CustomObjectsApi()
         result = api.list_namespaced_custom_object(
             group='tekton.dev', version='v1', namespace=namespace,

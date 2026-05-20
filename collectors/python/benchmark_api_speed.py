@@ -8,13 +8,14 @@ Compara:
 """
 
 import time
-import subprocess
-import json
+
+from kubernetes import client
 
 from config import CollectorConfig
 from clients.kubearchive import KubeArchiveClient
 from clients.kubernetes import KubernetesClient
 from logger import setup_logger
+from openshift_auth import _ensure_k8s_config
 
 logger = setup_logger(__name__)
 
@@ -47,27 +48,22 @@ def benchmark_pipelinerun_query(component_name, namespace):
         ka_data = {}
         logger.error("KubeArchive failed: %s", e)
 
-    # 2. K8s API (via oc)
+    # 2. K8s API (via Python client)
     start = time.time()
     try:
-        result = subprocess.run(
-            ['oc', 'get', 'pipelinerun', '-n', namespace,
-             '-l', label, '-o', 'json'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, timeout=15
+        _ensure_k8s_config()
+        api = client.CustomObjectsApi()
+        k8s_result = api.list_namespaced_custom_object(
+            group='tekton.dev', version='v1', namespace=namespace,
+            plural='pipelineruns',
+            label_selector=label,
+            _request_timeout=15,
         )
-        if result.returncode == 0:
-            k8s_data = json.loads(result.stdout)
-            k8s_count = len(k8s_data.get('items', []))
-            k8s_time = time.time() - start
-        else:
-            k8s_count = 0
-            k8s_time = -1
-            k8s_data = {}
+        k8s_count = len(k8s_result.get('items', []))
+        k8s_time = time.time() - start
     except Exception as e:
         k8s_count = 0
         k8s_time = -1
-        k8s_data = {}
         logger.error("K8s API failed: %s", e)
 
     return {

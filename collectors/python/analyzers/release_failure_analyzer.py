@@ -9,8 +9,9 @@ and ConformaAnalyzer.
 import json
 import os
 import re
-import subprocess
 import time
+
+from kubernetes import client
 
 from logger import setup_logger
 from repositories import DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository
@@ -20,6 +21,7 @@ from clients.kubearchive import KubeArchiveClient
 from clients.github_client import GitHubClient
 from clients.gitlab_client import GitLabClient
 from prompt_loader import load_prompt
+from openshift_auth import _ensure_k8s_config
 
 logger = setup_logger(__name__)
 
@@ -154,17 +156,26 @@ class ReleaseFailureAnalyzer:
             self.gitlab = GitLabClient()
         return self.gitlab
 
-    def _oc_get_json(self, resource, name, namespace=None):
+    _CRD_PLURALS = {
+        'release': 'releases',
+        'snapshot': 'snapshots',
+    }
+
+    def _k8s_get_json(self, resource, name, namespace=None):
         # type: (str, str, Optional[str]) -> Optional[Dict[str, Any]]
         ns = namespace or self.config.k8s.namespace
+        plural = self._CRD_PLURALS.get(resource)
+        if not plural:
+            return None
         try:
-            result = subprocess.run(
-                ['oc', 'get', resource, name, '-n', ns, '-o', 'json'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, check=True, timeout=15
+            _ensure_k8s_config()
+            api = client.CustomObjectsApi()
+            return api.get_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=ns, plural=plural, name=name,
+                _request_timeout=15,
             )
-            return json.loads(result.stdout)
-        except (subprocess.CalledProcessError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        except Exception:
             return None
 
     def _derive_branch(self, application):
@@ -202,7 +213,7 @@ class ReleaseFailureAnalyzer:
 
         # 1. Get Release CR from cluster
         logger.info("  Fetching Release CR: %s", release_name)
-        release_cr = self._oc_get_json('release', release_name, ns)
+        release_cr = self._k8s_get_json('release', release_name, ns)
         if not release_cr:
             logger.error("Release CR not found: %s in namespace %s", release_name, ns)
             return context
@@ -296,7 +307,7 @@ class ReleaseFailureAnalyzer:
         snapshot_name = context.get('snapshot', '')
         if snapshot_name:
             logger.info("  Fetching Snapshot: %s", snapshot_name)
-            snapshot_cr = self._oc_get_json('snapshot', snapshot_name, ns)
+            snapshot_cr = self._k8s_get_json('snapshot', snapshot_name, ns)
             if snapshot_cr:
                 components = snapshot_cr.get('spec', {}).get('components', [])
                 context['snapshot_components'] = [

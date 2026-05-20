@@ -12,12 +12,13 @@ Collects everything needed to understand and fix CI build failures:
 """
 
 import time
-import subprocess
-import json
 from dataclasses import replace
 from datetime import datetime
 
+from kubernetes import client
+
 from logger import setup_logger
+from openshift_auth import _ensure_k8s_config
 from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
 from clients.pipelinerun_query import query_pipelineruns
@@ -85,19 +86,16 @@ class BuildFailureCollector:
         branch = ''
 
         try:
-            comp_result = subprocess.run(
-                ['oc', 'get', 'component', component_name,
-                 '-n', self.config.k8s.namespace,
-                 '-o', 'json'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                timeout=10
+            _ensure_k8s_config()
+            api = client.CustomObjectsApi()
+            comp_data = api.get_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=self.config.k8s.namespace,
+                plural='components', name=component_name,
+                _request_timeout=10,
             )
-            if comp_result.returncode == 0:
-                comp_data = json.loads(comp_result.stdout)
-                repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
-                branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
+            repo_url = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('url', '')
+            branch = comp_data.get('spec', {}).get('source', {}).get('git', {}).get('revision', '')
         except Exception:
             pass
 
@@ -410,40 +408,33 @@ class BuildFailureCollector:
         # type: (str) -> Optional[str]
         """Fetch logs from active Kubernetes pods."""
         try:
-            result = subprocess.run(
-                ['oc', 'get', 'pod', '-n', self.config.k8s.namespace,
-                 '-l', 'tekton.dev/pipelineRun={}'.format(pr_name),
-                 '--no-headers', '-o', 'custom-columns=:metadata.name'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True,
-                timeout=10
+            _ensure_k8s_config()
+            v1 = client.CoreV1Api()
+            pod_list = v1.list_namespaced_pod(
+                self.config.k8s.namespace,
+                label_selector='tekton.dev/pipelineRun={}'.format(pr_name),
+                _request_timeout=10,
             )
-
-            pods = [p.strip() for p in result.stdout.strip().split('\n') if p.strip()]
+            pods = [p.metadata.name for p in pod_list.items if p.metadata]
             if not pods:
                 return None
 
             all_logs = []
-            for pod in pods[:10]:
+            for pod_name in pods[:10]:
                 try:
-                    logs_result = subprocess.run(
-                        ['oc', 'logs', pod, '-n', self.config.k8s.namespace,
-                         '--all-containers', '--tail=5000'],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        universal_newlines=True,
-                        timeout=30
+                    logs = v1.read_namespaced_pod_log(
+                        pod_name, self.config.k8s.namespace,
+                        tail_lines=5000,
+                        _request_timeout=30,
                     )
-                    if logs_result.stdout:
-                        all_logs.append("===== Pod: {} =====\n{}".format(pod, logs_result.stdout))
-                except subprocess.TimeoutExpired:
+                    if logs:
+                        all_logs.append("===== Pod: {} =====\n{}".format(pod_name, logs))
+                except Exception:
                     continue
 
             return "\n\n".join(all_logs) if all_logs else None
 
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except Exception:
             return None
 
     def collect_comprehensive_failure(self, component):
