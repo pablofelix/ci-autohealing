@@ -598,6 +598,6 @@ def test_analyzer_with_mock_llm():
 
 ## Related Documentation
 
-- **[ARCHITECTURE.md](../docs/ARCHITECTURE.md)** - Overall system architecture
+- **[ARCHITECTURE.md](../../docs/ARCHITECTURE.md)** - Overall system architecture
 - **[STYLE.md](../../../STYLE.md)** - Code style and conventions
 - **Source code:** `clients/` directory for full implementations

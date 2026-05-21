@@ -18,12 +18,23 @@ tasks:
   test:
     desc: Run test suite
     dir: "{{.SRC_DIR}}"
+    preconditions:
+      - sh: command -v python3.11
+        msg: |
+          python3.11 is not installed.
+          Install: sudo dnf install python3.11  (RHEL/Fedora)
+                   sudo apt install python3.11  (Debian/Ubuntu)
     cmds:
       - python3.11 -m pytest tests/ -x -q {{.CLI_ARGS}}
 
   lint:
     desc: Run ruff linter
     dir: "{{.SRC_DIR}}"
+    preconditions:
+      - sh: command -v ruff
+        msg: |
+          ruff is not installed.
+          Install: pip3.11 install ruff
     cmds:
       - ruff check . {{.CLI_ARGS}}
 
@@ -39,6 +50,12 @@ tasks:
 
   build:
     desc: Build Docker image
+    preconditions:
+      - sh: command -v docker || command -v podman
+        msg: |
+          Neither docker nor podman is installed.
+          Install docker:  https://docs.docker.com/engine/install/
+          Install podman:  sudo dnf install podman  (RHEL/Fedora)
     cmds:
       - docker build -t {{.IMAGE}}:{{.TAG}} .
     sources:
@@ -49,11 +66,14 @@ tasks:
   up:
     desc: Start all services (server + PostgreSQL)
     deps: [build]
-    cmds:
-      - docker compose up -d || podman-compose up -d
     preconditions:
       - sh: docker info > /dev/null 2>&1 || podman info > /dev/null 2>&1
-        msg: "Docker or podman is required"
+        msg: |
+          Docker/podman daemon is not running.
+          Start it: sudo systemctl start docker
+              or:   systemctl --user start podman
+    cmds:
+      - docker compose up -d || podman-compose up -d
 
   down:
     desc: Stop all services
@@ -105,8 +125,18 @@ tasks:
   deploy:
     desc: Deploy to Kubernetes cluster
     preconditions:
+      - sh: command -v kubectl
+        msg: |
+          kubectl is not installed.
+          Install: curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                   chmod +x kubectl && mv kubectl ~/.local/bin/
       - sh: kubectl cluster-info > /dev/null 2>&1
-        msg: "No Kubernetes cluster available. Check kubectl config."
+        msg: |
+          No Kubernetes cluster available.
+          Options:
+            - Configure kubectl to point to your cluster: export KUBECONFIG=~/.kube/config
+            - Create a local cluster with kind: task kind:create
+            - Check current context: kubectl config current-context
     cmds:
       - kubectl apply -f {{.K8S_DIR}}/namespace.yml
       - kubectl apply -f {{.K8S_DIR}}/configmap.yml
@@ -117,6 +147,9 @@ tasks:
 
   k8s:status:
     desc: Show Kubernetes deployment status
+    preconditions:
+      - sh: command -v kubectl
+        msg: "kubectl is not installed. Run: task deps:check"
     cmds:
       - kubectl -n ic-monitoring get pods,svc,deploy
 
@@ -136,11 +169,50 @@ tasks:
       - kubectl delete -f {{.K8S_DIR}}/ --ignore-not-found
 
   # ===========================================================================
+  # Kind (local Kubernetes)
+  # ===========================================================================
+
+  kind:create:
+    desc: Create a local Kubernetes cluster with kind
+    preconditions:
+      - sh: command -v kind
+        msg: |
+          kind is not installed.
+          Install: curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
+                   chmod +x ./kind && mv ./kind ~/.local/bin/
+      - sh: command -v docker || command -v podman
+        msg: "kind requires docker or podman. Install one first."
+    cmds:
+      - kind create cluster --name ic-test
+      - echo "Cluster created. Deploy with 'task kind:deploy'"
+
+  kind:deploy:
+    desc: Build image, load into kind, and deploy
+    preconditions:
+      - sh: kind get clusters 2>/dev/null | grep -q ic-test
+        msg: |
+          No kind cluster 'ic-test' found.
+          Create one first: task kind:create
+    cmds:
+      - task: build
+      - kind load docker-image {{.IMAGE}}:{{.TAG}} --name ic-test
+      - task: deploy
+      - echo "Deployed to kind. Access with 'task k8s:port-forward'"
+
+  kind:delete:
+    desc: Delete the local kind cluster
+    cmds:
+      - kind delete cluster --name ic-test 2>/dev/null || true
+
+  # ===========================================================================
   # Database
   # ===========================================================================
 
   db:start:
     desc: Start PostgreSQL container
+    preconditions:
+      - sh: command -v docker || command -v podman
+        msg: "Docker or podman is required to run PostgreSQL."
     cmds:
       - docker start {{.DB_CONTAINER}} 2>/dev/null || docker compose up -d postgres
 
@@ -164,6 +236,37 @@ tasks:
   # Utilities
   # ===========================================================================
 
+  deps:check:
+    desc: Check all tool dependencies and report missing ones
+    cmds:
+      - |
+        ok=true
+        check() {
+          if command -v "$1" > /dev/null 2>&1; then
+            printf "  %-14s ✓ %s\n" "$1" "$($1 --version 2>/dev/null | head -1)"
+          else
+            printf "  %-14s ✗ missing — %s\n" "$1" "$2"
+            ok=false
+          fi
+        }
+        echo "Required:"
+        check python3.11  "sudo dnf install python3.11"
+        check ruff        "pip3.11 install ruff"
+        echo ""
+        echo "Docker/Container:"
+        check docker       "https://docs.docker.com/engine/install/"
+        check podman       "sudo dnf install podman"
+        echo ""
+        echo "Kubernetes:"
+        check kubectl      "https://kubernetes.io/docs/tasks/tools/"
+        check kind         "https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
+        echo ""
+        if [ "$ok" = true ]; then
+          echo "All dependencies available."
+        else
+          echo "Some tools are missing. Install commands shown above."
+        fi
+
   clean:
     desc: Remove build artifacts and caches
     cmds:
@@ -179,6 +282,9 @@ tasks:
 
   health:
     desc: Check server health endpoint
+    preconditions:
+      - sh: command -v curl
+        msg: "curl is required. Install: sudo dnf install curl"
     cmds:
       - "curl -sf http://localhost:{{.PORT}}/health | python3.11 -m json.tool"
 
