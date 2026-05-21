@@ -5,9 +5,9 @@
 
 ## Context
 
-The `ic` CLI grew organically from a thin psql wrapper to a 5400-line monolithic bash script. An antipattern audit identified 7 systemic issues:
+The `ic` CLI grew organically from a thin psql wrapper to a large bash script (currently ~8700 lines). An antipattern audit identified 7 systemic issues:
 
-- 14 inline Python heredoc blocks (~2000 lines of untestable, unlintable Python inside bash)
+- Inline Python heredoc blocks (originally 14, now reduced to ~9 by extracting to `src/cli/`)
 - 138 scattered SQL queries with 9x duplication of the `latest_builds` CTE
 - 6 god functions exceeding 200 lines each (largest: `cmd_get_alerts` at 393 lines)
 - Copy-pasted logic across 3 alert command variants and 3 number-resolution blocks
@@ -21,7 +21,7 @@ ADR-001 established that collectors should be Python, but noted the `ic` CLI "re
 
 Refactor the `ic` CLI incrementally, following these principles:
 
-1. **Extract Python into standalone scripts** — Move all `python3 -c "..."` blocks into `parsers/*.py` files. Each script reads stdin/args, writes stdout. Bash calls `python3 "$SCRIPT_DIR/parsers/some_parser.py"`.
+1. **Extract Python into standalone modules** — Move `python3 -c "..."` blocks into `src/cli/` modules. Complex operations delegate from bash to Python via `ic.py` → `src/cli/main.py`.
 
 2. **Consolidate SQL into named query functions** — Create `ic-queries.sh` with functions like `sql_latest_failing_builds()`, `sql_count_unresolved()`. Each CTE is defined once. All bash files source this.
 

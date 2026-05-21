@@ -9,7 +9,7 @@ We need to periodically collect failure data from KubeArchive and the live clust
 
 ## Decision
 
-Use cron (`*/20 * * * *`) running `collect-comprehensive.sh`, which orchestrates 5 Python collectors sequentially. The cron script sets `PATH` to include `~/.local/bin` for `oc`.
+Use cron running batch scripts from `src/cron/` (`batch_analysis.sh`, `enrich_context.sh`). The cron scripts source `.env` from the project root and set `PATH` to include `~/.local/bin` for `oc`.
 
 ## Why 20 minutes
 

@@ -134,7 +134,7 @@ def find_failing_component_names(self, application):
 
 ### Layer 4: Collectors (Orchestration)
 
-**Directory:** `collectors/`
+**Directory:** `src/collectors/`
 
 High-level workflows that coordinate clients + repositories to accomplish tasks.
 
@@ -245,7 +245,7 @@ Both share the same repository layer, connection pool (`PooledDatabaseConnection
 
 ## SOLID Principles Applied
 
-This codebase was refactored to follow SOLID principles. See the [SOLID refactoring plan](../../../.claude/plans/streamed-dreaming-spark.md) for full details.
+This codebase was refactored to follow SOLID principles.
 
 ### 1. Dependency Inversion Principle
 

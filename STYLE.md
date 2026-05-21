@@ -155,7 +155,7 @@ src/
     analyze_conforma.py        # -> analyzers.conforma_analyzer
 ```
 
-**Note:** The MCP server lives in a separate package (`konflux-mcp-server/`) with Python 3.11+ requirement. It reuses repositories via a thin factory layer but doesn't depend on `config.py` or collectors.
+**Note:** The MCP server and REST API live in `src/mcp_server/` and `src/api/` (Python 3.11+). They share Pydantic models and the repository layer via a thin factory.
 
 No `utils/`, `helpers/`, `common/`, `misc/`. If something doesn't have a domain name, it doesn't belong.
 

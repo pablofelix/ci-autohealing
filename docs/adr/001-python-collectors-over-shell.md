@@ -16,4 +16,4 @@ Replace all shell-based collectors with Python modules under `src/`. Shell scrip
 - **Positive:** Structured error handling, testable code, reusable clients (KubeArchiveClient, KubernetesClient), type hints
 - **Positive:** Database operations via psycopg2 instead of piping through docker exec psql
 - **Negative:** Requires Python 3.6+ and pip dependencies on the host
-- **Note:** The `ic` CLI remains bash because it's a thin query layer over psql — moving it to Python would add startup latency for no benefit
+- **Note:** The `ic` CLI has since evolved into a hybrid: a bash wrapper (`ic`) delegates to Python (`ic.py` → `src/cli/main.py`) for complex operations, keeping bash only for simple queries and formatting. See ADR-005.

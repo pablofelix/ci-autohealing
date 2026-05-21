@@ -19,7 +19,7 @@ Three design decisions were made to handle this difference:
 
 ### 1. Separate fix code paths
 
-Build failures and Conforma violations share the same entry point (`fix_generator.py`) and PR infrastructure (`_push_pr_and_record`, `GitHubClient`), but diverge completely at the strategy level:
+Build failures and Conforma violations share the same entry point (`src/fixers/fix_generator.py`) and PR infrastructure (`_push_pr_and_record`, `GitHubClient`), but diverge completely at the strategy level:
 
 | | Build failures | Conforma violations |
 |---|---|---|

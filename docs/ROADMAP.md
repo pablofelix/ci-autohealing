@@ -155,19 +155,19 @@ Optional execution - only runs if `LLM_PROVIDER` env var is set. Non-critical fa
 - Team handle auto-lookup from `rhoai-component-data.yaml` (cached in `/tmp`, 24h TTL, VPN-graceful)
 - Separate templates for build failures and conforma violations (mrkdwn format)
 - Optional `--jira KEY` to include ticket link, `--clipboard` to copy
-- `parsers/lookup_team.py` — standalone YAML→handle resolver
+- Team handle lookup via component-data YAML (cached, VPN-graceful)
 
-### 1.7 MCP Server (COMPLETE)
+### 1.7 MCP Server + REST API (COMPLETE)
 
-**Goal:** Expose Konflux collectors as MCP tools for external AI agents (Claude Desktop, GitHub Copilot, Cursor, etc.)
+**Goal:** Expose Konflux collectors as MCP tools and REST API for external AI agents and dashboards.
 
 **Files:**
-- `konflux-mcp-server/src/konflux_mcp/server.py` - FastMCP server
-- `konflux-mcp-server/src/konflux_mcp/tools.py` - 7 MCP tools
-- `konflux-mcp-server/src/konflux_mcp/models.py` - Pydantic response models
-- `konflux-mcp-server/src/konflux_mcp/repository_factory.py` - DB connection (no config dependency)
+- `src/serve.py` - Unified server entry point (API + MCP SSE)
+- `src/mcp_server/tools.py` - 23 MCP tools
+- `src/mcp_server/models.py` - Shared Pydantic response models
+- `src/api/` - FastAPI REST endpoints (same data, HTTP-accessible)
 
-**7 MCP Tools:**
+**Tool categories (23 tools, mirrored as REST endpoints):**
 1. `list_applications()` - Discover available RHOAI versions
 2. `list_alerts(application)` - Get all alerts (build + Conforma)
 3. `get_failure(component, application)` - Full build failure details

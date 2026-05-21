@@ -485,24 +485,23 @@ KONFLUX_UI_BASE=                          # Konflux UI base URL
 
 | Path | Purpose |
 |------|---------|
-| `ic` | Main CLI |
+| `ic` | Main CLI (bash wrapper delegating to Python) |
 | `ic-config.sh` | Configuration defaults (sourced by `ic`) |
-| `cron/collect-comprehensive.sh` | Cron orchestrator (9 steps) |
-| `src/analyzers/build_failure_analyzer.py` | Build failure LLM analysis |
-| `src/analyzers/conforma_analyzer.py` | Conforma violation LLM analysis |
-| `src/fixers/fix_generator.py` | PR and Jira fix generator |
-| `src/fixers/auto_fix.py` | Autonomous cron runner (step 7.5) |
-| `src/fixers/verify_fixes.py` | Fix verification loop |
-| `src/poll_jira_comments.py` | Jira comment polling + draft generation |
-| `src/jira_refine.py` | Interactive draft refinement |
-| `src/clients/jira_client.py` | Jira REST API (Basic auth) |
-| `src/clients/github_client.py` | GitHub Contents API |
-| `src/clients/llm_provider.py` | LLM provider abstraction (Vertex / Anthropic) |
+| `Taskfile.yml` | DevOps tasks: `task db:start`, `task db:migrate`, `task check` |
+| `src/serve.py` | Unified server entry point (REST API + MCP SSE) |
+| `src/mcp_server/` | MCP server tools and models |
+| `src/api/` | REST API (FastAPI) — same data as MCP tools |
+| `src/cli/` | Python CLI implementation (`ic.py` → `cli/main.py`) |
+| `src/analyzers/` | LLM analyzers (build failures, conforma, release, scenarios) |
+| `src/fixers/` | PR/Jira fix generator, autonomous runner, verification loop |
+| `src/clients/` | External API clients (Jira, GitHub, GitLab, Pyxis, K8s, LLM) |
 | `src/repositories/` | All DB repository classes |
-| `src/tests/` | Test suite |
+| `src/collectors/` | Data collectors (build failures, conforma violations) |
+| `src/cron/` | Cron scripts (batch analysis, context enrichment) |
+| `src/tests/` | Test suite (176 tests) |
 | `prompts/*.md` | LLM system prompts (edit without code changes) |
-| `parsers/` | Standalone Python parsers called from bash |
-| `db/migrations/` | Schema migrations (001–009) |
+| `db/migrations/` | Schema migrations (001–010) |
 | `docs/adr/` | Architecture decision records |
-| `konflux-mcp-server/` | MCP server for external AI agents |
+| `docker-compose.yml` | Local dev: server + PostgreSQL |
+| `k8s/` | Kubernetes deployment manifests |
 | `.env` | Local secrets (not committed) |
