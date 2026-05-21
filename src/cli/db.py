@@ -21,6 +21,8 @@ _DB_PORT = int(os.environ.get('DB_PORT', '5432'))
 
 _conn = None
 _db_available = None
+_db_connection = None
+_repo_cache = {}
 
 
 def _get_connection():
@@ -88,17 +90,6 @@ def sql_rows(query):
         return []
 
 
-def sql_dict_rows(query):
-    # type: (str) -> List[Dict[str, Any]]
-    """Run a query and return rows as list of dicts (column_name -> value)."""
-    try:
-        conn = _get_connection()
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query)
-            return [dict(row) for row in cur.fetchall()]
-    except Exception:
-        return []
-
 
 def sql_table(query):
     # type: (str) -> None
@@ -126,6 +117,28 @@ def sql_execute(query):
             return cur.rowcount
     except Exception:
         return 0
+
+
+def _get_db_connection():
+    global _db_connection
+    if _db_connection is None:
+        from config import CollectorConfig
+        from repositories.connection import DatabaseConnection
+        cfg = CollectorConfig.from_env()
+        _db_connection = DatabaseConnection(cfg.db)
+    return _db_connection
+
+
+def get_repo(repo_class):
+    if repo_class not in _repo_cache:
+        _repo_cache[repo_class] = repo_class(_get_db_connection())
+    return _repo_cache[repo_class]
+
+
+def print_table(headers, rows):
+    # type: (list, list) -> None
+    """Print a formatted table from headers + rows."""
+    _print_table(headers, rows)
 
 
 def _print_table(headers, rows):

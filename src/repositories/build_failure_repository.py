@@ -281,3 +281,238 @@ class BuildFailureRepository:
                 (component_name,)
             )
 
+    def get_component_summary(self, name):
+        # type: (str,) -> Optional[Dict]
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE build_logs IS NOT NULL),
+                       MIN(first_detected_at),
+                       MAX(first_detected_at)
+                FROM build_failures WHERE component_name = %s
+            """, (name,))
+            row = cursor.fetchone()
+            if not row or row[0] == 0:
+                return None
+            return {
+                'total': row[0], 'with_logs': row[1],
+                'first_seen': row[2], 'last_seen': row[3],
+            }
+
+    def get_applications(self):
+        # type: () -> list
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT application, COUNT(*) as cnt
+                FROM build_failures
+                WHERE application IS NOT NULL
+                GROUP BY application ORDER BY application
+            """)
+            return [{'application': r[0], 'count': r[1]} for r in cursor.fetchall()]
+
+    def get_overview_stats(self, application=None):
+        # type: (Optional[str],) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            if application:
+                cursor.execute("""
+                    SELECT COUNT(*),
+                           COUNT(DISTINCT component_name),
+                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL)
+                    FROM build_failures WHERE application = %s
+                """, (application,))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*),
+                           COUNT(DISTINCT component_name),
+                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL)
+                    FROM build_failures
+                """)
+            row = cursor.fetchone()
+            return {'total': row[0], 'components': row[1], 'with_logs': row[2]}
+
+    def get_daily_stats(self, application, days=7):
+        # type: (str, int) -> list
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DATE(first_detected_at), COUNT(*)
+                FROM build_failures
+                WHERE application = %s
+                GROUP BY DATE(first_detected_at)
+                ORDER BY DATE(first_detected_at) DESC
+                LIMIT %s
+            """, (application, days))
+            return [{'date': r[0], 'count': r[1]} for r in cursor.fetchall()]
+
+    def get_resolved_stats(self, application):
+        # type: (str,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE is_resolved = TRUE),
+                       COUNT(*) FILTER (WHERE is_resolved = FALSE),
+                       COUNT(*) FILTER (WHERE status = 'Succeeded')
+                FROM build_failures WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            return {
+                'total': row[0], 'resolved': row[1],
+                'unresolved': row[2], 'successes': row[3],
+            }
+
+    def get_triage_summary(self, application):
+        # type: (str,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                WITH latest_builds AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, pipelinerun_name, status,
+                        is_resolved, first_detected_at,
+                        build_logs IS NOT NULL as has_logs
+                    FROM build_failures WHERE application = %s
+                    ORDER BY component_name, first_detected_at DESC
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM build_failures WHERE application = %s) as total,
+                    COUNT(*) FILTER (WHERE status = 'Failed' AND is_resolved = FALSE) as failing,
+                    COUNT(*) FILTER (WHERE status = 'Succeeded') as working
+                FROM latest_builds
+            """, (application, application))
+            row = cursor.fetchone()
+            summary = {'total': row[0], 'failing': row[1], 'working': row[2]}
+
+            cursor.execute("""
+                WITH latest_builds AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, first_detected_at,
+                        build_logs IS NOT NULL as has_logs
+                    FROM build_failures
+                    WHERE application = %s AND status = 'Failed' AND is_resolved = FALSE
+                    ORDER BY component_name, first_detected_at DESC
+                )
+                SELECT component_name, first_detected_at::date, has_logs
+                FROM latest_builds ORDER BY first_detected_at DESC
+            """, (application,))
+            summary['failing_components'] = [
+                {'component': r[0], 'last_failure': r[1], 'has_logs': r[2]}
+                for r in cursor.fetchall()
+            ]
+            return summary
+
+    def get_resolved_components(self, application):
+        # type: (str,) -> list
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT component_name, MAX(resolved_at), COUNT(*)
+                FROM build_failures
+                WHERE is_resolved = TRUE AND application = %s
+                GROUP BY component_name
+                ORDER BY MAX(resolved_at) DESC
+            """, (application,))
+            return [
+                {'component': r[0], 'resolved_at': r[1], 'count': r[2]}
+                for r in cursor.fetchall()
+            ]
+
+    def get_working_components(self, application):
+        # type: (str,) -> list
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                WITH latest_builds AS (
+                    SELECT DISTINCT ON (component_name)
+                        component_name, commit_short_sha, commit_message,
+                        first_detected_at, status
+                    FROM build_failures WHERE application = %s
+                    ORDER BY component_name, first_detected_at DESC
+                )
+                SELECT component_name, LEFT(commit_short_sha, 8),
+                       LEFT(commit_message, 50), first_detected_at::date
+                FROM latest_builds WHERE status = 'Succeeded'
+                ORDER BY first_detected_at DESC
+            """, (application,))
+            return [
+                {'component': r[0], 'commit': r[1], 'message': r[2], 'date': r[3]}
+                for r in cursor.fetchall()
+            ]
+
+    def get_component_history(self, component, application, limit=20):
+        # type: (str, str, int) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE status = 'Failed'),
+                       COUNT(*) FILTER (WHERE status = 'Succeeded'),
+                       COUNT(*) FILTER (WHERE is_resolved = TRUE)
+                FROM build_failures
+                WHERE component_name = %s AND application = %s
+            """, (component, application))
+            row = cursor.fetchone()
+            summary = {
+                'total': row[0], 'failures': row[1],
+                'successes': row[2], 'resolved': row[3],
+            }
+
+            cursor.execute("""
+                SELECT pipelinerun_name, status,
+                       CASE WHEN is_resolved THEN TRUE ELSE FALSE END,
+                       LEFT(commit_short_sha, 8), first_detected_at
+                FROM build_failures
+                WHERE component_name = %s AND application = %s
+                ORDER BY first_detected_at DESC LIMIT %s
+            """, (component, application, limit))
+            builds = [
+                {'pipelinerun': r[0], 'status': r[1], 'resolved': r[2],
+                 'commit': r[3], 'date': r[4]}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT status FROM build_failures
+                WHERE component_name = %s AND application = %s
+                ORDER BY first_detected_at DESC LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            last_status = row[0] if row else None
+
+            return {'summary': summary, 'builds': builds, 'last_status': last_status}
+
+    def get_enrichment_coverage(self, application):
+        # type: (str,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND is_resolved = FALSE),
+                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enriched_context IS NOT NULL),
+                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enrichment_error IS NOT NULL)
+                FROM build_failures WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            total = row[0]
+            enriched = row[1]
+            return {
+                'total': total, 'enriched': enriched, 'failed': row[2],
+                'pct': enriched * 100 // max(total, 1),
+            }
+
+    def get_analysis_queue(self, application):
+        # type: (str,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND ai_skip_reason IS NULL),
+                    COUNT(*) FILTER (WHERE ai_analyzed = TRUE)
+                FROM build_failures WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            return {'pending': row[0], 'analyzed': row[1]}
+

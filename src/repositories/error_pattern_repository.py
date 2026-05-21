@@ -341,6 +341,38 @@ class ErrorPatternRepository:
                     'total_occurrences', 'also_seen_in']
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
+    def get_by_name_or_category(self, name):
+        # type: (str,) -> Optional[Dict]
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, failure_type, failure_category, pattern_name, description,
+                       typical_fix, doc_url, doc_context, doc_fetched_at,
+                       occurrence_count, avg_confidence, first_seen_at, last_seen_at, created_by
+                FROM error_patterns
+                WHERE pattern_name = %s OR failure_category = %s
+                LIMIT 1
+            """, (name, name))
+            row = cursor.fetchone()
+            return self._row_to_dict(row) if row else None
+
+    def get_library_summary(self):
+        # type: () -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*),
+                       COUNT(*) FILTER (WHERE avg_confidence IS NOT NULL),
+                       COALESCE(ROUND(AVG(avg_confidence)::numeric * 100), 0),
+                       COALESCE(SUM(occurrence_count), 0)
+                FROM error_patterns
+            """)
+            row = cursor.fetchone()
+            return {
+                'total': row[0], 'with_confidence': row[1],
+                'avg_confidence': row[2], 'total_occurrences': row[3],
+            }
+
     @staticmethod
     def _row_to_dict(row):
         # type: (Any,) -> Dict[str, Any]

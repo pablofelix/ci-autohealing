@@ -279,3 +279,24 @@ class ResolutionAttemptRepository:
             """, (days,))
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_outcome_summary(self, days=30):
+        # type: (int,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*),
+                    COUNT(*) FILTER (WHERE was_successful = TRUE),
+                    COUNT(*) FILTER (WHERE was_successful = FALSE),
+                    COUNT(*) FILTER (WHERE was_successful IS NULL AND status = 'pr_created')
+                FROM resolution_attempts
+                WHERE attempted_at >= NOW() - make_interval(days => %s)
+            """, (days,))
+            row = cursor.fetchone()
+            total, success, failed, pending = row
+            resolved = success + failed
+            return {
+                'total': total, 'successful': success, 'failed': failed,
+                'pending': pending, 'rate': success * 100 // max(resolved, 1),
+            }

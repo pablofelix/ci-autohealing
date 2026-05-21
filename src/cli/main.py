@@ -44,24 +44,22 @@ def get_components(refresh):
 @click.argument('name')
 def get_component(name):
     """Get component summary."""
-    from cli.db import require_db, sql
+    from cli.db import get_repo, require_db
     from cli.formatting import bold, cyan, red
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
-    total = sql("SELECT COUNT(*) FROM build_failures WHERE component_name = '{}';".format(name))
-    if total == '0' or total is None:
+    summary = get_repo(BuildFailureRepository).get_component_summary(name)
+    if not summary:
         print(red('Error: Component not found: {}'.format(name)))
         raise SystemExit(1)
-    with_logs = sql("SELECT COUNT(*) FROM build_failures WHERE component_name = '{}' AND build_logs IS NOT NULL;".format(name))
-    first_seen = sql("SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '{}';".format(name))
-    last_seen = sql("SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '{}';".format(name))
     print(bold('Component: ') + cyan(name))
     print()
     print(bold('Summary:'))
-    print('  Total failures: {}'.format(total))
-    print('  With logs: {}'.format(with_logs))
-    print('  First seen: {}'.format(first_seen))
-    print('  Last seen: {}'.format(last_seen))
+    print('  Total failures: {}'.format(summary['total']))
+    print('  With logs: {}'.format(summary['with_logs']))
+    print('  First seen: {}'.format(summary['first_seen']))
+    print('  Last seen: {}'.format(summary['last_seen']))
     print()
     print(cyan('For full details with logs:') + ' ic describe component {}'.format(name))
     print()
@@ -131,10 +129,12 @@ def get_pipelinerun(name):
 @get.command('apps')
 def get_apps():
     """List available RHOAI applications."""
-    from cli.db import require_db, sql, sql_rows
+    from cli.db import get_repo, require_db
     from cli.formatting import bold, cyan, green, section_header, yellow
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
+    build_repo = get_repo(BuildFailureRepository)
     section_header('Available RHOAI Applications')
     print()
     apps = []
@@ -152,16 +152,16 @@ def get_apps():
              if 'rhoai' in item['metadata']['name']],
         )
     except Exception:
-        print(yellow('⚠ Cluster unreachable — showing applications from database'))
+        print(yellow('Warning: Cluster unreachable — showing applications from database'))
         print()
-        rows = sql_rows("SELECT DISTINCT application FROM build_failures ORDER BY application;")
-        apps = [r[0] for r in rows if r[0]]
+        apps = [a['application'] for a in build_repo.get_applications()]
     if not apps:
         print(yellow('No applications found'))
         return
+    app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     current = cfg.APPLICATION_NAME
     for app in apps:
-        db_count = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app)) or '0'
+        db_count = app_counts.get(app, 0)
         if app == current:
             print('  {} {} — {} records'.format(green('✓'), bold(app) + ' ' + cyan('(current)'), db_count))
         else:
@@ -273,7 +273,7 @@ def describe_release(name, logs):
 def config(ctx):
     """Show or modify configuration."""
     if ctx.invoked_subcommand is None:
-        from cli.db import check_db, sql
+        from cli.db import check_db, get_repo
         from cli.formatting import bold, cyan, section_header
         section_header('Current Configuration')
         print()
@@ -283,9 +283,11 @@ def config(ctx):
         print('  Config: {}/.env'.format(cfg.PROJECT_DIR))
         print()
         if check_db():
+            from repositories.build_failure_repository import BuildFailureRepository
+            s = get_repo(BuildFailureRepository).get_overview_stats()
             print(bold('Database:'))
-            print('  Failures: {}'.format(sql('SELECT COUNT(*) FROM build_failures;')))
-            print('  Components: {}'.format(sql('SELECT COUNT(DISTINCT component_name) FROM build_failures;')))
+            print('  Failures: {}'.format(s['total']))
+            print('  Components: {}'.format(s['components']))
             print()
         print(cyan('Commands:'))
         print('  ic config set-app <app>  # Change application')
@@ -298,11 +300,12 @@ def config(ctx):
 @click.option('--force', '-f', is_flag=True, help='Set even if not in DB')
 def config_set_app(app_name, force):
     """Set active application."""
-    from cli.db import check_db, sql
+    from cli.db import check_db, get_repo
     from cli.formatting import cyan, green, red
     if check_db():
-        in_db = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app_name))
-        if (in_db == '0' or in_db is None) and not force:
+        from repositories.build_failure_repository import BuildFailureRepository
+        s = get_repo(BuildFailureRepository).get_overview_stats(app_name)
+        if s['total'] == 0 and not force:
             print(red("Error: Application '{}' not found in database".format(app_name)))
             print()
             _bash_fallback(['get', 'apps'])
@@ -326,8 +329,12 @@ def config_set_app(app_name, force):
     os.environ['APPLICATION_NAME'] = app_name
     print(green('✓ Application set to: ') + cyan(app_name))
     if check_db():
-        has_cache = sql("SELECT COUNT(*) FROM sync_status WHERE application = '{}';".format(app_name))
-        if has_cache == '0' or has_cache is None:
+        from cli.db import _get_db_connection
+        with _get_db_connection().connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sync_status WHERE application = %s", (app_name,))
+            has_cache = cursor.fetchone()[0]
+        if not has_cache:
             print('  No cached data yet. Run {} to sync.'.format(cyan('ic get components -r')))
         else:
             print('  Cached sync data available. Run {} to view.'.format(cyan('ic get components')))
@@ -341,61 +348,51 @@ def config_set_app(app_name, force):
 def stats(ctx):
     """Statistics."""
     if ctx.invoked_subcommand is None:
-        from cli.db import require_db, sql_table
+        from cli.db import get_repo, print_table, require_db
         from cli.formatting import section_header
+        from repositories.build_failure_repository import BuildFailureRepository
         if not require_db():
             return
+        s = get_repo(BuildFailureRepository).get_overview_stats()
         section_header('Statistics')
         print()
-        sql_table("""
-            SELECT
-                COUNT(*) as "Total Failures",
-                COUNT(DISTINCT component_name) as "Components",
-                COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as "With Logs"
-            FROM build_failures;
-        """)
+        print_table(
+            ['Total Failures', 'Components', 'With Logs'],
+            [(s['total'], s['components'], s['with_logs'])],
+        )
         print()
 
 
 @stats.command('daily')
 def stats_daily():
     """Failures by day."""
-    from cli.db import require_db, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
+    rows = get_repo(BuildFailureRepository).get_daily_stats(cfg.APPLICATION_NAME)
     section_header('Failures by Day')
     print()
-    sql_table("""
-        SELECT
-            DATE(first_detected_at) as "Date",
-            COUNT(*) as "Failures"
-        FROM build_failures
-        GROUP BY DATE(first_detected_at)
-        ORDER BY DATE(first_detected_at) DESC
-        LIMIT 7;
-    """)
+    print_table(['Date', 'Failures'], [(r['date'], r['count']) for r in rows])
     print()
 
 
 @stats.command('resolved')
 def stats_resolved():
     """Resolved failures statistics."""
-    from cli.db import require_db, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
+    s = get_repo(BuildFailureRepository).get_resolved_stats(cfg.APPLICATION_NAME)
     section_header('Resolved Failures Statistics')
     print()
-    sql_table("""
-        SELECT
-            COUNT(*) as "Total Records",
-            SUM(CASE WHEN is_resolved = TRUE THEN 1 ELSE 0 END) as "Resolved",
-            SUM(CASE WHEN is_resolved = FALSE THEN 1 ELSE 0 END) as "Unresolved",
-            SUM(CASE WHEN status = 'Succeeded' THEN 1 ELSE 0 END) as "Successes"
-        FROM build_failures
-        WHERE application = '{app}';
-    """.format(app=cfg.APPLICATION_NAME))
+    print_table(
+        ['Total Records', 'Resolved', 'Unresolved', 'Successes'],
+        [(s['total'], s['resolved'], s['unresolved'], s['successes'])],
+    )
     print()
 
 
@@ -432,80 +429,63 @@ def ai_batch(args):
 @ai.command('status')
 def ai_status():
     """Show AI analysis summary."""
-    from cli.db import require_db, sql, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, cyan, green, section_header
+    from repositories.ai_analysis_repository import AIAnalysisRepository
     if not require_db():
         return
     app = cfg.APPLICATION_NAME
+    ai_repo = get_repo(AIAnalysisRepository)
+    status = ai_repo.get_extended_status(app)
     section_header('AI Analysis Status')
     print()
 
-    bp = sql("SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
-    bnl = sql("SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
-    bsk = sql("SELECT COUNT(*) FROM build_failures WHERE ai_skip_reason IS NOT NULL AND application = '{}';".format(app)) or '0'
-    ba = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-    blc = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-    baf = sql("SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '{}' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-
-    cp = sql("SELECT COUNT(*) FROM conforma_results WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND violation_summary IS NOT NULL AND ai_skip_reason IS NULL AND application = '{}';".format(app)) or '0'
-    csk = sql("SELECT COUNT(*) FROM conforma_results WHERE ai_skip_reason IS NOT NULL AND application = '{}';".format(app)) or '0'
-    ca = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-    clc = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-    caf = sql("SELECT COUNT(*) FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.application = '{}' AND a.can_auto_fix = TRUE AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app)) or '0'
-
-    tc = sql("SELECT COALESCE(SUM(a.cost_usd), 0) FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
-
+    b = status['build']
     print(bold('Build Failures:'))
-    print('  Pending:        {} awaiting analysis'.format(bp))
-    if int(bnl) > 0:
-        print('  No logs yet:    {} (waiting for commit context collector)'.format(bnl))
-    if int(bsk) > 0:
-        print('  Skipped:        {} (max retries or no-logs timeout)'.format(bsk))
-    print('  Analyzed:       {} (last 30 days)'.format(ba))
-    if int(ba) > 0:
-        bh = int(ba) - int(blc)
+    print('  Pending:        {} awaiting analysis'.format(b['pending']))
+    if b['no_logs'] > 0:
+        print('  No logs yet:    {} (waiting for commit context collector)'.format(b['no_logs']))
+    if b['skipped'] > 0:
+        print('  Skipped:        {} (max retries or no-logs timeout)'.format(b['skipped']))
+    print('  Analyzed:       {} (last 30 days)'.format(b['analyzed']))
+    if b['analyzed'] > 0:
+        bh = b['analyzed'] - b['low_confidence']
         print('    High conf (>=70%): {}'.format(bh))
-        if int(blc) > 0:
-            print('    Low conf  (<70%):  {}  <- needs human review'.format(blc))
-        bpct = int(baf) * 100 // max(int(ba), 1)
-        print('  Auto-fixable:   {} ({}%)'.format(baf, bpct))
+        if b['low_confidence'] > 0:
+            print('    Low conf  (<70%):  {}  <- needs human review'.format(b['low_confidence']))
+        bpct = b['auto_fixable'] * 100 // max(b['analyzed'], 1)
+        print('  Auto-fixable:   {} ({}%)'.format(b['auto_fixable'], bpct))
 
     print()
+    c = status['conforma']
     print(bold('Conforma Violations:'))
-    print('  Pending:        {} awaiting analysis'.format(cp))
-    if int(csk) > 0:
-        print('  Skipped:        {} (max retries)'.format(csk))
-    print('  Analyzed:       {} (last 30 days)'.format(ca))
-    if int(ca) > 0:
-        ch = int(ca) - int(clc)
+    print('  Pending:        {} awaiting analysis'.format(c['pending']))
+    if c['skipped'] > 0:
+        print('  Skipped:        {} (max retries)'.format(c['skipped']))
+    print('  Analyzed:       {} (last 30 days)'.format(c['analyzed']))
+    if c['analyzed'] > 0:
+        ch = c['analyzed'] - c['low_confidence']
         print('    High conf (>=70%): {}'.format(ch))
-        if int(clc) > 0:
-            print('    Low conf  (<70%):  {}  <- needs human review'.format(clc))
-        cpct = int(caf) * 100 // max(int(ca), 1)
-        print('  Auto-fixable:   {} ({}%)'.format(caf, cpct))
+        if c['low_confidence'] > 0:
+            print('    Low conf  (<70%):  {}  <- needs human review'.format(c['low_confidence']))
+        cpct = c['auto_fixable'] * 100 // max(c['analyzed'], 1)
+        print('  Auto-fixable:   {} ({}%)'.format(c['auto_fixable'], cpct))
 
     print()
-    print(bold('Total cost:') + '   ${} (last 30 days)'.format(tc))
+    print(bold('Total cost:') + '   ${} (last 30 days)'.format(status['total_cost']))
     print()
 
-    sql_table("""
-        SELECT
-            ROW_NUMBER() OVER (ORDER BY a.analyzed_at DESC) as "#",
-            COALESCE(b.component_name, c.component_name) as "Component",
-            CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END as "Type",
-            a.failure_category as "Category",
-            ROUND(a.confidence_score * 100) || '%' as "Confidence",
-            CASE WHEN a.can_auto_fix THEN '✓' ELSE '✗' END as "Fixable"
-        FROM ai_analysis a
-        LEFT JOIN build_failures b ON a.build_failure_id = b.id
-        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
-        WHERE (b.application = '{app}' OR c.application = '{app}')
-          AND a.analyzed_at > NOW() - INTERVAL '7 days'
-        ORDER BY a.analyzed_at DESC LIMIT 10;
-    """.format(app=app))
-    print()
+    recent = ai_repo.get_recent_analyses(app)
+    if recent:
+        print_table(
+            ['#', 'Component', 'Type', 'Category', 'Confidence', 'Fixable'],
+            [(i + 1, r['component'], r['type'], r['category'],
+              '{}%'.format(r['confidence']), '✓' if r['auto_fixable'] else '✗')
+             for i, r in enumerate(recent)],
+        )
+        print()
 
-    total_pending = int(bp) + int(cp)
+    total_pending = b['pending'] + c['pending']
     if total_pending > 0:
         print(cyan("Run 'ic ai analyze --all' to analyze pending failures and violations"))
     else:
@@ -520,51 +500,34 @@ def ai_stats(fixes):
     if fixes:
         _bash_fallback(['ai', 'stats', '--fixes'])
         return
-    from cli.db import require_db, sql, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, section_header
+    from repositories.ai_analysis_repository import AIAnalysisRepository
     if not require_db():
         return
     app = cfg.APPLICATION_NAME
+    data = get_repo(AIAnalysisRepository).get_category_stats(app)
     section_header('AI Analysis Statistics')
     print()
     print(bold('Analyses by Category (last 30 days):'))
-    sql_table("""
-        SELECT
-            CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END as "Type",
-            a.failure_category as "Category",
-            COUNT(*) as "Count",
-            ROUND(AVG(a.confidence_score * 100)) || '%' as "Avg Confidence",
-            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as "Auto-fixable"
-        FROM ai_analysis a
-        LEFT JOIN build_failures b ON a.build_failure_id = b.id
-        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
-        WHERE (b.application = '{app}' OR c.application = '{app}')
-          AND a.analyzed_at > NOW() - INTERVAL '30 days'
-        GROUP BY CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END, a.failure_category
-        ORDER BY COUNT(*) DESC;
-    """.format(app=app))
+    print_table(
+        ['Type', 'Category', 'Count', 'Avg Confidence', 'Auto-fixable'],
+        [(r['type'], r['category'], r['count'],
+          '{}%'.format(r['avg_confidence']) if r['avg_confidence'] else '-',
+          r['auto_fixable'])
+         for r in data['by_category']],
+    )
     print()
     print(bold('Analyses by Date (last 7 days):'))
-    sql_table("""
-        SELECT
-            DATE(a.analyzed_at) as "Date",
-            COUNT(*) as "Analyzed",
-            SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END) as "Auto-fixable",
-            COALESCE(SUM(a.cost_usd), 0)::numeric(10,2) as "Cost USD"
-        FROM ai_analysis a
-        LEFT JOIN build_failures b ON a.build_failure_id = b.id
-        LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
-        WHERE (b.application = '{app}' OR c.application = '{app}')
-          AND a.analyzed_at > NOW() - INTERVAL '7 days'
-        GROUP BY DATE(a.analyzed_at)
-        ORDER BY DATE(a.analyzed_at) DESC;
-    """.format(app=app))
+    print_table(
+        ['Date', 'Analyzed', 'Auto-fixable', 'Cost USD'],
+        [(r['date'], r['analyzed'], r['auto_fixable'], r['cost'])
+         for r in data['by_date']],
+    )
     print()
-    tt = sql("SELECT COALESCE(SUM(a.tokens_used), 0) FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
-    at = sql("SELECT COALESCE(AVG(a.tokens_used), 0)::int FROM ai_analysis a LEFT JOIN build_failures b ON a.build_failure_id = b.id LEFT JOIN conforma_results c ON a.conforma_result_id = c.id WHERE (b.application = '{}' OR c.application = '{}') AND a.analyzed_at > NOW() - INTERVAL '30 days';".format(app, app)) or '0'
     print(bold('Token Usage (last 30 days):'))
-    print('  Total tokens: {}'.format(tt))
-    print('  Avg per analysis: {} tokens'.format(at))
+    print('  Total tokens: {}'.format(data['total_tokens']))
+    print('  Avg per analysis: {} tokens'.format(data['avg_tokens']))
     print()
 
 
@@ -573,49 +536,27 @@ def ai_stats(fixes):
 @cli.command()
 def triage():
     """Currently failing components overview."""
-    from cli.db import require_db, sql, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, cyan, green, red, section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
     app = cfg.APPLICATION_NAME
+    data = get_repo(BuildFailureRepository).get_triage_summary(app)
     section_header('Triage Dashboard')
     print()
-    total = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}';".format(app))
-    failing = sql("""
-        SELECT COUNT(*) FROM (
-            SELECT DISTINCT ON (component_name) component_name, status, is_resolved
-            FROM build_failures WHERE application = '{}'
-            ORDER BY component_name, first_detected_at DESC
-        ) s WHERE status = 'Failed' AND is_resolved = FALSE;
-    """.format(app))
-    working_count = sql("""
-        SELECT COUNT(*) FROM (
-            SELECT DISTINCT ON (component_name) component_name, status
-            FROM build_failures WHERE application = '{}'
-            ORDER BY component_name, first_detected_at DESC
-        ) s WHERE status = 'Succeeded';
-    """.format(app))
     print(bold('Overview:'))
-    print('  Total build records: {}'.format(total))
-    print('  Currently failing: {}'.format(red(str(failing))))
-    print('  Currently working: {}'.format(green(str(working_count))))
+    print('  Total build records: {}'.format(data['total']))
+    print('  Currently failing: {}'.format(red(str(data['failing']))))
+    print('  Currently working: {}'.format(green(str(data['working']))))
     print()
     print(bold(red('Currently Failing Components:')))
-    sql_table("""
-    WITH latest_builds AS (
-        SELECT DISTINCT ON (component_name)
-            component_name, pipelinerun_name, status,
-            first_detected_at, build_logs IS NOT NULL as has_logs
-        FROM build_failures WHERE application = '{app}'
-        ORDER BY component_name, first_detected_at DESC
+    print_table(
+        ['Component', 'Last Failure', 'Has Logs'],
+        [(c['component'], c['last_failure'],
+          'Yes' if c['has_logs'] else 'No')
+         for c in data['failing_components']],
     )
-    SELECT
-        component_name as "Component",
-        first_detected_at::date as "Last Failure",
-        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as "Has Logs"
-    FROM latest_builds WHERE status = 'Failed'
-    ORDER BY first_detected_at DESC;
-    """.format(app=app))
     print()
     print(cyan('Next Steps:'))
     print('  1. Pick a component from above')
@@ -628,22 +569,18 @@ def triage():
 @cli.command()
 def resolved():
     """Resolved components."""
-    from cli.db import require_db, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import cyan, section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
+    rows = get_repo(BuildFailureRepository).get_resolved_components(cfg.APPLICATION_NAME)
     section_header('Resolved Components')
     print()
-    sql_table("""
-    SELECT DISTINCT
-        component_name as "Component",
-        MAX(resolved_at) as "Resolved At",
-        COUNT(*) as "Failures Fixed"
-    FROM build_failures
-    WHERE is_resolved = TRUE AND application = '{app}'
-    GROUP BY component_name
-    ORDER BY MAX(resolved_at) DESC;
-    """.format(app=cfg.APPLICATION_NAME))
+    print_table(
+        ['Component', 'Resolved At', 'Failures Fixed'],
+        [(r['component'], r['resolved_at'], r['count']) for r in rows],
+    )
     print()
     print(cyan('Tip:') + " Use 'ic history <component>' to see full history")
     print()
@@ -652,29 +589,19 @@ def resolved():
 @cli.command()
 def working():
     """Components currently working."""
-    from cli.db import require_db, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, cyan, green, section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
+    rows = get_repo(BuildFailureRepository).get_working_components(cfg.APPLICATION_NAME)
     section_header('Currently Working Components')
     print()
     print(bold(green('Components with last build = Succeeded:')))
-    sql_table("""
-    WITH latest_builds AS (
-        SELECT DISTINCT ON (component_name)
-            component_name, pipelinerun_name, status,
-            commit_short_sha, commit_message, first_detected_at
-        FROM build_failures WHERE application = '{app}'
-        ORDER BY component_name, first_detected_at DESC
+    print_table(
+        ['Component', 'Commit', 'Message', 'Last Build'],
+        [(r['component'], r['commit'], r['message'], r['date']) for r in rows],
     )
-    SELECT
-        component_name as "Component",
-        LEFT(commit_short_sha, 8) as "Commit",
-        LEFT(commit_message, 50) as "Message",
-        first_detected_at::date as "Last Build"
-    FROM latest_builds WHERE status = 'Succeeded'
-    ORDER BY first_detected_at DESC;
-    """.format(app=cfg.APPLICATION_NAME))
     print()
     print(cyan('Links:'))
     print('  Use: {} to see full build history'.format(bold('ic history <component>')))
@@ -691,42 +618,31 @@ def history(component):
         print(red('Error: Component name required'))
         print('Usage: ic history <component-name>')
         raise SystemExit(1)
-    from cli.db import require_db, sql, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, cyan, green, red, section_header
+    from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
     app = cfg.APPLICATION_NAME
+    data = get_repo(BuildFailureRepository).get_component_history(component, app)
     section_header('History: {}'.format(component))
     print()
-    sql_table("""
-    SELECT
-        COUNT(*) as "Total Builds",
-        SUM(CASE WHEN status = 'Failed' THEN 1 ELSE 0 END) as "Failures",
-        SUM(CASE WHEN status = 'Succeeded' THEN 1 ELSE 0 END) as "Successes",
-        SUM(CASE WHEN is_resolved = TRUE THEN 1 ELSE 0 END) as "Resolved"
-    FROM build_failures
-    WHERE component_name = '{comp}' AND application = '{app}';
-    """.format(comp=component, app=app))
+    s = data['summary']
+    print_table(
+        ['Total Builds', 'Failures', 'Successes', 'Resolved'],
+        [(s['total'], s['failures'], s['successes'], s['resolved'])],
+    )
     print()
     print(bold('Recent Builds (Last 20):'))
     print()
-    sql_table("""
-    SELECT
-        pipelinerun_name as "PipelineRun",
-        status as "Status",
-        CASE WHEN is_resolved THEN '✓' ELSE '' END as "Resolved",
-        LEFT(commit_short_sha, 8) as "Commit",
-        first_detected_at as "Date"
-    FROM build_failures
-    WHERE component_name = '{comp}' AND application = '{app}'
-    ORDER BY first_detected_at DESC LIMIT 20;
-    """.format(comp=component, app=app))
+    print_table(
+        ['PipelineRun', 'Status', 'Resolved', 'Commit', 'Date'],
+        [(b['pipelinerun'], b['status'],
+          '✓' if b['resolved'] else '', b['commit'], b['date'])
+         for b in data['builds']],
+    )
     print()
-    last_status = sql("""
-        SELECT status FROM build_failures
-        WHERE component_name = '{comp}' AND application = '{app}'
-        ORDER BY first_detected_at DESC LIMIT 1;
-    """.format(comp=component, app=app))
+    last_status = data['last_status']
     if last_status == 'Failed':
         print(red('✗ Currently failing') + ' (last build: Failed)')
         print('  Run: {} to investigate'.format(cyan('ic why {}'.format(component))))
@@ -741,58 +657,54 @@ def history(component):
 def dashboard():
     """Full dashboard view."""
     from datetime import datetime
-    from cli.db import require_db, sql
+    from cli.db import get_repo, require_db
     from cli.formatting import bold, cyan, green, red, section_header, yellow
+    from repositories.ai_analysis_repository import AIAnalysisRepository
+    from repositories.build_failure_repository import BuildFailureRepository
+    from repositories.error_pattern_repository import ErrorPatternRepository
+    from repositories.resolution_attempt_repository import ResolutionAttemptRepository
     if not require_db():
         return
     app = cfg.APPLICATION_NAME
+    build_repo = get_repo(BuildFailureRepository)
+    ai_repo = get_repo(AIAnalysisRepository)
+    pattern_repo = get_repo(ErrorPatternRepository)
+    fix_repo = get_repo(ResolutionAttemptRepository)
+
     section_header('CI Auto-Healing Dashboard')
     print('  Application: {}'.format(cyan(app)))
     print('  Date: {}'.format(datetime.now().strftime('%Y-%m-%d %H:%M')))
     print()
 
     print(bold('Analysis Queue'))
-    bp = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND ai_analyzed = FALSE AND is_resolved = FALSE AND ai_skip_reason IS NULL;".format(app)) or '0'
-    cp = sql("SELECT COUNT(*) FROM conforma_results WHERE application = '{}' AND ai_analyzed = FALSE AND ai_skip_reason IS NULL;".format(app)) or '0'
-    bd = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND ai_analyzed = TRUE;".format(app)) or '0'
-    cd = sql("SELECT COUNT(*) FROM conforma_results WHERE application = '{}' AND ai_analyzed = TRUE;".format(app)) or '0'
-    print('  Build:    {} analyzed  {} pending'.format(green(bd), yellow(bp)))
-    print('  Conforma: {} analyzed  {} pending'.format(green(cd), yellow(cp)))
+    bq = build_repo.get_analysis_queue(app)
+    cq = ai_repo.get_conforma_queue(app)
+    print('  Build:    {} analyzed  {} pending'.format(green(str(bq['analyzed'])), yellow(str(bq['pending']))))
+    print('  Conforma: {} analyzed  {} pending'.format(green(str(cq['analyzed'])), yellow(str(cq['pending']))))
     print()
 
     print(bold('Enrichment Coverage'))
-    et = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND is_resolved = FALSE;".format(app)) or '0'
-    ee = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND enriched_context IS NOT NULL;".format(app)) or '0'
-    ef = sql("SELECT COUNT(*) FROM build_failures WHERE application = '{}' AND commit_sha IS NOT NULL AND enrichment_error IS NOT NULL;".format(app)) or '0'
-    epct = int(ee) * 100 // max(int(et), 1)
-    print('  Enriched: {} ({}%)  Failed: {}'.format(green('{}/{}'.format(ee, et)), epct, red(ef)))
+    ec = build_repo.get_enrichment_coverage(app)
+    print('  Enriched: {} ({}%)  Failed: {}'.format(
+        green('{}/{}'.format(ec['enriched'], ec['total'])), ec['pct'], red(str(ec['failed']))))
     print()
 
     print(bold('Pattern Library'))
-    pt = sql("SELECT COUNT(*) FROM error_patterns;") or '0'
-    pw = sql("SELECT COUNT(*) FROM error_patterns WHERE avg_confidence IS NOT NULL;") or '0'
-    pa = sql("SELECT COALESCE(ROUND(AVG(avg_confidence)::numeric * 100), 0) FROM error_patterns;") or '0'
-    po = sql("SELECT COALESCE(SUM(occurrence_count), 0) FROM error_patterns;") or '0'
-    print('  Patterns: {} total ({} with confidence data)'.format(pt, pw))
-    print('  Avg confidence: {}  Total occurrences: {}'.format(cyan('{}%'.format(pa)), po))
+    pl = pattern_repo.get_library_summary()
+    print('  Patterns: {} total ({} with confidence data)'.format(pl['total'], pl['with_confidence']))
+    print('  Avg confidence: {}  Total occurrences: {}'.format(cyan('{}%'.format(pl['avg_confidence'])), pl['total_occurrences']))
     print()
 
     print(bold('Fix Outcomes (last 30 days)'))
-    ft = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days';") or '0'
-    fs = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful = TRUE;") or '0'
-    ff = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful = FALSE;") or '0'
-    fp = sql("SELECT COUNT(*) FROM resolution_attempts WHERE attempted_at >= NOW() - INTERVAL '30 days' AND was_successful IS NULL AND status = 'pr_created';") or '0'
-    resolved_count = int(fs) + int(ff)
-    frate = int(fs) * 100 // max(resolved_count, 1)
-    print('  Total: {}  {} Success: {}  {} Failed: {}  Pending: {}'.format(ft, '', green(fs), '', red(ff), fp))
-    print('  Success rate: {}'.format(cyan('{}%'.format(frate))))
+    fo = fix_repo.get_outcome_summary()
+    print('  Total: {}  {} Success: {}  {} Failed: {}  Pending: {}'.format(
+        fo['total'], '', green(str(fo['successful'])), '', red(str(fo['failed'])), fo['pending']))
+    print('  Success rate: {}'.format(cyan('{}%'.format(fo['rate']))))
     print()
 
     print(bold('API Costs (last 30 days)'))
-    ca = sql("SELECT COUNT(*) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0'
-    ct = sql("SELECT COALESCE(SUM(tokens_used), 0) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0'
-    cc = sql("SELECT ROUND(COALESCE(SUM(cost_usd), 0)::numeric, 2) FROM ai_analysis WHERE analyzed_at >= NOW() - INTERVAL '30 days';") or '0.00'
-    print('  Analyses: {}  Tokens: {}  Cost: {}'.format(ca, ct, cyan('${}'.format(cc))))
+    cs = ai_repo.get_cost_summary()
+    print('  Analyses: {}  Tokens: {}  Cost: {}'.format(cs['analyses'], cs['tokens'], cyan('${}'.format(cs['cost_usd']))))
     print()
 
 
@@ -916,17 +828,14 @@ def health(ctx):
     if ctx.invoked_subcommand is None:
         from cli.db import require_db
         from cli.formatting import section_header
+        from proactive.health_monitor import HealthMonitor
         if not require_db():
             return
         section_header('Component Health')
         print()
         try:
-            from config import CollectorConfig
-            from repositories.connection import DatabaseConnection
-            from proactive.health_monitor import HealthMonitor
-            db_config = CollectorConfig.from_env()
-            db = DatabaseConnection(db_config.db)
-            summary = HealthMonitor(db).get_component_health_summary()
+            from cli.db import _get_db_connection
+            summary = HealthMonitor(_get_db_connection()).get_component_health_summary()
             if not summary:
                 print('  No component health data. Run data collection first.')
                 return
@@ -968,12 +877,9 @@ def health_warnings():
     section_header('Proactive Warnings')
     print()
     try:
-        from config import CollectorConfig
-        from repositories.connection import DatabaseConnection
+        from cli.db import _get_db_connection
         from proactive.health_monitor import HealthMonitor
-        db_config = CollectorConfig.from_env()
-        db = DatabaseConnection(db_config.db)
-        warnings_list = HealthMonitor(db).run_checks()
+        warnings_list = HealthMonitor(_get_db_connection()).run_checks()
         if not warnings_list:
             print('  No warnings — all clear.')
             return
@@ -1044,18 +950,14 @@ def patterns(ctx):
 @patterns.command('learn')
 def patterns_learn():
     """Learn patterns from analysis."""
-    from cli.db import require_db
+    from cli.db import get_repo, require_db
     from cli.formatting import bold
+    from repositories.error_pattern_repository import ErrorPatternRepository
     if not require_db():
         return
     print(bold('Discovering new patterns from repeated failures...'))
     try:
-        from config import CollectorConfig
-        from repositories.connection import DatabaseConnection
-        from repositories.error_pattern_repository import ErrorPatternRepository
-        db_config = CollectorConfig.from_env()
-        db = DatabaseConnection(db_config.db)
-        created = ErrorPatternRepository(db).discover_new_patterns()
+        created = get_repo(ErrorPatternRepository).discover_new_patterns()
         if created:
             print('Created {} new pattern(s):'.format(len(created)))
             for p in created:
@@ -1069,18 +971,14 @@ def patterns_learn():
 @patterns.command('stale')
 def patterns_stale():
     """Show stale patterns."""
-    from cli.db import require_db
+    from cli.db import get_repo, require_db
     from cli.formatting import bold
+    from repositories.error_pattern_repository import ErrorPatternRepository
     if not require_db():
         return
     print(bold('Stale patterns (unused 90+ days or low accuracy):'))
     try:
-        from config import CollectorConfig
-        from repositories.connection import DatabaseConnection
-        from repositories.error_pattern_repository import ErrorPatternRepository
-        db_config = CollectorConfig.from_env()
-        db = DatabaseConnection(db_config.db)
-        stale = ErrorPatternRepository(db).get_stale_patterns()
+        stale = get_repo(ErrorPatternRepository).get_stale_patterns()
         if stale:
             for p in stale:
                 conf = '{:.2f}'.format(p['avg_confidence']) if p['avg_confidence'] else 'N/A'
@@ -1101,29 +999,27 @@ def patterns_shared():
 @patterns.command('list')
 def patterns_list():
     """List all patterns."""
-    from cli.db import require_db, sql, sql_table
+    from cli.db import get_repo, print_table, require_db
     from cli.formatting import section_header
+    from repositories.error_pattern_repository import ErrorPatternRepository
     if not require_db():
         return
+    repo = get_repo(ErrorPatternRepository)
+    all_patterns = repo.get_all()
     section_header('Error Pattern Library')
     print()
-    sql_table("""
-        SELECT
-            failure_type AS "Type",
-            failure_category AS "Category",
-            occurrence_count AS "Seen",
-            CASE WHEN avg_confidence IS NULL THEN '  —  '
-                 ELSE ROUND(avg_confidence * 100)::text || '%' END AS "Avg Conf",
-            CASE WHEN doc_context IS NOT NULL THEN 'yes' ELSE 'no ' END AS "Doc",
-            CASE WHEN last_seen_at IS NULL THEN '—'
-                 ELSE TO_CHAR(last_seen_at, 'YYYY-MM-DD') END AS "Last Seen",
-            LEFT(pattern_name, 40) AS "Pattern"
-        FROM error_patterns
-        ORDER BY occurrence_count DESC, failure_type, failure_category;
-    """)
+    print_table(
+        ['Type', 'Category', 'Seen', 'Avg Conf', 'Doc', 'Last Seen', 'Pattern'],
+        [(p['failure_type'], p['failure_category'], p['occurrence_count'],
+          '{}%'.format(int(p['avg_confidence'] * 100)) if p.get('avg_confidence') is not None else '  —  ',
+          'yes' if p.get('doc_context') else 'no ',
+          str(p['last_seen_at'])[:10] if p.get('last_seen_at') else '—',
+          (p.get('pattern_name') or '')[:40])
+         for p in all_patterns],
+    )
     print()
-    total = sql("SELECT COUNT(*) FROM error_patterns;") or '0'
-    print("  {} patterns total. Run 'ic patterns show <pattern_name>' for details.".format(total))
+    summary = repo.get_library_summary()
+    print("  {} patterns total. Run 'ic patterns show <pattern_name>' for details.".format(summary['total']))
     print()
 
 
@@ -1131,23 +1027,16 @@ def patterns_list():
 @click.argument('name')
 def patterns_show(name):
     """Show pattern details."""
-    from cli.db import require_db, sql_dict_rows
+    from cli.db import get_repo, require_db
     from cli.formatting import bold, section_header
+    from repositories.error_pattern_repository import ErrorPatternRepository
     if not require_db():
         return
-    rows = sql_dict_rows("""
-        SELECT id, failure_type, failure_category, pattern_name, description,
-               typical_fix, doc_url, doc_context, doc_fetched_at,
-               occurrence_count, avg_confidence, first_seen_at, last_seen_at, created_by
-        FROM error_patterns
-        WHERE pattern_name = '{}' OR failure_category = '{}'
-        LIMIT 1;
-    """.format(name, name))
-    if not rows:
+    p = get_repo(ErrorPatternRepository).get_by_name_or_category(name)
+    if not p:
         print('Pattern not found: {}'.format(name))
         print("Run 'ic patterns list' to see all patterns.")
         raise SystemExit(1)
-    p = rows[0]
     section_header('Pattern: {}'.format(p['pattern_name']))
     print()
     print('  Type:          {}'.format(p['failure_type']))

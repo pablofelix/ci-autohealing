@@ -626,3 +626,180 @@ class AIAnalysisRepository:
                 'tokens_used': row[11],
                 'cost_usd': row[12],
             }
+
+    def get_extended_status(self, application):
+        # type: (str,) -> Dict
+        """Full AI status for CLI display: counts, auto-fixable, cost."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND is_resolved = FALSE
+                                     AND build_logs IS NOT NULL AND ai_skip_reason IS NULL) AS pending,
+                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND is_resolved = FALSE
+                                     AND build_logs IS NULL AND ai_skip_reason IS NULL) AS no_logs,
+                    COUNT(*) FILTER (WHERE ai_skip_reason IS NOT NULL) AS skipped
+                FROM build_failures WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            build = {'pending': row[0], 'no_logs': row[1], 'skipped': row[2]}
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS analyzed,
+                    COUNT(*) FILTER (WHERE a.confidence_score < 0.7) AS low_confidence,
+                    COUNT(*) FILTER (WHERE a.can_auto_fix) AS auto_fixable
+                FROM ai_analysis a
+                JOIN build_failures b ON a.build_failure_id = b.id
+                WHERE b.application = %s AND a.analyzed_at > NOW() - INTERVAL '30 days'
+            """, (application,))
+            row = cursor.fetchone()
+            build.update({'analyzed': row[0], 'low_confidence': row[1], 'auto_fixable': row[2]})
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND is_resolved = FALSE
+                                     AND violation_summary IS NOT NULL AND ai_skip_reason IS NULL) AS pending,
+                    COUNT(*) FILTER (WHERE ai_skip_reason IS NOT NULL) AS skipped
+                FROM conforma_results WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            conforma = {'pending': row[0], 'skipped': row[1]}
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS analyzed,
+                    COUNT(*) FILTER (WHERE a.confidence_score < 0.7) AS low_confidence,
+                    COUNT(*) FILTER (WHERE a.can_auto_fix) AS auto_fixable
+                FROM ai_analysis a
+                JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE c.application = %s AND a.analyzed_at > NOW() - INTERVAL '30 days'
+            """, (application,))
+            row = cursor.fetchone()
+            conforma.update({'analyzed': row[0], 'low_confidence': row[1], 'auto_fixable': row[2]})
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(a.cost_usd), 0)
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE (b.application = %s OR c.application = %s)
+                  AND a.analyzed_at > NOW() - INTERVAL '30 days'
+            """, (application, application))
+            total_cost = cursor.fetchone()[0]
+
+            return {'build': build, 'conforma': conforma, 'total_cost': total_cost}
+
+    def get_recent_analyses(self, application, days=7, limit=10):
+        # type: (str, int, int) -> list
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COALESCE(b.component_name, c.component_name),
+                    CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END,
+                    a.failure_category,
+                    ROUND(a.confidence_score * 100),
+                    a.can_auto_fix
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE (b.application = %s OR c.application = %s)
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                ORDER BY a.analyzed_at DESC LIMIT %s
+            """, (application, application, days, limit))
+            return [
+                {'component': r[0], 'type': r[1], 'category': r[2],
+                 'confidence': r[3], 'auto_fixable': r[4]}
+                for r in cursor.fetchall()
+            ]
+
+    def get_category_stats(self, application, days=30):
+        # type: (str, int) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    CASE WHEN a.build_failure_id IS NOT NULL THEN 'Build' ELSE 'Conforma' END,
+                    a.failure_category,
+                    COUNT(*),
+                    ROUND(AVG(a.confidence_score * 100)),
+                    SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END)
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE (b.application = %s OR c.application = %s)
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                GROUP BY 1, a.failure_category
+                ORDER BY COUNT(*) DESC
+            """, (application, application, days))
+            by_category = [
+                {'type': r[0], 'category': r[1], 'count': r[2],
+                 'avg_confidence': r[3], 'auto_fixable': r[4]}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT
+                    DATE(a.analyzed_at),
+                    COUNT(*),
+                    SUM(CASE WHEN a.can_auto_fix THEN 1 ELSE 0 END),
+                    COALESCE(SUM(a.cost_usd), 0)::numeric(10,2)
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE (b.application = %s OR c.application = %s)
+                  AND a.analyzed_at > NOW() - INTERVAL '7 days'
+                GROUP BY DATE(a.analyzed_at)
+                ORDER BY DATE(a.analyzed_at) DESC
+            """, (application, application))
+            by_date = [
+                {'date': r[0], 'analyzed': r[1], 'auto_fixable': r[2], 'cost': r[3]}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(a.tokens_used), 0),
+                       COALESCE(AVG(a.tokens_used), 0)::int
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE (b.application = %s OR c.application = %s)
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+            """, (application, application, days))
+            row = cursor.fetchone()
+
+            return {
+                'by_category': by_category,
+                'by_date': by_date,
+                'total_tokens': row[0],
+                'avg_tokens': row[1],
+            }
+
+    def get_cost_summary(self, days=30):
+        # type: (int,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*),
+                       COALESCE(SUM(tokens_used), 0),
+                       ROUND(COALESCE(SUM(cost_usd), 0)::numeric, 2)
+                FROM ai_analysis
+                WHERE analyzed_at >= NOW() - make_interval(days => %s)
+            """, (days,))
+            row = cursor.fetchone()
+            return {'analyses': row[0], 'tokens': row[1], 'cost_usd': row[2]}
+
+    def get_conforma_queue(self, application):
+        # type: (str,) -> Dict
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE ai_analyzed = FALSE AND ai_skip_reason IS NULL),
+                    COUNT(*) FILTER (WHERE ai_analyzed = TRUE)
+                FROM conforma_results WHERE application = %s
+            """, (application,))
+            row = cursor.fetchone()
+            return {'pending': row[0], 'analyzed': row[1]}
