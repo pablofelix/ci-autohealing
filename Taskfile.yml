@@ -1,0 +1,189 @@
+version: '3'
+
+vars:
+  IMAGE: ic-server
+  TAG: latest
+  CONTAINER: ci-autohealing-server
+  DB_CONTAINER: ci-autohealing-db
+  K8S_DIR: k8s
+  SRC_DIR: src
+  PORT: 8000
+
+tasks:
+
+  # ===========================================================================
+  # Development
+  # ===========================================================================
+
+  test:
+    desc: Run test suite
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3.11 -m pytest tests/ -x -q {{.CLI_ARGS}}
+
+  lint:
+    desc: Run ruff linter
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - ruff check . {{.CLI_ARGS}}
+
+  check:
+    desc: Run lint + tests
+    deps: [lint]
+    cmds:
+      - task: test
+
+  # ===========================================================================
+  # Docker
+  # ===========================================================================
+
+  build:
+    desc: Build Docker image
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}} .
+    sources:
+      - Dockerfile
+      - src/requirements.txt
+      - src/**/*.py
+
+  up:
+    desc: Start all services (server + PostgreSQL)
+    deps: [build]
+    cmds:
+      - docker compose up -d || podman-compose up -d
+    preconditions:
+      - sh: docker info > /dev/null 2>&1 || podman info > /dev/null 2>&1
+        msg: "Docker or podman is required"
+
+  down:
+    desc: Stop all services
+    cmds:
+      - docker compose down || podman-compose down 2>/dev/null || true
+
+  restart:
+    desc: Rebuild and restart server
+    cmds:
+      - task: down
+      - task: up
+
+  logs:
+    desc: Show server logs (follow)
+    cmds:
+      - docker logs -f {{.CONTAINER}} 2>&1 || podman logs -f {{.CONTAINER}} 2>&1
+
+  shell:
+    desc: Open shell in running server container
+    cmds:
+      - docker exec -it {{.CONTAINER}} /bin/sh
+
+  # ===========================================================================
+  # Run locally (without Docker)
+  # ===========================================================================
+
+  serve:
+    desc: Run API + MCP server locally
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3.11 -m serve --api --mcp-sse --port {{.PORT}}
+
+  serve:api:
+    desc: Run REST API only (local)
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3.11 -m serve --api --port {{.PORT}}
+
+  serve:mcp:
+    desc: Run MCP server stdio (local, for Claude Desktop)
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3.11 -m serve --mcp
+
+  # ===========================================================================
+  # Kubernetes
+  # ===========================================================================
+
+  deploy:
+    desc: Deploy to Kubernetes cluster
+    preconditions:
+      - sh: kubectl cluster-info > /dev/null 2>&1
+        msg: "No Kubernetes cluster available. Check kubectl config."
+    cmds:
+      - kubectl apply -f {{.K8S_DIR}}/namespace.yml
+      - kubectl apply -f {{.K8S_DIR}}/configmap.yml
+      - kubectl apply -f {{.K8S_DIR}}/secret.yml
+      - kubectl apply -f {{.K8S_DIR}}/deployment.yml
+      - kubectl apply -f {{.K8S_DIR}}/service.yml
+      - echo "Deployed. Check status with 'task k8s:status'"
+
+  k8s:status:
+    desc: Show Kubernetes deployment status
+    cmds:
+      - kubectl -n ic-monitoring get pods,svc,deploy
+
+  k8s:logs:
+    desc: Show logs from Kubernetes pods
+    cmds:
+      - kubectl -n ic-monitoring logs -l app.kubernetes.io/name=ic-server --tail=100 -f
+
+  k8s:port-forward:
+    desc: Forward port 8000 from K8s to localhost
+    cmds:
+      - kubectl -n ic-monitoring port-forward svc/ic-server {{.PORT}}:8000
+
+  k8s:delete:
+    desc: Remove deployment from Kubernetes
+    cmds:
+      - kubectl delete -f {{.K8S_DIR}}/ --ignore-not-found
+
+  # ===========================================================================
+  # Database
+  # ===========================================================================
+
+  db:start:
+    desc: Start PostgreSQL container
+    cmds:
+      - docker start {{.DB_CONTAINER}} 2>/dev/null || docker compose up -d postgres
+
+  db:stop:
+    desc: Stop PostgreSQL container
+    cmds:
+      - docker stop {{.DB_CONTAINER}}
+
+  db:migrate:
+    desc: Run database migrations
+    dir: db
+    cmds:
+      - python3.11 migrate.py
+
+  db:psql:
+    desc: Open psql shell
+    cmds:
+      - docker exec -it {{.DB_CONTAINER}} psql -U postgres konflux_monitoring
+
+  # ===========================================================================
+  # Utilities
+  # ===========================================================================
+
+  clean:
+    desc: Remove build artifacts and caches
+    cmds:
+      - find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      - find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+      - find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
+      - find . -name "*.pyc" -delete 2>/dev/null || true
+
+  clean:docker:
+    desc: Remove Docker image
+    cmds:
+      - docker rmi {{.IMAGE}}:{{.TAG}} 2>/dev/null || true
+
+  health:
+    desc: Check server health endpoint
+    cmds:
+      - "curl -sf http://localhost:{{.PORT}}/health | python3.11 -m json.tool"
+
+  api:docs:
+    desc: Open API docs in browser
+    cmds:
+      - echo "API docs available at http://localhost:{{.PORT}}/docs"
+      - xdg-open "http://localhost:{{.PORT}}/docs" 2>/dev/null || open "http://localhost:{{.PORT}}/docs" 2>/dev/null || true
