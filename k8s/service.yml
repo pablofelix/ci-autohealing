@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ic-server
+  namespace: ic-monitoring
+  labels:
+    app.kubernetes.io/name: ic-server
+    app.kubernetes.io/part-of: ic-monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ic-server
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http

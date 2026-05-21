@@ -1,0 +1,41 @@
+# Generic Kubernetes Ingress
+# Uncomment and set your host to enable external access.
+#
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: ic-server
+#   namespace: ic-monitoring
+#   labels:
+#     app.kubernetes.io/name: ic-server
+#     app.kubernetes.io/part-of: ic-monitoring
+#   annotations:
+#     nginx.ingress.kubernetes.io/rewrite-target: /
+# spec:
+#   rules:
+#     - host: ic-monitoring.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: ic-server
+#                 port:
+#                   number: 8000
+
+# OpenShift Route (alternative)
+#
+# apiVersion: route.openshift.io/v1
+# kind: Route
+# metadata:
+#   name: ic-server
+#   namespace: ic-monitoring
+# spec:
+#   to:
+#     kind: Service
+#     name: ic-server
+#   port:
+#     targetPort: http
+#   tls:
+#     termination: edge

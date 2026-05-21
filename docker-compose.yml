@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: admin
       POSTGRES_DB: konflux_monitoring
     ports:
-      - "5433:5432"  # Use 5433 to avoid conflict with existing PostgreSQL
+      - "5433:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
@@ -19,3 +19,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  server:
+    build: .
+    container_name: ci-autohealing-server
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: admin
+      DB_NAME: konflux_monitoring
+      LOG_LEVEL: INFO
+      APPLICATION_NAME: acme-v2-0
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped

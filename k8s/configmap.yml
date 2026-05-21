@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ic-server-config
+  namespace: ic-monitoring
+  labels:
+    app.kubernetes.io/name: ic-server
+    app.kubernetes.io/part-of: ic-monitoring
+data:
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_USER: "postgres"
+  DB_NAME: "konflux_monitoring"
+  APPLICATION_NAME: "acme-v2-0"
+  LOG_LEVEL: "INFO"
