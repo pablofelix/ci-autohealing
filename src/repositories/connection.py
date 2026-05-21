@@ -3,6 +3,7 @@
 import uuid
 from contextlib import contextmanager
 import psycopg2
+from psycopg2 import pool
 
 
 
@@ -65,3 +66,38 @@ class DatabaseConnection:
                     scan_id
                 )
             )
+
+
+class PooledDatabaseConnection:
+    """PostgreSQL connection pool for long-running server processes.
+
+    Same connection() API as DatabaseConnection but backed by
+    ThreadedConnectionPool for concurrent request handling.
+    """
+
+    def __init__(self, config, minconn=1, maxconn=10):
+        self.config = config
+        self._pool = pool.ThreadedConnectionPool(
+            minconn=minconn,
+            maxconn=maxconn,
+            host=config.host,
+            port=config.port,
+            user=config.user,
+            password=config.password,
+            dbname=config.database,
+        )
+
+    @contextmanager
+    def connection(self):
+        conn = self._pool.getconn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    def close_all(self):
+        self._pool.closeall()

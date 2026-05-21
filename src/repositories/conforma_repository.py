@@ -133,6 +133,41 @@ class ConformaRepository:
         except Exception:
             return False
 
+    def get_violation_details(self, component, application):
+        # type: (str, str) -> Optional[Dict[str, Any]]
+        """Full violation details for a component. Used by MCP/API for describe views."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    component_name, scenario,
+                    violations_count, warnings_count, successes_count,
+                    violation_summary, violation_details,
+                    repository_url, commit_sha, commit_url,
+                    snapshot_name, pipelinerun_name,
+                    first_detected_at, last_updated_at,
+                    ai_analyzed, jira_key
+                FROM conforma_results
+                WHERE component_name = %s
+                  AND application = %s
+                  AND is_resolved = FALSE
+                ORDER BY last_updated_at DESC
+                LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cols = [
+                'component_name', 'scenario',
+                'violations_count', 'warnings_count', 'successes_count',
+                'violation_summary', 'violation_details',
+                'repository_url', 'commit_sha', 'commit_url',
+                'snapshot_name', 'pipelinerun_name',
+                'first_detected_at', 'last_updated_at',
+                'ai_analyzed', 'jira_key',
+            ]
+            return dict(zip(cols, row))
+
     def resolve_fixed_components(self, application, currently_failing, all_seen):
         # type: (str, Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int
         """Mark (component, scenario) pairs as resolved when we observe them passing.

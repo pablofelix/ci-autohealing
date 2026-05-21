@@ -503,6 +503,40 @@ class BuildFailureRepository:
                 'pct': enriched * 100 // max(total, 1),
             }
 
+    def get_failure_details(self, component, application):
+        # type: (str, str) -> Optional[Dict[str, Any]]
+        """Full failure details for a component. Used by MCP/API for describe views."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    component_name, pipelinerun_name, error_message, error_type,
+                    failed_task_name, failed_step_name,
+                    LEFT(build_logs, 50000) as build_logs,
+                    commit_sha, commit_message, commit_author, commit_url,
+                    repository_url, branch, commit_context,
+                    konflux_url, first_detected_at, last_updated_at,
+                    status, ai_analyzed, jira_key
+                FROM build_failures
+                WHERE component_name = %s
+                  AND application = %s
+                  AND is_resolved = FALSE
+                ORDER BY last_updated_at DESC
+                LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cols = [
+                'component_name', 'pipelinerun_name', 'error_message', 'error_type',
+                'failed_task_name', 'failed_step_name', 'build_logs',
+                'commit_sha', 'commit_message', 'commit_author', 'commit_url',
+                'repository_url', 'branch', 'commit_context',
+                'konflux_url', 'first_detected_at', 'last_updated_at',
+                'status', 'ai_analyzed', 'jira_key',
+            ]
+            return dict(zip(cols, row))
+
     def get_analysis_queue(self, application):
         # type: (str,) -> Dict
         with self.db.connection() as conn:

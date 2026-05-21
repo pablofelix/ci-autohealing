@@ -791,6 +791,58 @@ class AIAnalysisRepository:
             row = cursor.fetchone()
             return {'analyses': row[0], 'tokens': row[1], 'cost_usd': row[2]}
 
+    def get_analysis_by_component(self, component, application, analysis_type='auto'):
+        # type: (str, str, str) -> Optional[Dict[str, Any]]
+        """Latest AI analysis for a component. Used by MCP/API."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cols = [
+                'analysis_type', 'component_name', 'model_used', 'root_cause',
+                'failure_category', 'confidence_score',
+                'recommended_fix', 'recommended_files',
+                'can_auto_fix', 'requires_human_review',
+                'analyzed_at', 'langfuse_trace_url',
+                'tokens_used', 'cost_usd',
+            ]
+
+            if analysis_type in ('auto', 'build'):
+                cursor.execute("""
+                    SELECT
+                        'build', b.component_name, a.model_used, a.root_cause,
+                        a.failure_category, a.confidence_score,
+                        a.recommended_fix, a.recommended_files,
+                        a.can_auto_fix, a.requires_human_review,
+                        a.analyzed_at, a.langfuse_trace_url,
+                        a.tokens_used, COALESCE(a.cost_usd, 0)
+                    FROM ai_analysis a
+                    JOIN build_failures b ON a.build_failure_id = b.id
+                    WHERE b.component_name = %s AND b.application = %s
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                """, (component, application))
+                row = cursor.fetchone()
+                if row:
+                    return dict(zip(cols, row))
+
+            if analysis_type in ('auto', 'conforma'):
+                cursor.execute("""
+                    SELECT
+                        'conforma', c.component_name, a.model_used, a.root_cause,
+                        a.failure_category, a.confidence_score,
+                        a.recommended_fix, a.recommended_files,
+                        a.can_auto_fix, a.requires_human_review,
+                        a.analyzed_at, a.langfuse_trace_url,
+                        a.tokens_used, COALESCE(a.cost_usd, 0)
+                    FROM ai_analysis a
+                    JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE c.component_name = %s AND c.application = %s
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                """, (component, application))
+                row = cursor.fetchone()
+                if row:
+                    return dict(zip(cols, row))
+
+            return None
+
     def get_conforma_queue(self, application):
         # type: (str,) -> Dict
         with self.db.connection() as conn:
