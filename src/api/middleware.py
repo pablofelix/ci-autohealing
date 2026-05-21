@@ -1,6 +1,7 @@
 """API middleware: authentication and CORS."""
 
 import os
+import secrets
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response
@@ -35,7 +36,7 @@ def setup_middleware(app: FastAPI) -> None:
             )
 
         token = auth[len("Bearer "):]
-        if token != _API_KEY:
+        if not secrets.compare_digest(token, _API_KEY):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Invalid API key"},

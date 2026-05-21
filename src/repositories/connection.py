@@ -1,9 +1,13 @@
 """Database connection manager and scan tracking."""
 
+import time
 import uuid
 from contextlib import contextmanager
 import psycopg2
 from psycopg2 import pool
+
+_POOL_RETRIES = 3
+_POOL_BACKOFF = 0.1
 
 
 
@@ -89,7 +93,15 @@ class PooledDatabaseConnection:
 
     @contextmanager
     def connection(self):
-        conn = self._pool.getconn()
+        conn = None
+        for attempt in range(_POOL_RETRIES):
+            try:
+                conn = self._pool.getconn()
+                break
+            except pool.PoolError:
+                if attempt == _POOL_RETRIES - 1:
+                    raise
+                time.sleep(_POOL_BACKOFF * (attempt + 1))
         try:
             yield conn
             conn.commit()

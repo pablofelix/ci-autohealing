@@ -5,10 +5,18 @@ Usage:
     python -m serve --api       # via unified entry point
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from config import CollectorConfig
-from repositories.repository_factory import init_pool
+from repositories.repository_factory import close_pool, init_pool
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    close_pool()
 
 
 def create_app() -> FastAPI:
@@ -19,6 +27,7 @@ def create_app() -> FastAPI:
         title="Konflux CI Monitoring API",
         description="Read-only REST API for RHOAI CI/CD failure tracking and analysis.",
         version="1.0.0",
+        lifespan=_lifespan,
     )
 
     from api.middleware import setup_middleware

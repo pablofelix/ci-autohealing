@@ -14,6 +14,8 @@ _repo_cache = {}
 
 def init_pool(db_config, pool_size=10):
     global _db_pool
+    if _db_pool is not None:
+        return
     _db_pool = PooledDatabaseConnection(db_config, maxconn=pool_size)
 
 
