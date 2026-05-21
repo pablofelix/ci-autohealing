@@ -11,7 +11,7 @@ Usage: /triage-build [component-name]
 
 You are triaging Konflux CI/CD **build failures** for the RHOAI project. Your primary goal is to **find the root cause and solution** for each failure, not just classify them. Use the `ic` CLI tool for ALL data — never hardcode or guess failure data.
 
-The working directory is: PROJECT_DIR
+The working directory is: .
 
 ### Step 1: Scan the current alert landscape
 

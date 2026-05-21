@@ -6,36 +6,27 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 PYTHON_DIR = PROJECT_DIR / 'src'
 
-NAMESPACE = os.environ.get('NAMESPACE', 'NAMESPACE_PLACEHOLDER')
-APPLICATION_NAME = os.environ.get('APPLICATION_NAME', 'acme-v2-0')
-KNOWN_APPLICATIONS = os.environ.get('KNOWN_APPLICATIONS', 'acme-v2-0 acme-v2-1-ea-1').split()
+NAMESPACE = os.environ.get('NAMESPACE', '')
+APPLICATION_NAME = os.environ.get('APPLICATION_NAME', '')
+KNOWN_APPLICATIONS = os.environ.get('KNOWN_APPLICATIONS', '').split()
 AUTONOMOUS_MODE = os.environ.get('AUTONOMOUS_MODE', 'false')
 
 DB_CONTAINER = os.environ.get('DB_CONTAINER', 'ci-autohealing-db')
 DB_NAME = os.environ.get('DB_NAME', 'konflux_monitoring')
 DB_USER = os.environ.get('DB_USER', 'postgres')
 
-KUBEARCHIVE_URL = os.environ.get(
-    'KUBEARCHIVE_URL',
-    'https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN',
-)
-KONFLUX_UI_BASE = os.environ.get(
-    'KONFLUX_UI_BASE',
-    'https://konflux-ui.apps.CLUSTER_DOMAIN',
-)
+KUBEARCHIVE_URL = os.environ.get('KUBEARCHIVE_URL', '')
+KONFLUX_UI_BASE = os.environ.get('KONFLUX_UI_BASE', '')
 
-JIRA_URL = os.environ.get('JIRA_URL', 'https://JIRA_HOST')
-JIRA_EMAIL = os.environ.get('JIRA_EMAIL', 'user@example.com')
-JIRA_PROJECT = os.environ.get('JIRA_PROJECT', 'RHOAIENG')
-JIRA_COMPONENT = os.environ.get('JIRA_COMPONENT', 'DevOps')
+JIRA_URL = os.environ.get('JIRA_URL', '')
+JIRA_EMAIL = os.environ.get('JIRA_EMAIL', '')
+JIRA_PROJECT = os.environ.get('JIRA_PROJECT', '')
+JIRA_COMPONENT = os.environ.get('JIRA_COMPONENT', '')
 
 LANGFUSE_HOST = os.environ.get('LANGFUSE_HOST', 'http://localhost:3000')
 
-COMPONENT_DATA_URL = os.environ.get(
-    'COMPONENT_DATA_URL',
-    'https://GITLAB_INTERNAL_HOST/wznoinsk/rhoai-monitoring/-/raw/main/data/rhoai-component-data.yaml',
-)
-COMPONENT_DATA_CACHE = os.environ.get('COMPONENT_DATA_CACHE', '/tmp/rhoai-component-data.yaml')
+COMPONENT_DATA_URL = os.environ.get('COMPONENT_DATA_URL', '')
+COMPONENT_DATA_CACHE = os.environ.get('COMPONENT_DATA_CACHE', '/tmp/component-data.yaml')
 COMPONENT_DATA_TTL = int(os.environ.get('COMPONENT_DATA_TTL', '86400'))
 
 SYNC_STALENESS_MINUTES = int(os.environ.get('SYNC_STALENESS_MINUTES', '30'))

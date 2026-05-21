@@ -123,9 +123,9 @@ class BuildFailureRepository:
     def mark_resolved(self, component_name, application, namespace, resolution_pr_name):
         # type: (str, str, str, str) -> bool
         try:
+            from cli.config import KONFLUX_UI_BASE
             resolution_url = (
-                "https://konflux-ui.apps.CLUSTER_DOMAIN"
-                "/ns/{}/pipelinerun/{}".format(namespace, resolution_pr_name)
+                "{}/ns/{}/pipelinerun/{}".format(KONFLUX_UI_BASE, namespace, resolution_pr_name)
             )
             with self.db.connection() as conn:
                 cursor = conn.cursor()

@@ -241,7 +241,7 @@ Use the record_scenarios_analysis tool. Focus on:
             'scenarios_count': len(scenarios),
         }
 
-    def run(self, namespace='NAMESPACE_PLACEHOLDER', app_filter=None):
+    def run(self, namespace=None, app_filter=None):
         # type: (str, Optional[str]) -> Dict[str, Any]
         logger.info("=" * 70)
         logger.info("ITS Scenario Configuration Analysis")

@@ -17,6 +17,7 @@ Usage:
 import argparse
 import difflib
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -35,7 +36,7 @@ from prompt_loader import load_prompt
 
 logger = setup_logger(__name__)
 
-KONFLUX_CENTRAL_REPO = 'https://github.com/acme-org/konflux-central'
+KONFLUX_CENTRAL_REPO = os.environ.get('KONFLUX_CENTRAL_REPO', '')
 
 
 def conforma_branch_name(component, conforma_id):

@@ -12,10 +12,7 @@ import requests
 from kubernetes import client, config
 
 
-KUBEARCHIVE_FALLBACK_URL = (
-    "https://kubearchive-api-server-product-kubearchive"
-    ".apps.CLUSTER_DOMAIN"
-)
+from cli.config import KUBEARCHIVE_URL as KUBEARCHIVE_FALLBACK_URL
 
 _k8s_loaded = False
 
@@ -73,7 +70,7 @@ def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
         return fallback_url
 
 
-def discover_openshift_api_url(fallback_url="https://api.CLUSTER_DOMAIN:6443"):
+def discover_openshift_api_url(fallback_url=""):
     # type: (str) -> str
     """Discover the OpenShift API server URL from kubeconfig."""
     try:

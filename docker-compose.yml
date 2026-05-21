@@ -5,8 +5,8 @@ services:
     image: postgres:14-alpine
     container_name: ci-autohealing-db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: admin
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-admin}
       POSTGRES_DB: konflux_monitoring
     ports:
       - "5433:5432"
@@ -28,11 +28,11 @@ services:
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: admin
-      DB_NAME: konflux_monitoring
-      LOG_LEVEL: INFO
-      APPLICATION_NAME: acme-v2-0
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-admin}
+      DB_NAME: ${DB_NAME:-konflux_monitoring}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APPLICATION_NAME: ${APPLICATION_NAME:-}
     env_file:
       - path: .env
         required: false

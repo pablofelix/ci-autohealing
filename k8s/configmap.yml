@@ -11,5 +11,5 @@ data:
   DB_PORT: "5432"
   DB_USER: "postgres"
   DB_NAME: "konflux_monitoring"
-  APPLICATION_NAME: "acme-v2-0"
+  APPLICATION_NAME: ""
   LOG_LEVEL: "INFO"

@@ -25,17 +25,18 @@ from openshift_auth import _ensure_k8s_config
 
 logger = setup_logger(__name__)
 
-RELENG_NAMESPACE = 'releng-tenant'
+RELENG_NAMESPACE = os.environ.get('RELENG_NAMESPACE', '')
 
-GITLAB_PROJECT = 'releng/konflux-release-data'
-GITLAB_RPA_BASE = 'config/CLUSTER_SHORT/product/ReleasePlanAdmission/rhoai'
+GITLAB_PROJECT = os.environ.get('GITLAB_RELEASE_PROJECT', '')
+GITLAB_RPA_BASE = os.environ.get('GITLAB_RPA_BASE', '')
 GITLAB_EC_PATHS = [
-    'config/CLUSTER_SHORT/product/EnterpriseContractPolicy',
-    'config/common/product/EnterpriseContractPolicy',
+    p.strip() for p in
+    os.environ.get('GITLAB_EC_PATHS', '').split(',')
+    if p.strip()
 ]
 
-GITHUB_BUILD_CONFIG_OWNER = 'acme-org'
-GITHUB_BUILD_CONFIG_REPO = 'RHOAI-Build-Config'
+GITHUB_BUILD_CONFIG_OWNER = os.environ.get('GITHUB_BUILD_CONFIG_OWNER', '')
+GITHUB_BUILD_CONFIG_REPO = os.environ.get('GITHUB_BUILD_CONFIG_REPO', '')
 
 RELEASE_ANALYSIS_TOOL = {
     'name': 'record_release_analysis',

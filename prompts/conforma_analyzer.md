@@ -90,10 +90,10 @@ spec:
 4. **Request exception** - if no alternative (requires legal/ProdSec approval)
 
 **Exception process**:
-- Create JIRA: https://JIRA_CREATE_ISSUE_URL
+- Create JIRA in the project's issue tracker (use JIRA_URL from env)
 - Explain why package is needed and why no approved alternative exists
-- Attach to exception merge request: https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_DOMAIN/product/EnterpriseContractPolicy/fbc-acme-prod.yaml
-- Wait for ProdSec (@owatkins) approval
+- Attach to exception merge request in the release-data repository (EnterpriseContractPolicy file)
+- Wait for ProdSec approval
 
 **Confidence**: 0.90+ if violation shows package URL from unapproved source
 
@@ -196,7 +196,7 @@ Then rebuild rpms.lock.yaml: https://konflux.pages.redhat.com/docs/users/buildin
 3. Search for "!FAILURE!" to see what failed
 4. If it's a beta channel reset issue, add to SELF-SERVICE FBC EXCEPTION FILE
 
-**Exception**: Some failures are expected (e.g., beta channel resets). Add to exception file: https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/exceptions/fbc-acme-prod.yaml
+**Exception**: Some failures are expected (e.g., beta channel resets). Add to the exception file in the release-data repository.
 
 **Confidence**: 0.60 - requires deep investigation of FBC build logs
 
@@ -341,9 +341,9 @@ Example recommended_fix format:
 ```
 - Vendor the model files into a Red Hat-approved internal repository instead of fetching from huggingface.co at build time. The violation details show packages fetched from `https://huggingface.co/docling-project/` which is not an approved source.
 
-- If vendoring is not feasible before the release deadline, request a policy exception. Create a JIRA issue at https://JIRA_CREATE_ISSUE_URL explaining the business justification.
+- If vendoring is not feasible before the release deadline, request a policy exception. Create a JIRA issue (use JIRA_URL from env) explaining the business justification.
 
-- Add exclusion entries to the exception file at https://GITLAB_INTERNAL_HOST/releng/konflux-release-data for each affected package term.
+- Add exclusion entries to the exception file in the release-data repository for each affected package term.
 ```
 
 **Evidence rules:**

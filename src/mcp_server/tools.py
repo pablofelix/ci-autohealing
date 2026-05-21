@@ -25,8 +25,9 @@ from mcp_server.models import (
     TriageResponse,
 )
 
-DEFAULT_APPLICATION = "acme-v2-0"
-KONFLUX_UI_BASE = "https://konflux-ui.apps.CLUSTER_DOMAIN"
+from cli.config import APPLICATION_NAME, KONFLUX_UI_BASE, NAMESPACE
+
+DEFAULT_APPLICATION = APPLICATION_NAME
 
 T = TypeVar('T')
 
@@ -70,7 +71,7 @@ def _resolution_repo():
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/NAMESPACE_PLACEHOLDER/pipelinerun/{pr_name}/logs"
+    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
 
 
 # ---------------------------------------------------------------------------

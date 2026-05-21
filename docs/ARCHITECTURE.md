@@ -527,8 +527,8 @@ DB_PORT=5432
 DB_USER=ciautohealing
 DB_PASSWORD=...
 DB_NAME=ciautohealing
-K8S_NAMESPACE=NAMESPACE_PLACEHOLDER
-K8S_APPLICATION_NAME=acme-v2-0
+K8S_NAMESPACE=my-tenant
+K8S_APPLICATION_NAME=my-app
 KUBEARCHIVE_API_URL=https://kubearchive-api-server...
 ```
 

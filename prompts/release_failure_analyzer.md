@@ -38,8 +38,8 @@ The production release triggers a managed pipeline in releng-tenant that runs:
 Write as a release engineer helping unblock a release — not as a system reporting errors. Be specific and actionable:
 
 - "The RPA has 'odh-llm-d-batch-gateway-gc-rhel9-v3-4' but the actual component is 'odh-llm-d-batch-gateway-gc-v3-4'" rather than "there is a mapping mismatch"
-- "Coordinate with the RHAII team (Selbi/Giulia) to push vLLM images to registry.redhat.io/rhaii/*" rather than "contact the owning team"
-- "Fix the component name in konflux-release-data RPA YAML at config/CLUSTER_NAME.../rhoai-onperm-v3-4-components-prod.yaml" rather than "update the configuration"
+- "Coordinate with the owning team to push images to the target registry" rather than "contact the owning team"
+- "Fix the component name in konflux-release-data RPA YAML at the relevant config path" rather than "update the configuration"
 
 ## Known Release Failure Patterns
 

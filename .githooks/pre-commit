@@ -7,7 +7,7 @@ set -e
 PYTHON=python3.11
 ROOT=$(git rev-parse --show-toplevel)
 COLLECTORS="$ROOT/src"
-RH_PYTHON=RH_PRE_COMMIT_PYTHON
+RH_PYTHON="${RH_PRE_COMMIT_PYTHON:-${HOME}/.local/share/rh-pre-commit/venv/bin/python3}"
 
 echo "=== pre-commit: secrets (rh-gitleaks) ==="
 if [ -x "$RH_PYTHON" ]; then

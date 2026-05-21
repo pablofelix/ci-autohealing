@@ -15,9 +15,9 @@ from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 
-router = APIRouter(tags=["failures"])
+from cli.config import KONFLUX_UI_BASE, NAMESPACE
 
-KONFLUX_UI_BASE = "https://konflux-ui.apps.CLUSTER_DOMAIN"
+router = APIRouter(tags=["failures"])
 
 
 def _build_repo():
@@ -29,7 +29,7 @@ def _conforma_repo():
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/NAMESPACE_PLACEHOLDER/pipelinerun/{pr_name}/logs"
+    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
 
 
 @router.get("/applications/{application}/alerts", response_model=AlertsSummary)

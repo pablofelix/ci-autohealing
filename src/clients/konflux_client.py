@@ -5,6 +5,7 @@ Bearer token auth from `oc whoami -t`. Replaces GitLab file fetching
 as the primary source for EC policy exception data.
 """
 
+import os
 from datetime import datetime, timezone
 
 import requests
@@ -21,16 +22,13 @@ logger = setup_logger(__name__)
 API_GROUP = 'apis/appstudio.redhat.com/v1alpha1'
 ITS_API_GROUP = 'apis/appstudio.redhat.com/v1beta2'
 
-GITLAB_EC_BASE = (
-    'https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/'
-    'config/CLUSTER_SHORT/product/EnterpriseContractPolicy'
-)
+GITLAB_EC_BASE = os.environ.get('GITLAB_EC_POLICY_URL', '')
 
 
 class KonfluxClient:
     """Read-only client for Konflux CRDs via the K8s REST API."""
 
-    def __init__(self, namespace='releng-tenant'):
+    def __init__(self, namespace=None):
         # type: (str) -> None
         self._server = discover_openshift_api_url()
         token = get_openshift_token()

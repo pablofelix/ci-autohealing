@@ -166,8 +166,8 @@ KUBEARCHIVE_API_URL=https://test-api.example.com
             self.assertEqual(config.db.password, "secret")
             self.assertEqual(config.db.database, "konflux_monitoring")
 
-            self.assertEqual(config.k8s.namespace, "NAMESPACE_PLACEHOLDER")
-            self.assertEqual(config.k8s.application_name, "acme-v2-0")
+            self.assertEqual(config.k8s.namespace, "")
+            self.assertEqual(config.k8s.application_name, "")
             self.assertIsNone(config.k8s.kubearchive_api_url)
 
             self.assertIsNone(config.components_file)

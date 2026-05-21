@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS build_failures (
     pipelinerun_name VARCHAR(255) UNIQUE NOT NULL,
     pipelinerun_uid VARCHAR(100),
     application VARCHAR(100),
-    namespace VARCHAR(100) DEFAULT 'NAMESPACE_PLACEHOLDER',
+    namespace VARCHAR(100),
 
     -- Source Control
     repository VARCHAR(255),
@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS resolution_attempts (
     -- Attempt Info
     attempt_number INTEGER NOT NULL,  -- 1st, 2nd, 3rd attempt
     attempted_at TIMESTAMP DEFAULT NOW(),
-    attempted_by VARCHAR(100),  -- 'ai-agent', 'user:operator', 'skill:ci-fix'
+    attempted_by VARCHAR(100),  -- 'ai-agent', 'user:<name>', 'skill:ci-fix'
 
     -- Strategy
     resolution_strategy VARCHAR(100),  -- code_fix, dependency_update, config_change, retry, revert

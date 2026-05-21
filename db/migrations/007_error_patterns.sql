@@ -122,7 +122,7 @@ VALUES
 (
     'conforma', 'policy_package_source', 'disallowed-package-source',
     'Packages fetched during a hermetic build came from an unapproved source (e.g. huggingface.co, non-RHOAI PyPI packages).',
-    '- Install the package from a Red Hat RPM repository if an RPM is available.\n\n- If using PyPI, verify the package is covered by RHOAI legal agreements.\n\n- Alternatively, vendor the source code into the source container image.\n\n- If no approved alternative exists, file a policy exception: https://JIRA_CREATE_ISSUE_URL',
+    '- Install the package from an approved RPM repository if an RPM is available.\n\n- If using PyPI, verify the package is covered by legal agreements.\n\n- Alternatively, vendor the source code into the source container image.\n\n- If no approved alternative exists, file a policy exception via your issue tracker.',
     'https://conforma.dev/docs/user-guide/',
     'seeded'
 ),

@@ -86,10 +86,10 @@ conforma_scenario_label() {
 }
 
 # Jira API configuration
-JIRA_URL="${JIRA_URL:-https://JIRA_HOST}"
-JIRA_EMAIL="${JIRA_EMAIL:-user@example.com}"
-JIRA_PROJECT="${JIRA_PROJECT:-RHOAIENG}"
-JIRA_COMPONENT="${JIRA_COMPONENT:-DevOps}"
+JIRA_URL="${JIRA_URL:-}"
+JIRA_EMAIL="${JIRA_EMAIL:-}"
+JIRA_PROJECT="${JIRA_PROJECT:-}"
+JIRA_COMPONENT="${JIRA_COMPONENT:-}"
 
 jira_api() {
     local method="$1" endpoint="$2" data="${3:-}"
@@ -3703,11 +3703,11 @@ export_conforma_jira() {
         output+="h5. Policy Exception Process\n"
         output+="\n"
         output+="If the recommended fix isn't immediately feasible:\n"
-        output+="# File JIRA at: [Create Issue|https://JIRA_CREATE_ISSUE_URL]\n"
+        output+="# File a JIRA issue in your project tracker\n"
         output+="# Explain business justification and timeline for proper fix\n"
-        output+="# Create MR to exception file: {{konflux-release-data/.../fbc-acme-prod.yaml}}\n"
+        output+="# Create MR to exception file in the release-data repository\n"
         output+="# Add exception terms (check AI analysis for specific package URLs)\n"
-        output+="# Ping @owatkins (ProdSec) in #wg-3_0-openshift-ai-release for approval\n"
+        output+="# Get ProdSec approval for the exception\n"
         output+="\n"
     fi
 
@@ -3873,7 +3873,7 @@ export_slack() {
         if [[ "$jira_key" =~ ^https?:// ]]; then
             jira_line=":jira2: <${jira_key}|${jira_key##*/}>"
         else
-            jira_line=":jira2: <${JIRA_URL:-https://your-jira.example.com}/browse/${jira_key}|${jira_key}>"
+            jira_line=":jira2: <${JIRA_URL}/browse/${jira_key}|${jira_key}>"
         fi
     fi
 
@@ -4276,8 +4276,8 @@ display_alerts_conforma_failures() {
             # Show GitLab link for known EC policies (skip custom scenarios)
             local gl_link=""
             [[ "$exc_gl_link" == http* ]] && gl_link="$exc_gl_link"
-            if [ -z "$gl_link" ] && [ -n "$policy_name" ] && echo "$policy_name" | grep -q 'rhoai'; then
-                gl_link="https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/blob/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy/${policy_name}.yaml"
+            if [ -z "$gl_link" ] && [ -n "$policy_name" ] && [ -n "${GITLAB_EC_POLICY_URL:-}" ]; then
+                gl_link="${GITLAB_EC_POLICY_URL}/${policy_name}.yaml"
             fi
             if [ -n "$gl_link" ]; then
                 echo -e "       ${CYAN}↳ ${gl_link}${NC}"
@@ -5626,10 +5626,10 @@ cmd_conforma_report() {
         local exp_status=""
         [ "$exp_expired_count" -gt 0 ] && exp_status="${exp_expired_count} expired, "
         exp_status="${exp_status}${exp_soon_count} expiring within 3 weeks"
-        local exp_link="GITLAB_INTERNAL_HOST/releng/konflux-release-data"
+        local exp_link="${GITLAB_EC_POLICY_URL:-release-data repo}"
         printf "%-32s %-40s %s\n" "Expiring Exceptions" "$exp_status" "$exp_link"
     else
-        printf "%-32s %-40s %s\n" "Expiring Exceptions" "GitLab unreachable" "GITLAB_INTERNAL_HOST/releng/konflux-release-data"
+        printf "%-32s %-40s %s\n" "Expiring Exceptions" "Source unreachable" "${GITLAB_EC_POLICY_URL:-release-data repo}"
     fi
     echo ""
 
@@ -5800,9 +5800,9 @@ cmd_conforma_report() {
     echo -e "${BOLD}Sources:${NC}"
     echo "  Violations DB     local PostgreSQL (konflux_monitoring)"
     echo "  Exceptions (GH)   https://github.com/acme-org/conforma-reporter"
-    echo "  EC Policies (K8s) 6 EnterpriseContractPolicy CRDs in releng-tenant (K8s API primary, GitLab fallback)"
-    echo "  Policy files (GL) https://GITLAB_INTERNAL_HOST/releng/konflux-release-data/-/tree/main/config/CLUSTER_SHORT/product/EnterpriseContractPolicy"
-    echo "  Reporter CSV      https://github.com/acme-org/conforma-reporter/blob/acme-3.4/latest/conforma-violations-report.csv"
+    echo "  EC Policies (K8s) EnterpriseContractPolicy CRDs (K8s API primary, GitLab fallback)"
+    echo "  Policy files (GL) ${GITLAB_EC_POLICY_URL:-configure GITLAB_EC_POLICY_URL}"
+    echo "  Reporter CSV      configure CONFORMA_REPORTER_URL"
     echo ""
 
     # Tips

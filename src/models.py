@@ -47,8 +47,9 @@ class PipelineRun:
     @property
     def konflux_logs_url(self) -> str:
         """Generate Konflux UI logs URL."""
+        from cli.config import KONFLUX_UI_BASE
         return (
-            f"https://konflux-ui.apps.CLUSTER_DOMAIN"
+            f"{KONFLUX_UI_BASE}"
             f"/ns/{self.namespace}/applications/{{app}}/pipelineruns/{self.name}/logs"
         )
 

@@ -19,7 +19,7 @@ class UnifiedPipelineClient:
     Falls back to direct pod log retrieval via the Python API as a last resort.
     """
 
-    def __init__(self, namespace='NAMESPACE_PLACEHOLDER', sources=None):
+    def __init__(self, namespace=None, sources=None):
         # type: (str, Optional[List[PipelineRunSource]]) -> None
         self.namespace = namespace
         if sources is not None:

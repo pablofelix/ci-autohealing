@@ -222,10 +222,10 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
         pr_name = pr_data.get('metadata', {}).get('name')
         ns = pr_data.get('metadata', {}).get('namespace', namespace)
         if pr_name:
+            from cli.config import KONFLUX_UI_BASE
             konflux_url = (
-                "https://konflux-ui.apps.CLUSTER_DOMAIN"
-                "/ns/{}/applications/{}/pipelineruns/{}/logs"
-            ).format(ns, application_name, pr_name)
+                "{}/ns/{}/applications/{}/pipelineruns/{}/logs"
+            ).format(KONFLUX_UI_BASE, ns, application_name, pr_name)
 
     pipeline_url = (
         annotations.get('build.appstudio.openshift.io/pipeline-url') or

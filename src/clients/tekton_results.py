@@ -45,7 +45,7 @@ class TektonResultsClient:
       3. get_taskrun_logs()          - fetch logs for a specific TaskRun record
     """
 
-    def __init__(self, namespace='NAMESPACE_PLACEHOLDER', api_url=None):
+    def __init__(self, namespace=None, api_url=None):
         # type: (str, Optional[str]) -> None
         self.namespace = namespace
         if api_url:

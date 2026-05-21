@@ -6,6 +6,7 @@ Uses Kerberos authentication via curl --negotiate (requires valid kinit).
 """
 
 import json
+import os
 import subprocess
 from urllib.parse import urlencode
 
@@ -21,8 +22,8 @@ class PyxisClient:
     Uses curl with Kerberos negotiate auth to avoid Python SSL/krb5 issues.
     """
 
-    STAGE_URL = 'https://pyxis.stage.engineering.redhat.com/v1'
-    PROD_URL = 'https://pyxis.engineering.redhat.com/v1'
+    STAGE_URL = os.environ.get('PYXIS_STAGE_URL', '')
+    PROD_URL = os.environ.get('PYXIS_PROD_URL', '')
 
     def __init__(self, target='prod'):
         # type: (str) -> None

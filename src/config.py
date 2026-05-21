@@ -119,8 +119,8 @@ class CollectorConfig:
 
         # Build Kubernetes config
         k8s_config = KubernetesConfig(
-            namespace=os.getenv('NAMESPACE', 'NAMESPACE_PLACEHOLDER'),
-            application_name=os.getenv('APPLICATION_NAME', 'acme-v2-0'),
+            namespace=os.getenv('NAMESPACE', ''),
+            application_name=os.getenv('APPLICATION_NAME', ''),
             kubearchive_api_url=os.getenv('KUBEARCHIVE_API_URL')
         )
 
@@ -162,10 +162,10 @@ class CollectorConfig:
         jira_config = None
         if jira_email and jira_token:
             jira_config = JiraConfig(
-                base_url=os.getenv('JIRA_BASE_URL', 'https://JIRA_HOST'),
+                base_url=os.getenv('JIRA_BASE_URL', ''),
                 email=jira_email,
                 token=jira_token,
-                project=os.getenv('JIRA_PROJECT', 'RHOAIENG'),
+                project=os.getenv('JIRA_PROJECT', ''),
             )
 
         # Batch analysis config

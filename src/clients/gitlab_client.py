@@ -23,7 +23,7 @@ class GitLabClient:
     Fetches file contents and directory listings from GitLab repositories.
     """
 
-    DEFAULT_API_BASE = 'https://GITLAB_INTERNAL_HOST/api/v4'
+    DEFAULT_API_BASE = os.environ.get('GITLAB_API_BASE', '')
 
     def __init__(self, token=None, api_base=None):
         # type: (Optional[str], Optional[str]) -> None
@@ -67,7 +67,7 @@ class GitLabClient:
 
         Args:
             project: Project path (e.g., 'releng/konflux-release-data')
-            file_path: Path within the repo (e.g., 'config/CLUSTER_NAME.../rpa.yaml')
+            file_path: Path within the repo (e.g., 'config/cluster/product/rpa.yaml')
             ref: Branch or commit ref (default: 'main')
 
         Returns:

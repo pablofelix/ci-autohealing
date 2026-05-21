@@ -13,7 +13,7 @@ class KubeArchiveClient(PipelineRunSource):
     TaskRuns, and pod logs. Its API follows standard Kubernetes REST structure.
     """
 
-    def __init__(self, api_url=None, namespace='NAMESPACE_PLACEHOLDER'):
+    def __init__(self, api_url=None, namespace=None):
         # type: (Optional[str], str) -> None
         self.namespace = namespace
         self.api_url = api_url or discover_kubearchive_api_url()

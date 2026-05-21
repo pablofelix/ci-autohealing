@@ -9,7 +9,7 @@ Usage: /triage [component-name]
 
 ## Instructions
 
-The working directory is: PROJECT_DIR
+The working directory is: .
 
 ### If a specific component was provided as `$ARGUMENTS`:
 

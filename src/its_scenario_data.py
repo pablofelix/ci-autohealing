@@ -149,8 +149,8 @@ def main():
     parser.add_argument('--action', required=True,
                         choices=['list', 'gaps', 'summary'],
                         help='What data to fetch')
-    parser.add_argument('--namespace', default='NAMESPACE_PLACEHOLDER',
-                        help='Namespace for ITS CRDs (default: NAMESPACE_PLACEHOLDER)')
+    parser.add_argument('--namespace', default='',
+                        help='Namespace for ITS CRDs')
     parser.add_argument('--app-filter', default=None,
                         help='Filter by application name')
     args = parser.parse_args()

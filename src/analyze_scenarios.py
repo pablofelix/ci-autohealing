@@ -43,8 +43,8 @@ def main():
     )
     parser.add_argument(
         '--namespace',
-        default='NAMESPACE_PLACEHOLDER',
-        help='Namespace for ITS CRDs (default: NAMESPACE_PLACEHOLDER)'
+        default='',
+        help='Namespace for ITS CRDs'
     )
 
     args = parser.parse_args()

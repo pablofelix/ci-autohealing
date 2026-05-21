@@ -34,9 +34,9 @@ Enriches failures with dependency changes and related failures.
 # Edit crontab
 crontab -e
 
-# Add these lines (adjust paths):
-0 * * * * PROJECT_DIR/src/cron/batch_analysis.sh
-*/30 * * * * PROJECT_DIR/src/cron/enrich_context.sh
+# Add these lines (adjust paths to your install location):
+0 * * * * /path/to/ci-autohealing/src/cron/batch_analysis.sh
+*/30 * * * * /path/to/ci-autohealing/src/cron/enrich_context.sh
 ```
 
 ### Environment Variables
@@ -52,8 +52,8 @@ DB_PASSWORD=admin
 DB_NAME=konflux_monitoring
 
 # Kubernetes
-NAMESPACE=NAMESPACE_PLACEHOLDER
-APPLICATION_NAME=acme-v2-0
+NAMESPACE=my-tenant
+APPLICATION_NAME=my-app
 
 # LLM (Vertex AI or Anthropic)
 ANTHROPIC_VERTEX_PROJECT_ID=your-project-id
@@ -78,7 +78,7 @@ BATCH_ANALYSIS_AUTO_JIRA=false
 ### Check Queue Depth
 
 ```bash
-cd PROJECT_DIR/src
+cd src
 python3 analyze_batch.py --estimate
 ```
 
@@ -161,7 +161,7 @@ Run jobs manually for testing:
 
 ```bash
 # Batch analysis
-cd PROJECT_DIR/src
+cd src
 ./cron/batch_analysis.sh
 
 # Context enrichment

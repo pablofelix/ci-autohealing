@@ -47,7 +47,7 @@ class PipelineRunSource(ABC):
 **Implementation:**
 ```python
 class KubeArchiveClient(PipelineRunSource):
-    def __init__(self, api_url=None, namespace='NAMESPACE_PLACEHOLDER'):
+    def __init__(self, api_url=None, namespace='my-tenant'):
         self.api_url = api_url or discover_kubearchive_api_url()
         self.token = get_openshift_token()
         self.session = create_authenticated_session(self.token)
@@ -131,7 +131,7 @@ class TektonResultsClient(PipelineRunSource):
 
 ```python
 class UnifiedPipelineClient:
-    def __init__(self, sources=None, namespace='NAMESPACE_PLACEHOLDER'):
+    def __init__(self, sources=None, namespace='my-tenant'):
         if sources is None:
             sources = [
                 KubeArchiveClient(namespace=namespace),
@@ -257,7 +257,7 @@ from clients.pipelinerun_query import query_pipelineruns
 
 # Get all build failures for an application
 prs = query_pipelineruns(
-    namespace='NAMESPACE_PLACEHOLDER',
+    namespace='my-tenant',
     label_selector='appstudio.openshift.io/application=acme-v2-0,pipelines.appstudio.openshift.io/type=build'
 )
 

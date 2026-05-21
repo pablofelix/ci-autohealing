@@ -59,8 +59,8 @@ Copy `.env.example` to `.env` and fill in values. The file is sourced by `ic` au
 
 ```bash
 # Always required
-NAMESPACE=NAMESPACE_PLACEHOLDER
-APPLICATION_NAME=acme-v2-0
+NAMESPACE=my-tenant
+APPLICATION_NAME=my-app
 
 # Required for AI analysis (choose one)
 LLM_PROVIDER=vertex_ai
@@ -73,10 +73,10 @@ ANTHROPIC_API_KEY=sk-ant-...                  # Direct API
 GITHUB_TOKEN=ghp_...
 
 # Required for Jira ticket creation and comment monitoring
-JIRA_EMAIL=you@redhat.com
+JIRA_EMAIL=you@example.com
 JIRA_TOKEN=...
-JIRA_URL=https://JIRA_HOST
-JIRA_PROJECT=RHOAIENG
+JIRA_URL=https://your-jira.example.com
+JIRA_PROJECT=MYPROJECT
 ```
 
 Full variable reference is at the bottom of this file.
@@ -441,9 +441,9 @@ DB_USER=postgres
 PGPASSWORD=admin
 
 # Kubernetes / Konflux
-NAMESPACE=NAMESPACE_PLACEHOLDER
-APPLICATION_NAME=acme-v2-0
-KNOWN_APPLICATIONS=acme-v2-0 acme-v2-1-ea-1   # space-separated; used by --all
+NAMESPACE=my-tenant
+APPLICATION_NAME=my-app
+KNOWN_APPLICATIONS=my-app-v1 my-app-v2       # space-separated; used by --all
 
 # AI analysis
 LLM_PROVIDER=vertex_ai                    # or: anthropic
@@ -459,24 +459,24 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 GITHUB_TOKEN=ghp_...
 
 # Jira
-JIRA_EMAIL=you@redhat.com
+JIRA_EMAIL=you@example.com
 JIRA_TOKEN=...
-JIRA_URL=https://JIRA_HOST
-JIRA_PROJECT=RHOAIENG
+JIRA_URL=https://your-jira.example.com
+JIRA_PROJECT=MYPROJECT
 
 # Autonomous mode
 AUTONOMOUS_MODE=false                     # set true only after manual validation
 AUTO_FIX_MAX_PER_RUN=3                    # max PRs per cron run
 AUTO_FIX_MIN_CONFIDENCE=0.95              # min AI confidence score
 
-# Component data (Slack team handle lookup)
-COMPONENT_DATA_URL=https://GITLAB_INTERNAL_HOST/wznoinsk/rhoai-monitoring/-/raw/main/data/rhoai-component-data.yaml
-COMPONENT_DATA_CACHE=/tmp/rhoai-component-data.yaml
+# Component data (team handle lookup)
+COMPONENT_DATA_URL=                       # URL to component-data YAML
+COMPONENT_DATA_CACHE=/tmp/component-data.yaml
 COMPONENT_DATA_TTL=86400                  # seconds (24h)
 
 # KubeArchive / Konflux UI
-KUBEARCHIVE_URL=https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN
-KONFLUX_UI_BASE=https://konflux-ui.apps.CLUSTER_DOMAIN
+KUBEARCHIVE_URL=                          # KubeArchive API endpoint
+KONFLUX_UI_BASE=                          # Konflux UI base URL
 ```
 
 ---

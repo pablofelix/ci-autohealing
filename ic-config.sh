@@ -3,11 +3,9 @@
 # Sourced by ic; do not execute directly.
 # Override any value via .env or environment variables.
 
-: "${NAMESPACE:=NAMESPACE_PLACEHOLDER}"
-: "${APPLICATION_NAME:=acme-v2-0}"
-# Space-separated list of applications to show in conforma report even when no DB data exists.
-# Override via .env or environment if running a different release train.
-: "${KNOWN_APPLICATIONS:=acme-v2-0 acme-v2-1-ea-1}"
+: "${NAMESPACE:=}"
+: "${APPLICATION_NAME:=}"
+: "${KNOWN_APPLICATIONS:=}"
 # Autonomous mode: set to "true" in .env to enable automatic PR creation for
 # conforma violations during cron step 7.5. Off by default — enable only after
 # manual ic fix validation confirms the fixers are working correctly.
@@ -15,11 +13,11 @@
 : "${DB_CONTAINER:=ci-autohealing-db}"
 : "${DB_NAME:=konflux_monitoring}"
 : "${DB_USER:=postgres}"
-: "${PGPASSWORD:=admin}"
+: "${PGPASSWORD:=}"
 export PGPASSWORD
 
-: "${KUBEARCHIVE_URL:=https://kubearchive-api-server-product-kubearchive.apps.CLUSTER_DOMAIN}"
-: "${KONFLUX_UI_BASE:=https://konflux-ui.apps.CLUSTER_DOMAIN}"
+: "${KUBEARCHIVE_URL:=}"
+: "${KONFLUX_UI_BASE:=}"
 
 require_db() {
     docker exec "$DB_CONTAINER" pg_isready -q 2>/dev/null || {
@@ -33,12 +31,12 @@ require_db() {
 : "${LANGFUSE_HOST:=http://localhost:3000}"
 export LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY
 
-: "${COMPONENT_DATA_URL:=https://GITLAB_INTERNAL_HOST/wznoinsk/rhoai-monitoring/-/raw/main/data/rhoai-component-data.yaml}"
+: "${COMPONENT_DATA_URL:=}"
 : "${COMPONENT_DATA_CACHE:=/tmp/rhoai-component-data.yaml}"
 : "${COMPONENT_DATA_TTL:=86400}"
 
-GITLAB_API_BASE="https://GITLAB_INTERNAL_HOST/api/v4/projects/releng%2Fkonflux-release-data/repository/files"
-GITLAB_POLICY_PATH="config%2FCLUSTER_SHORT%2Fproduct%2FEnterpriseContractPolicy"
+: "${GITLAB_API_BASE:=}"
+: "${GITLAB_POLICY_PATH:=}"
 GITLAB_POLICY_FILES=(
     "${GITLAB_POLICY_PATH}%2Fregistry-acme-prod.yaml"
     "${GITLAB_POLICY_PATH}%2Ffbc-acme-prod.yaml"

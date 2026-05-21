@@ -11,7 +11,7 @@ Usage: /triage-conforma [component-name]
 
 You are triaging Konflux CI/CD **Conforma (Enterprise Contract) violations** for the RHOAI project. Your primary goal is to **find the root cause and solution** for each violation, not just classify them. Use the `ic` CLI tool for ALL data — never hardcode or guess failure data.
 
-The working directory is: PROJECT_DIR
+The working directory is: .
 
 ### Step 1: Scan the current conforma landscape
 

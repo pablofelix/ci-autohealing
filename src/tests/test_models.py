@@ -47,7 +47,7 @@ class TestPipelineRun(unittest.TestCase):
         pr = PipelineRun(
             name="my-pr",
             uid="550e8400-e29b-41d4-a716-446655440000",
-            namespace="NAMESPACE_PLACEHOLDER",
+            namespace="test-namespace",
             component="my-component",
             repository="org/repo",
             repository_url="https://github.com/org/repo",
@@ -56,7 +56,7 @@ class TestPipelineRun(unittest.TestCase):
         )
         self.assertEqual(pr.name, "my-pr")
         self.assertEqual(pr.uid, "550e8400-e29b-41d4-a716-446655440000")
-        self.assertEqual(pr.namespace, "NAMESPACE_PLACEHOLDER")
+        self.assertEqual(pr.namespace, "test-namespace")
         self.assertEqual(pr.component, "my-component")
         self.assertEqual(pr.status, BuildStatus.FAILED)
 
@@ -131,12 +131,12 @@ class TestComponent(unittest.TestCase):
             name="my-component",
             repository_url="https://github.com/org/repo",
             branch="main",
-            namespace="NAMESPACE_PLACEHOLDER"
+            namespace="test-namespace"
         )
         self.assertEqual(comp.name, "my-component")
         self.assertEqual(comp.repository_url, "https://github.com/org/repo")
         self.assertEqual(comp.branch, "main")
-        self.assertEqual(comp.namespace, "NAMESPACE_PLACEHOLDER")
+        self.assertEqual(comp.namespace, "test-namespace")
 
     def test_from_file(self):
         """Test loading components from file."""

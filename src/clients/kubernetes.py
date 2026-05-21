@@ -13,7 +13,7 @@ class KubernetesClient(PipelineRunSource):
     the cluster. Best for recent data not yet archived in KubeArchive.
     """
 
-    def __init__(self, namespace='NAMESPACE_PLACEHOLDER'):
+    def __init__(self, namespace=None):
         # type: (str,) -> None
         self.namespace = namespace
 

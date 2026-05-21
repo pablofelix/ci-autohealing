@@ -48,3 +48,30 @@ coverage/
 
 # Agent outputs (Claude Code temporary files)
 .claude/
+
+# Local-only documentation (kept on disk, not in repo)
+docs/archive/
+docs/P0-*.md
+docs/PHASE_1_2_CONFORMA_AI.md
+docs/VERTEX_AI_SETUP.md
+docs/auto-sync.md
+docs/benchmark-*.md
+docs/collectors.md
+docs/comparison-*.md
+docs/conforma-*.md
+docs/daily-build-workflow.md
+docs/design/ci-build-skill.md
+docs/design/ci-troubleshooter-agent.md
+docs/design/release-analyzer.md
+docs/devops-analysis.md
+docs/fix-error-extraction-*.md
+docs/incident-*.md
+docs/investigation-*.md
+docs/quality-review-fixes.md
+docs/rhoai-*.md
+docs/summary-*.md
+docs/verification-*.md
+
+# Local working files
+comforma.pdf
+*-daily-summary.md
