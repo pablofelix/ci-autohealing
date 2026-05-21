@@ -205,76 +205,41 @@ result = analyzer.run(limit=5, component_filter="acme-autorag-v3-4")
 # Different categories: policy_hermetic_build, policy_package_source, etc.
 ```
 
-### Layer 6: MCP Server (External Agent Interface)
+### Layer 6: MCP Server + REST API (External Interfaces)
 
-**Directory:** `konflux-mcp-server/` (separate Python 3.11+ package)
+**Directories:** `src/mcp_server/` (MCP tools), `src/api/` (REST API)
 
-FastMCP server that exposes Konflux collectors as MCP tools for external AI agents (Claude Desktop, GitHub Copilot, Cursor, etc.). Read-only interface - no orchestration, no writes.
+Both share the same repository layer, connection pool (`PooledDatabaseConnection`), and Pydantic models (`mcp_server/models.py`). Zero inline SQL — all queries go through repository methods.
 
-**Architecture:** Application-agnostic, stateless tools
-- Each tool accepts `application` parameter (enables multi-version queries)
-- No `CollectorConfig` dependency (reads DB config from env vars)
-- Reuses existing repositories (no code duplication)
-- Pydantic response models (validated outputs)
+**MCP Server** (FastMCP, 23 tools):
+- Transports: stdio (Claude Desktop) and SSE (remote agents)
+- Each tool accepts `application` parameter for multi-version queries
+- Run: `python -m mcp_server` or `python -m serve --mcp`
 
-**7 MCP Tools:**
-1. `list_applications()` → Discover available RHOAI versions
-2. `list_alerts(application)` → Get all alerts (build + Conforma)
-3. `get_failure(component, application)` → Full build failure details
-4. `get_violation(component, application)` → Full Conforma violation details
-5. `get_analysis(component, application, type)` → AI analysis if exists
-6. `search_failures(application, category, ...)` → Search/filter failures
-7. `get_stats(application)` → Summary stats (pending, analyzed, costs)
+**REST API** (FastAPI, 23 endpoints):
+- Auto-generated OpenAPI docs at `/docs` and `/redoc`
+- API key auth via `IC_API_KEY` env var (designed for OAuth/SSO upgrade)
+- All GET, read-only
+- Run: `python -m serve --api`
 
-**Usage Patterns (documented in tool descriptions):**
+**Combined:** `python -m serve --api --mcp-sse` runs both in one process.
 
-**Parallel Comparison (Read-Only - Gathering Intelligence):**
-```python
-# Compare stats across versions to prioritize work
-stats_v34 = get_stats("acme-v2-0")
-stats_v35 = get_stats("acme-v2-1-ea-1")
-# Decision: v3-4 has 6 failures, v3-5 has 22 → fix v3-4 first
+**Tool/Endpoint categories:**
+- **Query:** `list_applications`, `list_alerts`, `get_failure`, `get_violation`, `get_analysis`, `search_failures`, `get_stats`
+- **Triage:** `get_triage`, `get_working`, `get_resolved`, `get_component_history`, `get_daily_stats`
+- **Health:** `get_health`, `get_health_warnings`, `get_dashboard`
+- **Patterns:** `list_patterns`, `get_pattern`, `get_fix_history`, `get_conforma_report`
+- **Export:** `export_jira`, `export_markdown`, `export_json`, `export_slack`
 
-# Regression detection
-v34 = get_failure("odh-vllm-cpu-v3-4", "acme-v2-0")
-v35 = get_failure("odh-vllm-cpu-v3-5", "acme-v2-1-ea-1")
-# Is this a NEW failure in v3-5?
-```
+**Shared Pydantic models:**
+- `ApplicationInfo`, `FailureSummary`, `BuildFailureDetails`, `ConformaViolationDetails`
+- `AnalysisDetails`, `AlertsSummary`, `StatsResponse`, `TriageResponse`
+- `ComponentHistoryResponse`, `DashboardResponse`, `HealthWarning`
 
-**Sequential Fixing (Write Operations - Taking Action):**
-```python
-# Work on ONE version at a time when creating PRs
-failures = search_failures("acme-v2-0", resolved=False)
-for failure in failures:
-    details = get_failure(failure.component, "acme-v2-0")
-    # Create PR for v3-4
-    # Complete ALL v3-4 PRs before moving to v3-5
-```
-
-**Hybrid Check (Smart Reuse):**
-```python
-# While fixing v3-4, check if v3-5 has same issue
-v35_failure = get_failure(component, "acme-v2-1-ea-1")
-if v35_failure and same_root_cause:
-    # Note: Apply same fix to v3-5 after v3-4 PR merges
-    # Don't create v3-5 PR yet (sequential fixing)
-```
-
-**Response Models (Pydantic):**
-- `ApplicationInfo` - Version metadata (name, component_count, failure_count)
-- `FailureSummary` - Brief failure info for lists
-- `BuildFailureDetails` - Full context (logs, commit diff, Dockerfile, Tekton configs)
-- `ConformaViolationDetails` - Full context (SBOM, policy rules, violation terms)
-- `AnalysisDetails` - AI analysis result with category, confidence, fix recommendation
-- `AlertsSummary` - Unified view (build failures + Conforma violations)
-- `StatsResponse` - Summary statistics (pending, analyzed, autofixable, cost)
-
-**Contrast with Python CLI:**
-- **CLI (`ic` commands):** Context-aware (set `APPLICATION_NAME` in `.env`, work in that version)
-- **MCP Server:** Context-flexible (specify `application` per query, can switch versions)
-- **Both:** Support hybrid pattern (parallel for analysis, sequential for fixing)
-
-**See:** `konflux-mcp-server/README.md` for installation, configuration, and usage examples.
+**Three consumers, one source of truth:**
+- **CLI (`ic`):** Context-aware (set `APPLICATION_NAME` in `.env`)
+- **MCP Server:** Context-flexible (specify `application` per query)
+- **REST API:** Same as MCP but HTTP-accessible, OpenAPI documented
 
 ---
 
