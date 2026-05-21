@@ -44,16 +44,13 @@ Steps 6 (commit context), 7 (AI analysis), 7.5 (autonomous), and 9 (Jira polling
 ### 1. Start the database
 
 ```bash
-./db-start.sh
+task db:start
 ```
 
 ### 2. Apply migrations
 
 ```bash
-for f in db/migrations/*.sql; do
-    docker exec ci-autohealing-db psql -U postgres -d konflux_monitoring \
-        -f /workspace/$(basename $f)
-done
+task db:migrate
 ```
 
 ### 3. Configure environment
