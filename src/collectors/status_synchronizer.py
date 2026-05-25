@@ -229,12 +229,18 @@ class StatusSynchronizer:
             if not conditions:
                 continue
             ts = pr.get('metadata', {}).get('creationTimestamp', '')
+            annotations = pr.get('metadata', {}).get('annotations', {})
+            commit_sha = (
+                annotations.get('build.appstudio.redhat.com/commit_sha') or
+                annotations.get('pipelinesascode.tekton.dev/sha')
+            )
             if not latest or ts > latest[0]:
                 latest = (
                     ts,
                     pr.get('metadata', {}).get('name'),
                     pr.get('metadata', {}).get('uid'),
                     conditions[-1].get('reason', ''),
+                    commit_sha,
                 )
         return latest
 
@@ -268,9 +274,9 @@ class StatusSynchronizer:
         if not latest:
             return None
 
-        ts, name, uid, reason = latest
+        ts, name, uid, reason, commit_sha = latest
         status = classify_build_status(reason)
-        return {'name': name, 'uid': uid, 'status': status}
+        return {'name': name, 'uid': uid, 'status': status, 'commit_sha': commit_sha}
 
     def sync_component(self, component):
         # type: (Component,) -> Dict[str, Any]
@@ -286,6 +292,13 @@ class StatusSynchronizer:
 
         result['was_failing'] = self.build_repo.count_unresolved(component.name, app) > 0
 
+        if result['was_failing'] and not component.repository_url:
+            if self.build_repo.mark_resolved_deleted(component.name, app):
+                result['now_resolved'] = True
+                result['current_status'] = 'component-deleted'
+                logger.info("Component deleted from cluster — auto-resolved")
+                return result
+
         current = self.get_current_status(component.name)
 
         if not current:
@@ -298,9 +311,11 @@ class StatusSynchronizer:
         result['current_status'] = current['status'].value
 
         if result['was_failing'] and current['status'] == BuildStatus.SUCCEEDED:
-            if self.build_repo.mark_resolved(component.name, app, ns, current['name']):
+            if self.build_repo.mark_resolved(component.name, app, ns, current['name'],
+                                             resolution_commit_sha=current.get('commit_sha')):
                 result['now_resolved'] = True
-                logger.info("Marked as resolved (last build: %s)", current['name'])
+                logger.info("Marked as resolved (last build: %s, commit: %s)",
+                            current['name'], (current.get('commit_sha') or 'unknown')[:8])
 
             if self.build_repo.record_successful_build(
                 component.name, current['name'], current['uid'],

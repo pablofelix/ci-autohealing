@@ -87,17 +87,28 @@ class RelatedFailuresSource(ContextSource):
                     limit=3 - len(related)
                 )
 
+            resolved_examples = self._query_resolved_examples(
+                component_name=component_name,
+                error_type=error_type,
+                failure_id=failure_id,
+                application=application,
+                limit=2
+            )
+
             all_related = related + cross_app
-            if not all_related:
+            if not all_related and not resolved_examples:
                 return None
 
-            logger.info("Found %d related failures (%d same-app, %d cross-app)",
-                        len(all_related), len(related), len(cross_app))
+            logger.info("Found %d related failures (%d same-app, %d cross-app, %d resolved examples)",
+                        len(all_related), len(related), len(cross_app), len(resolved_examples))
 
-            return {
+            result = {
                 'related_failures': all_related,
                 'cross_app_count': len(cross_app)
             }
+            if resolved_examples:
+                result['resolved_examples'] = resolved_examples
+            return result
 
         except Exception as e:
             logger.error("RelatedFailuresSource failed: %s", e)
@@ -246,6 +257,82 @@ class RelatedFailuresSource(ContextSource):
                     'source_application': row[10],
                     'similarity_score': float(row[11]),
                     'cross_app': True,
+                })
+
+            return results
+
+    def _query_resolved_examples(
+        self,
+        component_name: str,
+        error_type: Optional[str],
+        failure_id: int,
+        application: str,
+        limit: int = 2
+    ) -> List[Dict[str, Any]]:
+        """Find past resolved failures with known fix commits.
+
+        Prioritizes same error type, then same component base name.
+        Only returns failures that have a resolution_commit_sha.
+        """
+        base_name = self._strip_version_suffix(component_name)
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    bf.id,
+                    bf.component_name,
+                    bf.error_type,
+                    bf.error_message,
+                    bf.resolution_commit_sha,
+                    bf.resolved_at,
+                    aa.root_cause,
+                    aa.failure_category,
+                    aa.recommended_fix,
+                    bf.repository_url,
+                    CASE
+                        WHEN bf.error_type = %s AND bf.component_name = %s THEN 1.0
+                        WHEN bf.error_type = %s THEN 0.8
+                        WHEN bf.component_name LIKE %s THEN 0.6
+                        ELSE 0.4
+                    END as relevance
+                FROM build_failures bf
+                LEFT JOIN ai_analysis aa ON bf.ai_analysis_id = aa.id
+                WHERE bf.is_resolved = TRUE
+                  AND bf.resolution_commit_sha IS NOT NULL
+                  AND bf.id != %s
+                  AND bf.resolved_at > NOW() - INTERVAL '90 days'
+                  AND (bf.error_type = %s OR bf.component_name LIKE %s)
+                ORDER BY relevance DESC, bf.resolved_at DESC
+                LIMIT %s
+            """, (error_type, component_name,
+                  error_type,
+                  base_name + '%',
+                  failure_id,
+                  error_type, base_name + '%',
+                  limit))
+
+            results = []
+            for row in cursor.fetchall():
+                repo_url = row[9] or ''
+                commit_sha = row[4]
+                commit_url = ''
+                if repo_url and commit_sha:
+                    commit_url = "{}/commit/{}".format(
+                        repo_url.rstrip('/').replace('.git', ''), commit_sha
+                    )
+                results.append({
+                    'id': row[0],
+                    'component_name': row[1],
+                    'error_type': row[2],
+                    'error_message': row[3][:MAX_ERROR_MESSAGE_LENGTH] if row[3] else '',
+                    'resolution_commit_sha': commit_sha,
+                    'resolved_at': row[5].isoformat() if row[5] else None,
+                    'root_cause': row[6][:MAX_ROOT_CAUSE_LENGTH] if row[6] else None,
+                    'failure_category': row[7],
+                    'recommended_fix': row[8][:MAX_ROOT_CAUSE_LENGTH] if row[8] else None,
+                    'commit_url': commit_url,
+                    'relevance': float(row[10]),
                 })
 
             return results

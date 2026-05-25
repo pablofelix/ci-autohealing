@@ -86,7 +86,7 @@ conforma_scenario_label() {
 }
 
 # Jira API configuration
-JIRA_URL="${JIRA_URL:-}"
+JIRA_URL="${JIRA_URL:-${JIRA_BASE_URL:-}}"
 JIRA_EMAIL="${JIRA_EMAIL:-}"
 JIRA_PROJECT="${JIRA_PROJECT:-}"
 JIRA_COMPONENT="${JIRA_COMPONENT:-}"
@@ -103,6 +103,106 @@ jira_api() {
         curl -s --max-time 15 -X "$method" -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Content-Type: application/json" -d "$data" "$JIRA_URL$endpoint"
     fi
+}
+
+# RHTAP (Konflux) component IDs on status.redhat.com
+_RHTAP_COMPONENT_IDS="wblzm7qdp2f9 r3vl67rlz868 19kjb30pgzkn f8fdrnl3w06s nzsc9lfpy8ys 6hh38brjbpjj b94n21d6krbj 67cq73rt6pzz nyz5lznw8xhv yg906g8vzm3m"
+_QUAY_COMPONENT_IDS="fvnvxz75h3m2 m65lxn2nf6l0 6fb8zflt4fbt"
+_REGISTRY_COMPONENT_IDS="78htzl27599b trp61wc39x6l"
+
+check_outages() {
+    local cache_dir="/tmp/ic-outage-cache"
+    mkdir -p "$cache_dir" 2>/dev/null
+    local cache_file="${cache_dir}/incidents-$(date +%Y%m%d%H)"
+
+    local incidents_json
+    if [ -f "$cache_file" ]; then
+        incidents_json=$(cat "$cache_file")
+    else
+        incidents_json=$(curl -sf --max-time 3 "https://status.redhat.com/api/v2/incidents/unresolved.json" 2>/dev/null) || return 1
+        echo "$incidents_json" > "$cache_file" 2>/dev/null
+    fi
+
+    local all_ids="$_RHTAP_COMPONENT_IDS $_QUAY_COMPONENT_IDS $_REGISTRY_COMPONENT_IDS"
+    echo "$incidents_json" | python3 -c "
+import json, sys
+ids = set('$all_ids'.split())
+data = json.load(sys.stdin)
+for inc in data.get('incidents', []):
+    affected = {c['id'] for c in inc.get('components', [])}
+    if affected & ids:
+        impact = inc.get('impact', 'unknown')
+        name = inc.get('name', 'Unknown incident')
+        status = inc.get('status', 'unknown')
+        updates = inc.get('incident_updates', [])
+        latest = updates[0].get('body', '')[:120] if updates else ''
+        comps = [c['name'] for c in inc.get('components', []) if c['id'] in ids]
+        print(f\"{impact}|{name}|{status}|{', '.join(comps)}|{latest}\")
+" 2>/dev/null
+}
+
+check_scheduled_maintenance() {
+    local maint_json
+    maint_json=$(curl -sf --max-time 3 "https://status.redhat.com/api/v2/scheduled-maintenances/upcoming.json" 2>/dev/null) || return 1
+    local all_ids="$_RHTAP_COMPONENT_IDS $_QUAY_COMPONENT_IDS $_REGISTRY_COMPONENT_IDS"
+    echo "$maint_json" | python3 -c "
+import json, sys
+ids = set('$all_ids'.split())
+data = json.load(sys.stdin)
+for m in data.get('scheduled_maintenances', []):
+    affected = {c['id'] for c in m.get('components', [])}
+    if affected & ids:
+        name = m.get('name', '')
+        start = m.get('scheduled_for', '')[:16]
+        end = m.get('scheduled_until', '')[:16]
+        print(f\"{name}|{start}|{end}\")
+" 2>/dev/null
+}
+
+show_outage_banner() {
+    local outages
+    outages=$(check_outages 2>/dev/null)
+    [ -z "$outages" ] && return
+
+    while IFS='|' read -r impact name status comps latest; do
+        [ -z "$name" ] && continue
+        local icon="${YELLOW}⚠${NC}"
+        [ "$impact" = "major" ] || [ "$impact" = "critical" ] && icon="${RED}⚠${NC}"
+        echo -e "${icon} ${BOLD}Active Incident:${NC} ${name} [${status}]"
+        [ -n "$comps" ] && echo -e "  Affected: ${comps}"
+        [ -n "$latest" ] && echo -e "  ${DIM}${latest}${NC}"
+    done <<< "$outages"
+
+    local maint
+    maint=$(check_scheduled_maintenance 2>/dev/null)
+    if [ -n "$maint" ]; then
+        while IFS='|' read -r mname mstart mend; do
+            [ -z "$mname" ] && continue
+            echo -e "${YELLOW}⚠ Scheduled Maintenance:${NC} ${mname} (${mstart} → ${mend})"
+        done <<< "$maint"
+    fi
+    echo ""
+}
+
+show_freeze_banner() {
+    local freeze
+    freeze=$(sql_active_freeze 2>/dev/null)
+    [ -z "$freeze" ] && return
+
+    IFS='|' read -r reason start_date end_date <<< "$freeze"
+    reason=$(trim "$reason"); start_date=$(trim "$start_date"); end_date=$(trim "$end_date")
+    echo -e "${RED}❄ PIPELINE FROZEN${NC} until ${end_date} — ${reason}"
+
+    local upcoming
+    upcoming=$(sql_upcoming_freezes 7 2>/dev/null)
+    if [ -n "$upcoming" ]; then
+        while IFS='|' read -r ustart uend ureason; do
+            ustart=$(trim "$ustart"); uend=$(trim "$uend"); ureason=$(trim "$ureason")
+            [ -z "$ustart" ] && continue
+            echo -e "  ${YELLOW}→ Upcoming:${NC} ${ustart} – ${uend} (${ureason})"
+        done <<< "$upcoming"
+    fi
+    echo ""
 }
 
 # Fetch exception/exclusion rules from conforma-reporter GitHub repo (cached daily)
@@ -583,15 +683,15 @@ display_ai_analysis() {
         fi
 
         echo ""
-        echo "Root Cause:"
+        subsection_header "Root Cause:"
         echo "$root_cause" | sed 's/^/  /'
         echo ""
-        echo "Recommended Fix:"
+        subsection_header "Recommended Fix:"
         echo "$recommended_fix" | sed 's/^/  /'
 
         if [ -n "$recommended_files" ] && [ "$recommended_files" != "" ]; then
             echo ""
-            echo "Files to modify:"
+            subsection_header "Files to modify:"
             echo "$recommended_files" | sed 's/^/  /'
         fi
 
@@ -786,6 +886,16 @@ usage() {
     echo "    ic release status --verbose              Include Konflux UI links per step"
     echo "    ic release diff <epoch1> <epoch2>        Compare snapshots between releases"
     echo "    ic release verify <name>                 Check image availability in target registry (Pyxis)"
+    echo "    ic release readiness                     Can we release? (pipeline + builds + conforma)"
+    echo "    ic release readiness --stage             Focus on stage target only"
+    echo "    ic release readiness --prod              Focus on prod target only"
+    echo "    ic release history                       Timeline of last 3 release epochs"
+    echo "    ic release history --last 5              Show 5 most recent epochs"
+    echo ""
+    echo -e "  ${CYAN}Pipeline Freeze:${NC}"
+    echo "    ic freeze list                           List all configured freeze windows"
+    echo "    ic freeze add <start> <end> <reason>     Add a freeze window"
+    echo "    ic freeze rm <id>                        Remove a freeze window"
     echo ""
     echo -e "  ${CYAN}Configuration:${NC}"
     echo "    ic config                                Show current configuration"
@@ -1263,7 +1373,7 @@ cmd_describe_component() {
     local first_failure=$(sql "SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '$component';")
     local latest_failure=$(sql "SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '$component';")
 
-    echo -e "${BOLD}Summary:${NC}"
+    subsection_header "Summary:"
     echo "  Total Failures: $total"
     echo "  Failures with Logs: $with_logs / $total"
     echo "  First Failure: $first_failure"
@@ -1336,7 +1446,7 @@ cmd_describe_component() {
 
         if [ -n "$failed_step" ] || [ -n "$error_type" ]; then
             echo ""
-            echo -e "${BOLD}Failure Info:${NC}"
+            subsection_header "Failure Info:"
             [ -n "$failed_step" ] && echo -e "  Failed Step: ${RED}$failed_step${NC}"
             [ -n "$error_type" ] && echo -e "  Error Type:  $error_type"
             [ -n "$error_message" ] && echo -e "  Error:       $error_message"
@@ -1367,7 +1477,7 @@ cmd_describe_component() {
 
         if [ -n "$output_image" ]; then
             echo ""
-            echo -e "${BOLD}Build Output:${NC}"
+            subsection_header "Build Output:"
             echo -e "  Image:  $output_image"
             [ -n "$image_digest" ] && echo -e "  Digest: ${image_digest:0:24}..."
         fi
@@ -1675,6 +1785,70 @@ cmd_config_set_app() {
     echo ""
 }
 
+cmd_freeze() {
+    local subcmd="${1:-list}"; shift 2>/dev/null
+    case "$subcmd" in
+        add)
+            local start_date="$1" end_date="$2"
+            shift 2 2>/dev/null
+            local reason="$*"
+            if [ -z "$start_date" ] || [ -z "$end_date" ] || [ -z "$reason" ]; then
+                echo "Usage: ic freeze add <start-date> <end-date> <reason>"
+                echo "Example: ic freeze add 2026-06-18 2026-06-19 Juneteenth"
+                return 1
+            fi
+            start_date=$(date -d "$start_date" '+%Y-%m-%d' 2>/dev/null)
+            end_date=$(date -d "$end_date" '+%Y-%m-%d' 2>/dev/null)
+            if [ -z "$start_date" ] || [ -z "$end_date" ]; then
+                echo -e "${RED}Error: Invalid date format${NC}"
+                return 1
+            fi
+            local safe_reason="${reason//\'/\'\'}"
+            sql "INSERT INTO release_freezes (start_date, end_date, reason) VALUES ('$start_date', '$end_date', '$safe_reason');" >/dev/null
+            echo -e "${GREEN}✓${NC} Freeze added: ${start_date} → ${end_date} (${reason})"
+            ;;
+        list|ls)
+            _check_db || return 1
+            local data
+            data=$(sql_list_freezes 2>/dev/null)
+            if [ -z "$data" ]; then
+                echo "No freezes configured."
+                echo -e "${CYAN}Tip:${NC} ic freeze add 2026-06-18 2026-06-19 Juneteenth"
+                return
+            fi
+            local today=$(date '+%Y-%m-%d')
+            printf "  %-4s %-12s %-12s %-8s %s\n" "ID" "Start" "End" "Status" "Reason"
+            printf "  %-4s %-12s %-12s %-8s %s\n" "---" "----------" "----------" "------" "------"
+            while IFS='|' read -r fid fstart fend freason; do
+                fid=$(trim "$fid"); fstart=$(trim "$fstart"); fend=$(trim "$fend"); freason=$(trim "$freason")
+                [ -z "$fid" ] && continue
+                local status_label="${DIM}past${NC}"
+                [[ "$today" > "$fend" ]] || {
+                    [[ "$today" < "$fstart" ]] && status_label="${YELLOW}upcoming${NC}" || status_label="${RED}ACTIVE${NC}"
+                }
+                printf "  %-4s %-12s %-12s " "$fid" "$fstart" "$fend"
+                echo -e "$status_label $freason"
+            done <<< "$data"
+            ;;
+        rm|remove|delete)
+            local fid="$1"
+            if [ -z "$fid" ]; then
+                echo "Usage: ic freeze rm <id>"
+                return 1
+            fi
+            if ! [[ "$fid" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Error: ID must be a number${NC}"
+                return 1
+            fi
+            sql "DELETE FROM release_freezes WHERE id = $fid;" >/dev/null
+            echo -e "${GREEN}✓${NC} Freeze ${fid} removed"
+            ;;
+        *)
+            echo "Usage: ic freeze <add|list|rm>"
+            ;;
+    esac
+}
+
 # Stats commands
 cmd_stats() {
     section_header "Statistics"
@@ -1898,7 +2072,8 @@ cmd_triage() {
             pipelinerun_name,
             status,
             first_detected_at,
-            build_logs IS NOT NULL as has_logs
+            build_logs IS NOT NULL as has_logs,
+            commit_context IS NOT NULL as has_context
         FROM build_failures
         WHERE application = '$APPLICATION_NAME'
         ORDER BY component_name, first_detected_at DESC
@@ -1906,7 +2081,8 @@ cmd_triage() {
     SELECT
         component_name as \"Component\",
         first_detected_at::date as \"Last Failure\",
-        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as \"Has Logs\"
+        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as \"Has Logs\",
+        CASE WHEN has_context THEN 'Yes' ELSE 'No' END as \"Has Context\"
     FROM latest_builds
     WHERE status = 'Failed'
     ORDER BY first_detected_at DESC;
@@ -3084,6 +3260,9 @@ cmd_health_warnings() {
     _check_db || return 1
     section_header "Proactive Warnings"
     echo ""
+
+    show_freeze_banner
+    show_outage_banner
 
     python3.11 -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
@@ -4683,6 +4862,9 @@ cmd_get_alerts() {
     [ -n "$age_seconds" ] && age_minutes=$((age_seconds / 60))
     [ -n "$sync_date" ] && echo -e "${CYAN}Last sync: ${sync_date}, ${age_minutes}m ago${NC}" && echo ""
 
+    show_freeze_banner
+    show_outage_banner
+
     local build_count=$(sql_count_failing_builds)
     display_alerts_build_failures "$retriggered_json"
 
@@ -5619,8 +5801,12 @@ cmd_conforma_report() {
         expiring_soon=$(echo "$expiring_data" | awk -F'|' '$1 >= 0 && $1 <= 21')
         expired=$(echo "$expiring_data" | awk -F'|' '$1 < 0')
     fi
-    local exp_soon_count=$(echo "$expiring_soon" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
-    local exp_expired_count=$(echo "$expired" | grep -c '[^[:space:]]' 2>/dev/null || echo "0")
+    local exp_soon_count
+    exp_soon_count=$(echo "$expiring_soon" | grep -c '[^[:space:]]' 2>/dev/null || true)
+    exp_soon_count=${exp_soon_count:-0}
+    local exp_expired_count
+    exp_expired_count=$(echo "$expired" | grep -c '[^[:space:]]' 2>/dev/null || true)
+    exp_expired_count=${exp_expired_count:-0}
 
     if [ -n "$expiring_data" ]; then
         local exp_status=""
@@ -6212,7 +6398,7 @@ cmd_conforma_history() {
 
     # Also show Tekton Results conforma history (longer retention)
     echo ""
-    echo -e "${BOLD}Conforma Test History (Tekton Results):${NC}"
+    subsection_header "Conforma Test History (Tekton Results):"
     echo ""
     local conforma_hist=$(cd "$SCRIPT_DIR/src" && python3.11 get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
     if [ -n "$conforma_hist" ]; then
@@ -6316,8 +6502,12 @@ _release_type_label() {
 _release_discover_steps() {
     local app="$APPLICATION_NAME"
     local plans
+    local version_suffix="${app#rhoai-}"
     plans=$(oc get releaseplans -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name' --no-headers 2>/dev/null \
-        | grep "^rhoai-.*${app#rhoai-}" | grep -v '\-ea-' | sort)
+        | grep "^rhoai-.*${version_suffix}" | sort)
+    if [[ "$version_suffix" != *-ea-* ]]; then
+        plans=$(echo "$plans" | grep -v '\-ea-')
+    fi
 
     local has_stage_charts=false has_prod_charts=false
     local has_stage_addon=false has_prod_addon=false
@@ -6569,6 +6759,82 @@ _release_step_task_list() {
             *)         printf "       ${YELLOW}○${NC} %s\n" "$task_name" ;;
         esac
     done
+}
+
+# Compact pipeline summary for an epoch — outputs pipe-delimited counters.
+# Usage: summary=$(_release_epoch_pipeline_summary "$all_releases_json" "$epoch" ["stage"|"prod"])
+# Output: stage_done|stage_total|stage_retries|prod_done|prod_total|prod_retries|blocker_step|blocker_msg|next_step
+_release_epoch_pipeline_summary() {
+    local all_releases="$1" epoch="$2" filter_target="${3:-}"
+
+    local steps
+    steps=$(_release_discover_steps)
+
+    local sd=0 st=0 sr=0 pd=0 pt=0 pr_r=0
+    local blocker="" blocker_msg="" next_step=""
+
+    while IFS='|' read -r step_target step_type; do
+        [ -z "$step_target" ] && continue
+        [ -n "$filter_target" ] && [ "$step_target" != "$filter_target" ] && continue
+
+        local prefix
+        prefix=$(_release_name_prefix "$step_target" "$step_type")
+        local type_label
+        type_label=$(_release_type_label "$step_type")
+
+        local matching
+        matching=$(echo "$all_releases" | jq -c --arg prefix "$prefix" --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | startswith($prefix + "-"))]
+            | [.[] | select(.metadata.name | capture("(?<ep>[0-9]{10})").ep >= $epoch)]
+            | sort_by(.metadata.creationTimestamp)
+        ' 2>/dev/null)
+        if [ -n "$matching" ] && [ "$matching" != "[]" ] && [ "$matching" != "null" ]; then
+            local best_ep
+            best_ep=$(echo "$matching" | jq -r '.[0].metadata.name' 2>/dev/null | grep -oP '\d{10}' | head -1)
+            if [ -n "$best_ep" ]; then
+                matching=$(echo "$matching" | jq -c --arg ep "$best_ep" '
+                    [.[] | select(.metadata.name | contains($ep))]
+                ' 2>/dev/null)
+            fi
+        fi
+        [ -z "$matching" ] || [ "$matching" = "null" ] && matching="[]"
+
+        local match_count
+        match_count=$(echo "$matching" | jq 'length' 2>/dev/null)
+
+        [ "$step_target" = "stage" ] && st=$((st + 1)) || pt=$((pt + 1))
+
+        if [ "${match_count:-0}" -eq 0 ]; then
+            [ -z "$next_step" ] && [ -z "$blocker" ] && next_step="${step_target} ${type_label}"
+            continue
+        fi
+
+        local last_status
+        last_status=$(echo "$matching" | jq -r '
+            .[-1] | [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+        ' 2>/dev/null)
+
+        if [ "$last_status" = "True" ]; then
+            [ "$step_target" = "stage" ] && sd=$((sd + 1)) || pd=$((pd + 1))
+            local retries
+            retries=$(echo "$matching" | jq 'length - 1' 2>/dev/null)
+            if [ "${retries:-0}" -gt 0 ]; then
+                [ "$step_target" = "stage" ] && sr=$((sr + retries)) || pr_r=$((pr_r + retries))
+            fi
+        elif [ "$last_status" = "False" ]; then
+            if [ -z "$blocker" ]; then
+                blocker="${step_target} ${type_label}"
+                blocker_msg=$(echo "$matching" | jq -r '
+                    .[-1] | [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")]
+                    | .[0] | .message // empty
+                ' 2>/dev/null | head -1)
+            fi
+        else
+            [ -z "$next_step" ] && [ -z "$blocker" ] && next_step="${step_target} ${type_label}"
+        fi
+    done <<< "$steps"
+
+    echo "${sd}|${st}|${sr}|${pd}|${pt}|${pr_r}|${blocker}|${blocker_msg}|${next_step}"
 }
 
 # GET RELEASES — list recent Release CRs grouped by epoch
@@ -7445,6 +7711,555 @@ for img in d.get('images', []):
     else
         echo -e "${GREEN}All images found in target registry.${NC}"
     fi
+    echo ""
+}
+
+cmd_release_readiness() {
+    local filter_target="" epoch=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --stage) filter_target="stage"; shift ;;
+            --prod)  filter_target="prod"; shift ;;
+            -*) shift ;;
+            *) [ -z "$epoch" ] && epoch="$1"; shift ;;
+        esac
+    done
+
+    _release_require_oc || return 1
+    local db_ok=true
+    _check_db 2>/dev/null || db_ok=false
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+    if [ -z "$releases_json" ]; then
+        echo -e "${RED}Error: Could not fetch Release CRs${NC}"
+        return 1
+    fi
+
+    local app_version="${APPLICATION_NAME#rhoai-}"
+    local all_releases
+    all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
+        [.items[] | select(.spec.releasePlan | contains($ver))]
+    ' 2>/dev/null)
+
+    if [ -z "$epoch" ]; then
+        epoch=$(echo "$all_releases" | jq -r '.[].metadata.name' 2>/dev/null \
+            | grep -oP '\d{10}' | sort -rn | uniq | head -1)
+        if [ -z "$epoch" ]; then
+            echo -e "${YELLOW}No releases found for ${APPLICATION_NAME}${NC}"
+            return
+        fi
+    fi
+
+    local epoch_date
+    epoch_date=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+        [.[] | select(.metadata.name | contains($epoch))] | .[0].metadata.creationTimestamp // ""
+    ' 2>/dev/null)
+    local date_label
+    date_label=$(date -d "$epoch_date" '+%Y-%m-%d' 2>/dev/null || echo "${epoch_date:0:10}")
+
+    section_header "Release Readiness — ${APPLICATION_NAME}"
+    echo ""
+    echo -e "${BOLD}Epoch:${NC}    ${CYAN}${epoch}${NC}  (${date_label})"
+    echo ""
+
+    show_freeze_banner
+    show_outage_banner
+
+    # ── Section 1: Pipeline Status ──
+    local summary
+    summary=$(_release_epoch_pipeline_summary "$all_releases" "$epoch" "$filter_target")
+    IFS='|' read -r sd st sr pd pt pr_r blocker blocker_msg next_step <<< "$summary"
+
+    echo -e "── ${BOLD}Pipeline${NC} ────────────────────────────────────────────────────"
+
+    if [ -z "$filter_target" ] || [ "$filter_target" = "stage" ]; then
+        local stage_icon="${YELLOW}○${NC}"
+        [ "$sd" -eq "$st" ] 2>/dev/null && stage_icon="${GREEN}✓${NC}"
+        local stage_extra=""
+        [ "${sr:-0}" -gt 0 ] && stage_extra="  (${sr} retries)"
+        echo -e "  Stage: ${sd}/${st} ${stage_icon}${stage_extra}"
+    fi
+
+    if [ -z "$filter_target" ] || [ "$filter_target" = "prod" ]; then
+        local prod_icon="${YELLOW}○${NC}"
+        [ "$pd" -eq "$pt" ] 2>/dev/null && prod_icon="${GREEN}✓${NC}"
+        [ -n "$blocker" ] && prod_icon="${RED}✗${NC}"
+        local prod_extra=""
+        [ "${pr_r:-0}" -gt 0 ] && prod_extra="  (${pr_r} retries)"
+        echo -e "  Prod:  ${pd}/${pt} ${prod_icon}${prod_extra}"
+    fi
+
+    if [ -n "$blocker" ]; then
+        local short_task
+        short_task=$(echo "$blocker_msg" | grep -oP 'task \K[^ :]+' | head -1)
+        [ -n "$short_task" ] && echo -e "  ${RED}✗ Blocker:${NC} ${blocker} failed at ${short_task}" \
+            || echo -e "  ${RED}✗ Blocker:${NC} ${blocker} failed"
+    elif [ -n "$next_step" ]; then
+        echo -e "  → Next: ${next_step}"
+    fi
+    echo ""
+
+    # ── Section 2: Build Health ──
+    local blockers=() risks=()
+
+    if [ "$db_ok" = true ]; then
+        echo -e "── ${BOLD}Build Health${NC} ────────────────────────────────────────────"
+
+        local failing_data
+        failing_data=$(sql_failing_builds_with_health "$APPLICATION_NAME" 2>/dev/null)
+        local fail_count=0
+        if [ -n "$failing_data" ]; then
+            fail_count=$(echo "$failing_data" | grep -c '|' 2>/dev/null || echo 0)
+        fi
+
+        local resolved_data
+        resolved_data=$(sql_recently_resolved_builds "$APPLICATION_NAME" 7 2>/dev/null)
+        local resolved_count=0
+        if [ -n "$resolved_data" ]; then
+            resolved_count=$(echo "$resolved_data" | grep -c '|' 2>/dev/null || echo 0)
+        fi
+
+        echo -ne "  Failing: "
+        if [ "$fail_count" -gt 0 ]; then
+            echo -e "${RED}${fail_count}${NC}    Fixed (7d): ${GREEN}${resolved_count}${NC}"
+            echo "$failing_data" | head -5 | while IFS='|' read -r fname fscore fconsec; do
+                fname=$(trim "$fname"); fscore=$(trim "$fscore"); fconsec=$(trim "$fconsec")
+                [ -z "$fname" ] && continue
+                printf "    ${RED}✗${NC} %-40s (score: %s, %s consecutive)\n" "$fname" "$fscore" "$fconsec"
+            done
+            risks+=("${fail_count} component(s) have failing builds")
+        else
+            echo -e "${GREEN}0${NC}    Fixed (7d): ${GREEN}${resolved_count}${NC}"
+        fi
+
+        if [ "$resolved_count" -gt 0 ]; then
+            echo "$resolved_data" | head -3 | while IFS='|' read -r rname rdate rcommit; do
+                rname=$(trim "$rname"); rdate=$(trim "$rdate"); rcommit=$(trim "$rcommit")
+                [ -z "$rname" ] && continue
+                local commit_label=""
+                [ -n "$rcommit" ] && commit_label=", ${rcommit}"
+                printf "    ${GREEN}✓${NC} %-40s (fixed %s%s)\n" "$rname" "$rdate" "$commit_label"
+            done
+        fi
+        echo ""
+
+        # ── Section 3: Conforma Compliance ──
+        echo -e "── ${BOLD}Conforma Compliance${NC} ─────────────────────────────────────"
+
+        local conforma_data
+        conforma_data=$(sql_conforma_blocking "$APPLICATION_NAME" 2>/dev/null)
+
+        if [ -z "$conforma_data" ]; then
+            echo -e "  ${GREEN}✓ No current-policy violations${NC}"
+        else
+            local exceptions=""
+            exceptions=$(fetch_conforma_exceptions "$APPLICATION_NAME" 2>/dev/null)
+            local k8s_exc_full=""
+            k8s_exc_full=$(fetch_k8s_exceptions_full 2>/dev/null)
+
+            local blocking=0 excepted=0 partial=0
+            local blocking_names=""
+            echo "$conforma_data" | while IFS='|' read -r cname cviol cscenario; do
+                cname=$(trim "$cname"); cviol=$(trim "$cviol"); cscenario=$(trim "$cscenario")
+                [ -z "$cname" ] && continue
+
+                local exc_status="-"
+                if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                    local vsummary
+                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname' AND scenario = '$cscenario' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                    exc_status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$cscenario" | cut -d'|' -f1)
+                fi
+
+                case "$exc_status" in
+                    YES|"YES (policy)") printf "    ${GREEN}✓${NC} %-40s (%s violations, excepted)\n" "$cname" "$cviol" ;;
+                    PARTIAL*) printf "    ${YELLOW}△${NC} %-40s (%s violations, %s)\n" "$cname" "$cviol" "$exc_status" ;;
+                    *) printf "    ${RED}✗${NC} %-40s (%s violations, NO exception)\n" "$cname" "$cviol" ;;
+                esac
+            done
+
+            # Count blocking (re-run without subshell for variable access)
+            local _blocking=0 _excepted=0 _partial=0 _blocking_names=""
+            while IFS='|' read -r cname cviol cscenario; do
+                cname=$(trim "$cname")
+                [ -z "$cname" ] && continue
+                local exc_status="-"
+                if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                    local vsummary
+                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname' AND scenario = '$cscenario' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                    exc_status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$(trim "$cscenario")" | cut -d'|' -f1)
+                fi
+                case "$exc_status" in
+                    YES|"YES (policy)") _excepted=$((_excepted + 1)) ;;
+                    PARTIAL*) _partial=$((_partial + 1)) ;;
+                    *) _blocking=$((_blocking + 1)); _blocking_names="${_blocking_names} ${cname}" ;;
+                esac
+            done <<< "$conforma_data"
+
+            echo ""
+            echo -ne "  Summary: "
+            [ "$_blocking" -gt 0 ] && echo -ne "${RED}${_blocking} blocking${NC}  "
+            [ "$_excepted" -gt 0 ] && echo -ne "${GREEN}${_excepted} excepted${NC}  "
+            [ "$_partial" -gt 0 ] && echo -ne "${YELLOW}${_partial} partial${NC}  "
+            echo ""
+
+            [ "$_blocking" -gt 0 ] && blockers+=("Conforma: ${_blocking} component(s) have unexcepted violations")
+        fi
+        echo ""
+    else
+        echo -e "${YELLOW}Database unavailable — build and conforma data not shown${NC}"
+        echo ""
+    fi
+
+    # ── Section 4: JIRA Linked Issues ──
+    if [ "$db_ok" = true ] && [ -n "${JIRA_TOKEN:-}" ]; then
+        local jira_keys
+        jira_keys=$(sql_linked_jira_keys "$APPLICATION_NAME" 2>/dev/null)
+        if [ -n "$jira_keys" ]; then
+            echo -e "── ${BOLD}Linked JIRAs${NC} ──────────────────────────────────────────────"
+            local jira_open=0 jira_closed=0
+            while IFS= read -r jkey; do
+                jkey=$(trim "$jkey")
+                [ -z "$jkey" ] && continue
+                local jinfo
+                jinfo=$(jira_api GET "/rest/api/2/issue/$jkey?fields=status,summary,priority" 2>/dev/null)
+                if [ -n "$jinfo" ]; then
+                    local jstatus jsummary jpriority
+                    jstatus=$(echo "$jinfo" | python3 -c "import json,sys; print(json.load(sys.stdin).get('fields',{}).get('status',{}).get('name','?'))" 2>/dev/null)
+                    jsummary=$(echo "$jinfo" | python3 -c "import json,sys; print(json.load(sys.stdin).get('fields',{}).get('summary','')[:60])" 2>/dev/null)
+                    jpriority=$(echo "$jinfo" | python3 -c "import json,sys; print(json.load(sys.stdin).get('fields',{}).get('priority',{}).get('name','?'))" 2>/dev/null)
+                    case "$jstatus" in
+                        Closed|Done|Resolved) jira_closed=$((jira_closed + 1))
+                            printf "    ${GREEN}✓${NC} %-15s [%-8s] %s\n" "$jkey" "$jstatus" "$jsummary" ;;
+                        *)  jira_open=$((jira_open + 1))
+                            local jicon="${YELLOW}○${NC}"
+                            [ "$jpriority" = "Blocker" ] && jicon="${RED}✗${NC}"
+                            printf "    ${jicon} %-15s [%-8s] %s (%s)\n" "$jkey" "$jstatus" "$jsummary" "$jpriority" ;;
+                    esac
+                fi
+            done <<< "$jira_keys"
+            echo ""
+            echo -ne "  Summary: "
+            [ "$jira_open" -gt 0 ] && echo -ne "${YELLOW}${jira_open} open${NC}  "
+            [ "$jira_closed" -gt 0 ] && echo -ne "${GREEN}${jira_closed} resolved${NC}  "
+            echo ""
+            echo ""
+        fi
+    fi
+
+    # ── Section 5: Additional Risks ──
+    # Retry warnings
+    local total_retries=$(( ${sr:-0} + ${pr_r:-0} ))
+    if [ "$total_retries" -gt 2 ]; then
+        risks+=("High retry count: ${total_retries} retries in current epoch (possible flaky pipeline)")
+    fi
+
+    # Freeze check
+    if [ "$db_ok" = true ]; then
+        local active_freeze
+        active_freeze=$(sql_active_freeze 2>/dev/null)
+        if [ -n "$active_freeze" ]; then
+            IFS='|' read -r freason fstart fend <<< "$active_freeze"
+            blockers+=("Pipeline frozen until $(trim "$fend") ($(trim "$freason"))")
+        fi
+    fi
+
+    # Outage check
+    local active_outages
+    active_outages=$(check_outages 2>/dev/null)
+    if [ -n "$active_outages" ]; then
+        local outage_name
+        outage_name=$(echo "$active_outages" | head -1 | cut -d'|' -f2)
+        risks+=("Active infrastructure incident: ${outage_name}")
+    fi
+
+    # ── Section 6: Verdict ──
+    [ -n "$blocker" ] && blockers+=("Pipeline: ${blocker} failed")
+
+    echo -e "── ${BOLD}Verdict${NC} ─────────────────────────────────────────────────────"
+    echo ""
+
+    if [ "${#blockers[@]}" -gt 0 ]; then
+        echo -e "  ${RED}✗ NOT READY${NC}"
+        echo ""
+        echo -e "  ${BOLD}Blockers:${NC}"
+        local i=1
+        for b in "${blockers[@]}"; do
+            echo -e "    ${i}. ${b}"
+            i=$((i + 1))
+        done
+    elif [ "${#risks[@]}" -gt 0 ] || [ -n "$next_step" ]; then
+        echo -e "  ${YELLOW}△ AT RISK${NC}"
+        echo ""
+        if [ -n "$next_step" ]; then
+            echo -e "  Pipeline still in progress (next: ${next_step})"
+        fi
+        for r in "${risks[@]}"; do
+            echo -e "  • ${r}"
+        done
+    else
+        local all_done=false
+        [ "$sd" -eq "$st" ] 2>/dev/null && [ "$pd" -eq "$pt" ] 2>/dev/null && all_done=true
+        if [ "$all_done" = true ]; then
+            echo -e "  ${GREEN}✓ READY — Release complete${NC}"
+        else
+            echo -e "  ${GREEN}✓ READY${NC}"
+        fi
+    fi
+
+    echo ""
+    echo -e "${CYAN}Tip:${NC} Use 'ic release status' for detailed pipeline checklist"
+    echo -e "${CYAN}Tip:${NC} Use 'ic describe conforma <name>' for violation details"
+    echo ""
+}
+
+cmd_release_history() {
+    local last_n=3
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --last) shift; last_n="${1:-3}"; shift ;;
+            -*) shift ;;
+            *) shift ;;
+        esac
+    done
+
+    _release_require_oc || return 1
+    local db_ok=true
+    _check_db 2>/dev/null || db_ok=false
+
+    local releases_json
+    releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
+    if [ -z "$releases_json" ]; then
+        echo -e "${RED}Error: Could not fetch Release CRs${NC}"
+        return 1
+    fi
+
+    local app_version="${APPLICATION_NAME#rhoai-}"
+    local all_releases
+    all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
+        [.items[] | select(.spec.releasePlan | contains($ver))]
+    ' 2>/dev/null)
+
+    local epochs
+    epochs=$(echo "$all_releases" | jq -r '.[].metadata.name' 2>/dev/null \
+        | grep -oP '\d{10}' | sort -rn | uniq | head -"$last_n")
+
+    if [ -z "$epochs" ]; then
+        echo -e "${YELLOW}No release epochs found for ${APPLICATION_NAME}${NC}"
+        return
+    fi
+
+    local epoch_count
+    epoch_count=$(echo "$epochs" | wc -l)
+
+    section_header "Release History — ${APPLICATION_NAME}"
+    echo ""
+    echo -e "${CYAN}Showing ${epoch_count} most recent epoch(s)${NC}"
+    echo ""
+
+    local prev_epoch_date=""
+    local prev_epoch=""
+    local epoch_num=0
+
+    while IFS= read -r epoch; do
+        [ -z "$epoch" ] && continue
+        epoch_num=$((epoch_num + 1))
+
+        local epoch_date
+        epoch_date=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | contains($epoch))]
+            | sort_by(.metadata.creationTimestamp) | .[0].metadata.creationTimestamp // ""
+        ' 2>/dev/null)
+        local date_label
+        date_label=$(date -d "$epoch_date" '+%b %d' 2>/dev/null || echo "${epoch_date:0:10}")
+
+        local snapshot
+        snapshot=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | contains($epoch))]
+            | [.[] | select(.spec.releasePlan | (endswith("-components-stage") or endswith("-components-prod")))]
+            | .[0].spec.snapshot // "unknown"
+        ' 2>/dev/null)
+        [ "$snapshot" = "null" ] && snapshot="unknown"
+
+        echo -e "${BOLD}═══ Epoch ${epoch} (${date_label}) ═══${NC}"
+        echo -e "  Snapshot: ${CYAN}${snapshot}${NC}"
+
+        # Pipeline summary
+        local summary
+        summary=$(_release_epoch_pipeline_summary "$all_releases" "$epoch")
+        IFS='|' read -r sd st sr pd pt pr_r blocker blocker_msg next_step <<< "$summary"
+
+        local stage_icon="${YELLOW}○${NC}"
+        [ "$sd" -eq "$st" ] 2>/dev/null && stage_icon="${GREEN}✓${NC}"
+        local prod_icon="${YELLOW}○${NC}"
+        [ "$pd" -eq "$pt" ] 2>/dev/null && prod_icon="${GREEN}✓${NC}"
+        [ -n "$blocker" ] && prod_icon="${RED}✗${NC}"
+
+        local retries_label=""
+        local total_retries=$(( ${sr:-0} + ${pr_r:-0} ))
+        [ "$total_retries" -gt 0 ] && retries_label="  (${total_retries} retries)"
+
+        # Duration
+        local first_created last_completed duration_label=""
+        first_created=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | contains($epoch))]
+            | [.[].metadata.creationTimestamp] | sort | .[0] // ""
+        ' 2>/dev/null)
+        last_completed=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+            [.[] | select(.metadata.name | contains($epoch))]
+            | [.[].status.managedProcessing.completionTime // empty] | map(select(. != "")) | sort | .[-1] // ""
+        ' 2>/dev/null)
+
+        if [ -n "$first_created" ] && [ -n "$last_completed" ]; then
+            local s_ep e_ep
+            s_ep=$(date -d "$first_created" '+%s' 2>/dev/null)
+            e_ep=$(date -d "$last_completed" '+%s' 2>/dev/null)
+            if [ -n "$s_ep" ] && [ -n "$e_ep" ] && [ "$e_ep" -gt "$s_ep" ]; then
+                local dur=$(( e_ep - s_ep ))
+                local d=$((dur / 86400)) h=$(( (dur % 86400) / 3600 ))
+                duration_label=""
+                [ "$d" -gt 0 ] && duration_label="${d}d "
+                duration_label="${duration_label}${h}h"
+            fi
+        fi
+
+        echo -ne "  Pipeline: Stage ${sd}/${st} "
+        echo -ne "$stage_icon"
+        echo -ne "  Prod ${pd}/${pt} "
+        echo -ne "$prod_icon"
+        echo -ne "$retries_label"
+        [ -n "$duration_label" ] && echo -ne "  (${duration_label})"
+        echo ""
+
+        if [ -n "$blocker" ]; then
+            local short_task
+            short_task=$(echo "$blocker_msg" | grep -oP 'task \K[^ :]+' | head -1)
+            [ -n "$short_task" ] && echo -e "  ${RED}✗ Failed:${NC} ${blocker} at ${short_task}" \
+                || echo -e "  ${RED}✗ Failed:${NC} ${blocker}"
+        fi
+
+        [ "$total_retries" -gt 2 ] && echo -e "  ${YELLOW}⚠ ${total_retries} retries — possible flaky pipeline or persistent blocker${NC}"
+
+        # Snapshot diff vs previous epoch
+        if [ -n "$prev_epoch" ]; then
+            local snap_cur snap_prev
+            snap_cur=$(echo "$all_releases" | jq -r --arg epoch "$epoch" '
+                [.[] | select(.metadata.name | contains($epoch))]
+                | [.[] | select(.spec.releasePlan | (endswith("-components-stage") or endswith("-components-prod")))]
+                | .[0].spec.snapshot // ""
+            ' 2>/dev/null)
+            snap_prev=$(echo "$all_releases" | jq -r --arg epoch "$prev_epoch" '
+                [.[] | select(.metadata.name | contains($epoch))]
+                | [.[] | select(.spec.releasePlan | (endswith("-components-stage") or endswith("-components-prod")))]
+                | .[0].spec.snapshot // ""
+            ' 2>/dev/null)
+            if [ -n "$snap_cur" ] && [ -n "$snap_prev" ] && [ "$snap_cur" != "$snap_prev" ]; then
+                local snap_a_json snap_b_json
+                snap_a_json=$(oc get snapshot "$snap_cur" -n "$NAMESPACE" -o json 2>/dev/null)
+                snap_b_json=$(oc get snapshot "$snap_prev" -n "$NAMESPACE" -o json 2>/dev/null)
+                if [ -n "$snap_a_json" ] && [ -n "$snap_b_json" ]; then
+                    local diff_parts
+                    diff_parts=$( {
+                        echo "$snap_a_json"
+                        echo "---SEPARATOR---"
+                        echo "$snap_b_json"
+                    } | python3 -c "
+import json, sys
+parts = sys.stdin.read().split('---SEPARATOR---')
+a = json.loads(parts[0]).get('spec',{}).get('components',[])
+b = json.loads(parts[1]).get('spec',{}).get('components',[])
+ma = {c['name']: c.get('containerImage','') for c in a}
+mb = {c['name']: c.get('containerImage','') for c in b}
+changed = sum(1 for n in ma if n in mb and ma[n] != mb[n])
+added = sum(1 for n in ma if n not in mb)
+removed = sum(1 for n in mb if n not in ma)
+if changed or added or removed:
+    p = []
+    if changed: p.append(f'{changed} updated')
+    if added: p.append(f'{added} added')
+    if removed: p.append(f'{removed} removed')
+    print(', '.join(p))
+" 2>/dev/null)
+                    [ -n "$diff_parts" ] && echo -e "  Snapshot: ${CYAN}${diff_parts}${NC} (vs prev epoch)"
+                fi
+            elif [ "$snap_cur" = "$snap_prev" ] && [ -n "$snap_cur" ]; then
+                echo -e "  Snapshot: ${DIM}same as previous epoch${NC}"
+            fi
+        fi
+
+        # DB-sourced context: what changed between this epoch and the newer one
+        # prev_epoch_date = the NEWER epoch (from previous iteration, since we iterate newest-first)
+        # epoch_date = the CURRENT (older) epoch
+        # We want: resolved BETWEEN current(older) AND prev(newer)
+        if [ "$db_ok" = true ] && [ -n "$prev_epoch_date" ] && [ -n "$epoch_date" ]; then
+            local fixed
+            fixed=$(sql_builds_resolved_between "$APPLICATION_NAME" "$epoch_date" "$prev_epoch_date" 2>/dev/null)
+            if [ -n "$fixed" ]; then
+                echo -ne "  Builds fixed: "
+                local fix_items=""
+                while IFS='|' read -r fname fdate fcommit; do
+                    fname=$(trim "$fname"); fcommit=$(trim "$fcommit")
+                    [ -z "$fname" ] && continue
+                    local item="$fname"
+                    [ -n "$fcommit" ] && item="${fname} (${fcommit})"
+                    [ -n "$fix_items" ] && fix_items="${fix_items}, ${item}" || fix_items="$item"
+                done <<< "$fixed"
+                echo -e "${GREEN}${fix_items}${NC}"
+            fi
+
+            local conf_resolved
+            conf_resolved=$(sql_conforma_resolved_between "$APPLICATION_NAME" "$epoch_date" "$prev_epoch_date" 2>/dev/null)
+            if [ -n "$conf_resolved" ]; then
+                echo -ne "  Conforma resolved: "
+                local conf_items=""
+                while IFS='|' read -r cname cdate; do
+                    cname=$(trim "$cname")
+                    [ -z "$cname" ] && continue
+                    [ -n "$conf_items" ] && conf_items="${conf_items}, ${cname}" || conf_items="$cname"
+                done <<< "$conf_resolved"
+                echo -e "${GREEN}${conf_items}${NC}"
+            fi
+
+            local conf_new
+            conf_new=$(sql_conforma_appeared_between "$APPLICATION_NAME" "$epoch_date" "$prev_epoch_date" 2>/dev/null)
+            if [ -n "$conf_new" ]; then
+                echo -ne "  New violations: "
+                local new_items=""
+                while IFS='|' read -r cname cdate cviol; do
+                    cname=$(trim "$cname"); cviol=$(trim "$cviol")
+                    [ -z "$cname" ] && continue
+                    local item="${cname} (${cviol} violations)"
+                    [ -n "$new_items" ] && new_items="${new_items}, ${item}" || new_items="$item"
+                done <<< "$conf_new"
+                echo -e "${RED}${new_items}${NC}"
+            fi
+        elif [ "$db_ok" = true ] && [ -z "$prev_epoch_date" ]; then
+            echo -e "  ${DIM}(oldest epoch — no previous to compare)${NC}"
+        fi
+
+        # AI release analyses for this epoch
+        if [ "$db_ok" = true ]; then
+            local ai_data
+            ai_data=$(sql_release_ai_analyses "$epoch" 2>/dev/null)
+            if [ -n "$ai_data" ]; then
+                while IFS='|' read -r rname rcat rconf rdate; do
+                    rname=$(trim "$rname"); rcat=$(trim "$rcat"); rconf=$(trim "$rconf")
+                    [ -z "$rname" ] && continue
+                    echo -e "  AI: ${CYAN}${rcat}${NC} (${rconf}% confidence)"
+                done <<< "$ai_data"
+            fi
+        fi
+
+        prev_epoch_date="$epoch_date"
+        prev_epoch="$epoch"
+        echo ""
+    done < <(echo "$epochs")
+
+    echo -e "${CYAN}Tip:${NC} Use 'ic release status <epoch>' for detailed pipeline checklist"
+    echo -e "${CYAN}Tip:${NC} Use 'ic release diff <epoch1> <epoch2>' to compare snapshots"
+    echo -e "${CYAN}Tip:${NC} Use '--last N' to show more epochs (default: 3)"
     echo ""
 }
 
@@ -8619,6 +9434,9 @@ case "${1:-}" in
     fix)
         shift; cmd_fix "$@"
         ;;
+    freeze)
+        shift; cmd_freeze "$@"
+        ;;
     report)
         case "${2:-}" in
             build)    shift 2; cmd_report_build "$@" ;;
@@ -8674,9 +9492,11 @@ case "${1:-}" in
         ;;
     release)
         case "${2:-}" in
-            status) shift 2; cmd_release_status "$@" ;;
-            diff)   shift 2; cmd_release_diff "$@" ;;
-            verify) shift 2; cmd_release_verify "$@" ;;
+            status)    shift 2; cmd_release_status "$@" ;;
+            diff)      shift 2; cmd_release_diff "$@" ;;
+            verify)    shift 2; cmd_release_verify "$@" ;;
+            readiness) shift 2; cmd_release_readiness "$@" ;;
+            history)   shift 2; cmd_release_history "$@" ;;
             *) cmd_get_releases "${@:2}" ;;
         esac
         ;;

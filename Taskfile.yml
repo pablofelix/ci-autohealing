@@ -293,3 +293,63 @@ tasks:
     cmds:
       - echo "API docs available at http://localhost:{{.PORT}}/docs"
       - xdg-open "http://localhost:{{.PORT}}/docs" 2>/dev/null || open "http://localhost:{{.PORT}}/docs" 2>/dev/null || true
+
+  # ===========================================================================
+  # Demo
+  # ===========================================================================
+
+  demo:
+    desc: Run the interactive ic demo via Claude Code
+    deps: [demo:preflight]
+    cmds:
+      - echo "Starting ic demo..."
+      - claude -p /demo
+
+  demo:preflight:
+    desc: Verify MCP server, database, and .env are ready for demo
+    cmds:
+      - |
+        echo "=== ic Demo Pre-flight Check ==="
+        ok=true
+
+        # Check .env
+        if [ -f .env ]; then
+          printf "  %-24s ✓\n" ".env file"
+        else
+          printf "  %-24s ✗ missing — copy .env.example to .env\n" ".env file"
+          ok=false
+        fi
+
+        # Check database
+        if docker inspect {{.DB_CONTAINER}} > /dev/null 2>&1 && \
+           docker exec {{.DB_CONTAINER}} pg_isready -q 2>/dev/null; then
+          printf "  %-24s ✓\n" "PostgreSQL"
+        else
+          printf "  %-24s ✗ not running — run: task db:start\n" "PostgreSQL"
+          ok=false
+        fi
+
+        # Check MCP config
+        if [ -f .mcp.json ]; then
+          printf "  %-24s ✓\n" "MCP config (.mcp.json)"
+        else
+          printf "  %-24s ✗ missing\n" "MCP config (.mcp.json)"
+          ok=false
+        fi
+
+        # Check Claude Code
+        if command -v claude > /dev/null 2>&1; then
+          printf "  %-24s ✓\n" "Claude Code CLI"
+        else
+          printf "  %-24s ✗ not installed — https://docs.anthropic.com/en/docs/claude-code\n" "Claude Code CLI"
+          ok=false
+        fi
+
+        echo ""
+        if [ "$ok" = true ]; then
+          echo "✓ All checks passed. Ready for demo."
+        else
+          echo "✗ Some checks failed. Fix the issues above before running the demo."
+          exit 1
+        fi
+

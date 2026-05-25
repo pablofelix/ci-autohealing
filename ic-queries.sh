@@ -93,3 +93,152 @@ sql_get_retriggered_json() {
     sql "SELECT COALESCE(retriggered_components::text, '[]')
          FROM sync_status WHERE application = '$app';" 2>/dev/null
 }
+
+# -- Release readiness / history queries --
+
+sql_failing_builds_with_health() {
+    local app="${1:-$APPLICATION_NAME}"
+    sql "
+        WITH latest_builds AS (
+            SELECT DISTINCT ON (component_name)
+                component_name, status, is_resolved
+            FROM build_failures
+            WHERE application = '$app'
+            ORDER BY component_name, first_detected_at DESC
+        )
+        SELECT lb.component_name,
+               COALESCE(ch.health_score::int::text, '-'),
+               COALESCE(ch.consecutive_failures::text, '0')
+        FROM latest_builds lb
+        LEFT JOIN component_health ch ON lb.component_name = ch.component_name
+            AND ch.application = '$app'
+        WHERE lb.status = 'Failed' AND lb.is_resolved = FALSE
+        ORDER BY ch.health_score ASC NULLS FIRST;
+    "
+}
+
+sql_recently_resolved_builds() {
+    local app="${1:-$APPLICATION_NAME}" days="${2:-7}"
+    [[ "$days" =~ ^[0-9]+$ ]] || days=7
+    sql "
+        SELECT component_name,
+               TO_CHAR(resolved_at, 'Mon DD') as resolved_date,
+               LEFT(resolution_commit_sha, 8) as fix_commit
+        FROM build_failures
+        WHERE application = '$app'
+          AND is_resolved = TRUE
+          AND resolved_at >= NOW() - INTERVAL '${days} days'
+        ORDER BY resolved_at DESC;
+    "
+}
+
+sql_builds_resolved_between() {
+    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    sql "
+        SELECT component_name,
+               TO_CHAR(resolved_at, 'Mon DD') as resolved_date,
+               LEFT(resolution_commit_sha, 8) as fix_commit
+        FROM build_failures
+        WHERE application = '$app'
+          AND is_resolved = TRUE
+          AND resolved_at BETWEEN '$from_date' AND '$to_date'
+        ORDER BY resolved_at;
+    "
+}
+
+sql_conforma_blocking() {
+    local app="${1:-$APPLICATION_NAME}"
+    sql "
+        SELECT DISTINCT ON (component_name)
+            component_name, violations_count, scenario
+        FROM conforma_results
+        WHERE application = '$app'
+          AND is_resolved = FALSE
+          AND is_future = FALSE
+        ORDER BY component_name, last_updated_at DESC;
+    "
+}
+
+sql_conforma_resolved_between() {
+    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    sql "
+        SELECT DISTINCT component_name, TO_CHAR(resolved_at, 'Mon DD')
+        FROM conforma_results
+        WHERE application = '$app'
+          AND is_resolved = TRUE
+          AND is_future = FALSE
+          AND resolved_at BETWEEN '$from_date' AND '$to_date'
+        ORDER BY component_name;
+    "
+}
+
+sql_conforma_appeared_between() {
+    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    sql "
+        SELECT DISTINCT ON (component_name)
+            component_name, TO_CHAR(first_detected_at, 'Mon DD'), violations_count
+        FROM conforma_results
+        WHERE application = '$app'
+          AND is_future = FALSE
+          AND first_detected_at BETWEEN '$from_date' AND '$to_date'
+        ORDER BY component_name, first_detected_at;
+    "
+}
+
+sql_release_ai_analyses() {
+    local epoch="$1"
+    [[ "$epoch" =~ ^[0-9]+$ ]] || return 1
+    sql "
+        SELECT release_name, failure_category,
+               ROUND(confidence_score * 100)::int,
+               TO_CHAR(analyzed_at, 'Mon DD')
+        FROM ai_analysis
+        WHERE release_name LIKE '%${epoch}%'
+        ORDER BY analyzed_at DESC;
+    "
+}
+
+# -- Freeze calendar queries --
+
+sql_active_freeze() {
+    sql "
+        SELECT reason, TO_CHAR(start_date, 'Mon DD'), TO_CHAR(end_date, 'Mon DD')
+        FROM release_freezes
+        WHERE CURRENT_DATE BETWEEN start_date AND end_date
+        LIMIT 1;
+    "
+}
+
+sql_upcoming_freezes() {
+    local days="${1:-30}"
+    sql "
+        SELECT TO_CHAR(start_date, 'Mon DD'), TO_CHAR(end_date, 'Mon DD'), reason
+        FROM release_freezes
+        WHERE start_date > CURRENT_DATE
+          AND start_date <= CURRENT_DATE + INTERVAL '${days} days'
+        ORDER BY start_date;
+    "
+}
+
+sql_list_freezes() {
+    sql "
+        SELECT id, TO_CHAR(start_date, 'YYYY-MM-DD'), TO_CHAR(end_date, 'YYYY-MM-DD'), reason
+        FROM release_freezes
+        ORDER BY start_date;
+    "
+}
+
+# -- JIRA linked issues query --
+
+sql_linked_jira_keys() {
+    local app="${1:-$APPLICATION_NAME}"
+    sql "
+        SELECT DISTINCT jira_key FROM (
+            SELECT jira_key FROM build_failures
+            WHERE application = '$app' AND is_resolved = FALSE AND jira_key IS NOT NULL AND jira_key != ''
+            UNION
+            SELECT jira_key FROM conforma_results
+            WHERE application = '$app' AND is_resolved = FALSE AND jira_key IS NOT NULL AND jira_key != ''
+        ) combined;
+    "
+}

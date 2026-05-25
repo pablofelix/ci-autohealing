@@ -124,6 +124,7 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
             last_seen=comp.get('last_updated_at', datetime.utcnow()),
             occurrence_count=comp.get('failure_count', 1),
             has_logs=comp.get('has_logs', False),
+            has_context=comp.get('has_context', False),
             has_analysis=comp.get('ai_analyzed', False),
         ))
 

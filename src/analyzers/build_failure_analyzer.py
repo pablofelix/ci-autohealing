@@ -368,6 +368,25 @@ CRITICAL FORMATTING RULES:
                             rf['root_cause'][:200]
                         ))
 
+            resolved = enriched_context.get('resolved_examples')
+            if resolved:
+                sections.append("\n### Previously Resolved Similar Failures")
+                sections.append("These similar failures were fixed. Use them as reference:")
+                for rx in resolved:
+                    sections.append(
+                        "\n- **{}** ({}): {}".format(
+                            rx.get('component_name', ''),
+                            rx.get('error_type', ''),
+                            rx.get('error_message', '')[:150],
+                        )
+                    )
+                    if rx.get('root_cause'):
+                        sections.append("  Root cause: {}".format(rx['root_cause'][:200]))
+                    if rx.get('recommended_fix'):
+                        sections.append("  Fix applied: {}".format(rx['recommended_fix'][:200]))
+                    if rx.get('commit_url'):
+                        sections.append("  Resolution commit: {}".format(rx['commit_url']))
+
         return '\n'.join(sections) + '\n'
 
 

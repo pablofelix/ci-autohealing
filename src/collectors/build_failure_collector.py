@@ -620,11 +620,17 @@ class BuildFailureCollector:
             if last_condition.get('status') == 'True':
                 pr_name = newest.get('metadata', {}).get('name', '')
                 ts = newest.get('metadata', {}).get('creationTimestamp', '')
+                annotations = newest.get('metadata', {}).get('annotations', {})
+                commit_sha = (
+                    annotations.get('build.appstudio.redhat.com/commit_sha') or
+                    annotations.get('pipelinesascode.tekton.dev/sha')
+                )
                 return {
                     'resolved': True,
                     'resolution_pr_name': pr_name,
                     'resolution_timestamp': ts,
                     'resolution_type': 'auto-detected',
+                    'resolution_commit_sha': commit_sha,
                 }
         except Exception as e:
             logger.debug("Resolution check failed for %s: %s", component_name, e)
@@ -763,7 +769,8 @@ class BuildFailureCollector:
                 if resolution:
                     if self.build_repo.mark_resolved(
                         comp_name, self.config.k8s.application_name,
-                        self.config.k8s.namespace, resolution['resolution_pr_name']
+                        self.config.k8s.namespace, resolution['resolution_pr_name'],
+                        resolution_commit_sha=resolution.get('resolution_commit_sha')
                     ):
                         total_resolved += 1
                         logger.info("Auto-resolved %s (successful build: %s)",

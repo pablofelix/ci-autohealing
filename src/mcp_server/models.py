@@ -24,6 +24,7 @@ class FailureSummary(BaseModel):
     last_seen: datetime
     occurrence_count: int
     has_logs: bool
+    has_context: bool = False
     has_analysis: bool
 
 

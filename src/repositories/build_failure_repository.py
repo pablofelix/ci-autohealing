@@ -120,8 +120,9 @@ class BuildFailureRepository:
         except Exception:
             return None
 
-    def mark_resolved(self, component_name, application, namespace, resolution_pr_name):
-        # type: (str, str, str, str) -> bool
+    def mark_resolved(self, component_name, application, namespace, resolution_pr_name,
+                       resolution_commit_sha=None):
+        # type: (str, str, str, str, Optional[str]) -> bool
         try:
             from cli.config import KONFLUX_UI_BASE
             resolution_url = (
@@ -136,12 +137,37 @@ class BuildFailureRepository:
                         resolved_at = NOW(),
                         resolution_type = 'auto-detected',
                         resolution_pr_url = %s,
+                        resolution_commit_sha = %s,
                         last_updated_at = NOW()
                     WHERE component_name = %s
                       AND is_resolved = FALSE
                       AND application = %s
                     """,
-                    (resolution_url, component_name, application)
+                    (resolution_url, resolution_commit_sha, component_name, application)
+                )
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    def mark_resolved_deleted(self, component_name, application):
+        # type: (str, str) -> bool
+        """Mark all unresolved failures as resolved because the component was deleted from the cluster."""
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE build_failures
+                    SET is_resolved = TRUE,
+                        resolved_at = NOW(),
+                        resolution_type = 'component-deleted',
+                        resolution_notes = 'Component CR no longer exists in cluster',
+                        last_updated_at = NOW()
+                    WHERE component_name = %s
+                      AND is_resolved = FALSE
+                      AND application = %s
+                    """,
+                    (component_name, application)
                 )
                 return cursor.rowcount > 0
         except Exception:
@@ -390,16 +416,17 @@ class BuildFailureRepository:
                 WITH latest_builds AS (
                     SELECT DISTINCT ON (component_name)
                         component_name, first_detected_at,
-                        build_logs IS NOT NULL as has_logs
+                        build_logs IS NOT NULL as has_logs,
+                        commit_context IS NOT NULL as has_context
                     FROM build_failures
                     WHERE application = %s AND status = 'Failed' AND is_resolved = FALSE
                     ORDER BY component_name, first_detected_at DESC
                 )
-                SELECT component_name, first_detected_at::date, has_logs
+                SELECT component_name, first_detected_at::date, has_logs, has_context
                 FROM latest_builds ORDER BY first_detected_at DESC
             """, (application,))
             summary['failing_components'] = [
-                {'component': r[0], 'last_failure': r[1], 'has_logs': r[2]}
+                {'component': r[0], 'last_failure': r[1], 'has_logs': r[2], 'has_context': r[3]}
                 for r in cursor.fetchall()
             ]
             return summary

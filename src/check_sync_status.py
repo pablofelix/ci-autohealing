@@ -138,8 +138,14 @@ def main():
                     conds = newest.get('status', {}).get('conditions', [])
                     if conds and conds[-1].get('status') == 'True':
                         pr_name = newest.get('metadata', {}).get('name', 'sync-resolved')
+                        annotations = newest.get('metadata', {}).get('annotations', {})
+                        commit_sha = (
+                            annotations.get('build.appstudio.redhat.com/commit_sha') or
+                            annotations.get('pipelinesascode.tekton.dev/sha')
+                        )
                         should_resolve = True
-                        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, pr_name)
+                        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, pr_name,
+                                                 resolution_commit_sha=commit_sha)
             except Exception:
                 pass
         if not should_resolve:

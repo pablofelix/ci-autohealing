@@ -206,3 +206,22 @@ class ConformaRepository:
             return resolved_count
         except Exception:
             return 0
+
+    def resolve_deleted_component(self, component_name, application):
+        # type: (str, str) -> int
+        """Resolve all violations for a component that was deleted from the cluster."""
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE conforma_results
+                    SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
+                    WHERE component_name = %s AND application = %s
+                      AND is_resolved = FALSE
+                    """,
+                    (component_name, application)
+                )
+                return cursor.rowcount
+        except Exception:
+            return 0

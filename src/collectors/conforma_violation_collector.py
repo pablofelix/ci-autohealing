@@ -290,6 +290,20 @@ class ConformaViolationCollector:
             self.config.k8s.application_name, currently_failing, all_seen
         )
 
+    def _resolve_deleted_components(self):
+        # type: () -> int
+        """Auto-resolve conforma violations for components deleted from the cluster."""
+        app = self.config.k8s.application_name
+        unresolved = self.conforma_repo.find_unresolved_component_names(app)
+        resolved_count = 0
+        for comp in unresolved:
+            if self.k8s.get_component_metadata(comp) is None:
+                count = self.conforma_repo.resolve_deleted_component(comp, app)
+                if count:
+                    resolved_count += count
+                    logger.info("Component %s deleted from cluster — resolved %d conforma violations", comp, count)
+        return resolved_count
+
     def run(self):
         # type: () -> Dict[str, Any]
         start_time = time.time()
@@ -331,13 +345,17 @@ class ConformaViolationCollector:
             logger.info("")
 
         resolved = self.resolve_fixed_components(set(failing.keys()), all_seen)
+
+        deleted_resolved = self._resolve_deleted_components()
+        resolved += deleted_resolved
+
         duration = time.time() - start_time
 
         logger.info("=" * 70)
         logger.info("Collection Complete")
         logger.info("=" * 70)
         logger.info("Components collected: %d", collected)
-        logger.info("Components resolved: %d", resolved)
+        logger.info("Components resolved: %d (includes %d deleted)", resolved, deleted_resolved)
         logger.info("Duration: %.1fs", duration)
 
         return {'collected': collected, 'resolved': resolved, 'duration': duration}

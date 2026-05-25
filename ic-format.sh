@@ -2,10 +2,17 @@
 # ic-format.sh — Output formatting for ic CLI
 # Sourced by ic; do not execute directly.
 
+DIM='\033[2m'
+HEADER_COLOR='\033[1;38;5;110m'
+
 section_header() {
-    echo -e "${BOLD}========================================${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${HEADER_COLOR}$1${NC}"
+    echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+subsection_header() {
     echo -e "${BOLD}$1${NC}"
-    echo -e "${BOLD}========================================${NC}"
 }
 
 trim() {
