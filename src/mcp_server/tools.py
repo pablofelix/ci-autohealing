@@ -595,6 +595,129 @@ def get_conforma_report(
 
 
 # ---------------------------------------------------------------------------
+# Freeze calendar & release readiness tools
+# ---------------------------------------------------------------------------
+
+def _db_connection():
+    from repositories.connection import DatabaseConnection
+    from config import CollectorConfig
+    cfg = CollectorConfig.from_env()
+    return DatabaseConnection(cfg.db)
+
+
+@mcp.tool()
+@async_tool
+def list_freezes() -> List[Dict[str, Any]]:
+    """List all pipeline freeze windows.
+
+    Returns scheduled freeze periods with status (active/upcoming/past).
+    """
+    from datetime import date
+    db = _db_connection()
+    today = date.today()
+    with db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, start_date, end_date, reason FROM release_freezes ORDER BY start_date"
+        )
+        results = []
+        for row in cursor.fetchall():
+            fid, start, end, reason = row
+            if today > end:
+                status = "past"
+            elif today < start:
+                status = "upcoming"
+            else:
+                status = "active"
+            results.append({
+                'id': fid,
+                'start_date': str(start),
+                'end_date': str(end),
+                'reason': reason,
+                'status': status,
+            })
+        return results
+
+
+@mcp.tool()
+@async_tool
+def get_active_freeze() -> Optional[Dict[str, Any]]:
+    """Get the currently active pipeline freeze, if any.
+
+    Returns None if no freeze is active today.
+    """
+    db = _db_connection()
+    with db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, start_date, end_date, reason FROM release_freezes "
+            "WHERE CURRENT_DATE BETWEEN start_date AND end_date LIMIT 1"
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'id': row[0],
+            'start_date': str(row[1]),
+            'end_date': str(row[2]),
+            'reason': row[3],
+            'status': 'active',
+        }
+
+
+@mcp.tool()
+@async_tool
+def get_release_readiness(
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Get release readiness assessment: build health, conforma, freeze status.
+
+    Combines build failures, conforma violations, and freeze calendar
+    into a single readiness verdict (READY / AT_RISK / NOT_READY).
+
+    Args:
+        application: Which version to query
+    """
+    build_repo = _build_repo()
+    conforma_repo = _conforma_repo()
+
+    failing = build_repo.find_failing_component_names(application) or set()
+    fail_count = len(failing)
+
+    unresolved_conforma = conforma_repo.find_unresolved_component_names(application)
+    conforma_count = len(unresolved_conforma)
+
+    freeze = get_active_freeze.__wrapped__()
+
+    blockers = []
+    risks = []
+
+    if conforma_count > 0:
+        blockers.append(f"{conforma_count} component(s) with unexcepted conforma violations")
+    if freeze:
+        blockers.append(f"Pipeline frozen until {freeze['end_date']} ({freeze['reason']})")
+    if fail_count > 0:
+        risks.append(f"{fail_count} component(s) with failing builds")
+
+    if blockers:
+        verdict = "NOT_READY"
+    elif risks:
+        verdict = "AT_RISK"
+    else:
+        verdict = "READY"
+
+    return {
+        'application': application,
+        'verdict': verdict,
+        'build_failures': fail_count,
+        'conforma_violations': conforma_count,
+        'freeze': freeze,
+        'blockers': blockers,
+        'risks': risks,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Export tools (formatting logic, backed by query tools above)
 # ---------------------------------------------------------------------------
 
