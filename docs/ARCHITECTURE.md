@@ -1,68 +1,67 @@
-# CI Auto-Healing Architecture
+# CI AutoHealing Architecture
 
 ## Overview
 
-This Python package collects and stores CI/CD build failure data from Red Hat's Konflux platform to enable automated troubleshooting and AI-assisted failure analysis.
+CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and policy violations, uses LLMs to diagnose root causes, and autonomously generates fix PRs — all orchestrated through a CLI, MCP server, and REST API.
 
 **What it does:**
 - Monitors Tekton PipelineRun failures across multiple components
-- Fetches comprehensive logs, commit info, and error details
-- Tracks Conforma (Enterprise Contract) test violations
+- Fetches comprehensive logs, commit diffs, Dockerfiles, and Tekton configs
+- Tracks Conforma (Enterprise Contract) policy violations
+- Uses AI to classify failures and recommend fixes
+- Generates fix PRs autonomously for high-confidence failures
 - Stores everything in PostgreSQL for historical analysis
-- Powers the `ic` CLI tool for triage and investigation
+- Powers the `ic` CLI, MCP server (40+ tools), and REST API
 
 **Data sources:**
-- **KubeArchive** - Archived Kubernetes resources (primary)
-- **Live OpenShift cluster** - Current PipelineRuns and Components
-- **Tekton Results API** - Alternative historical data source
+- **KubeArchive** — Archived Kubernetes resources (primary)
+- **Live OpenShift cluster** — Current PipelineRuns and Components
+- **Tekton Results API** — Alternative historical data source
+- **GitHub API** — Commit diffs, PRs, Dockerfiles, Tekton configs
 
 ---
 
 ## Architecture Layers
 
-The codebase follows a clean 6-layer architecture with clear separation of concerns:
-
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  External Agents (Claude Desktop, GitHub Copilot, etc.)         │
+│  External Agents (Claude Code, GitHub Copilot, etc.)            │
 │  Access via MCP Protocol                                         │
 └────────────────────────────┬─────────────────────────────────────┘
-                             │ MCP (stdio)
+                             │ MCP (stdio / SSE)
 ┌────────────────────────────▼─────────────────────────────────────┐
-│  MCP Server (FastMCP - Python 3.11+)                             │
-│  - 7 read-only tools (list_applications, get_failure, etc.)     │
-│  - Application-agnostic (each tool accepts application param)   │
-│  - Pydantic response models (validated outputs)                 │
-│  - Reuses existing repositories (no duplication)                │
+│  Interfaces                                                      │
+│  CLI (ic) · MCP Server (40+ tools) · REST API (FastAPI)         │
+│  All share the same repository layer — zero duplication          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
 ┌────────────────────────────▼─────────────────────────────────────┐
-│  Entry Points (7 scripts)                                        │
-│  collect_comprehensive.py, sync_component_status.py              │
-│  collect_conforma.py, check_*.py                                 │
-│  analyze_failures.py, analyze_conforma.py                        │
-└───────────┬─────────────────────────┬────────────────────────────┘
-            │                         │
-            │                ┌────────▼────────────────┐
-            │                │  Analyzers (AI)         │
-            │                │  BuildFailureAnalyzer   │
-            │                │  ConformaAnalyzer       │
-            │                └────────┬────────────────┘
-            │                         │
-┌───────────▼─────────────────────────▼─────────────────────────────┐
-│  Collectors (orchestration)                                       │
-│  BuildFailureCollector, ConformaViolationCollector                │
-│  StatusSynchronizer                                               │
-└────────┬───────────────────────────────┬──────────────────────────┘
+│  Fixers                                                          │
+│  FixGenerator · JiraManager · VerifyFix                          │
+│  Autonomous PR creation with safety gates                        │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────┐
+│  Analyzers (AI)                                                  │
+│  BuildFailureAnalyzer · ConformaAnalyzer · ReleaseAnalyzer      │
+│  LLM-powered root cause analysis with confidence scoring         │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────┐
+│  Collectors (orchestration)                                      │
+│  BuildFailureCollector · ConformaViolationCollector              │
+│  StatusSynchronizer · CommitContextCollector                     │
+└────────┬───────────────────────────────┬─────────────────────────┘
          │                               │
 ┌────────▼────────────┐         ┌────────▼────────────┐
 │  Clients (I/O)      │         │  Repositories (SQL) │
-│  LLMProvider ABC    │         │  BuildFailure       │
-│  VertexAIProvider   │         │  AIAnalysis         │
-│  KubeArchive        │         │  Conforma           │
-│  Kubernetes         │         │  SyncStatus         │
-│  TektonResults      │         └─────────────────────┘
-│  UnifiedPipeline    │
+│  KubeArchive        │         │  BuildFailure       │
+│  Kubernetes         │         │  AIAnalysis         │
+│  TektonResults      │         │  Conforma           │
+│  UnifiedPipeline    │         │  ComponentHealth    │
+│  GitHub · GitLab    │         │  ErrorPatterns      │
+│  Jira · Quay        │         │  SyncStatus         │
+│  LLMProvider ABC    │         └─────────────────────┘
 │  LangfuseTracker    │
 └────────┬────────────┘
          │
@@ -79,31 +78,38 @@ The codebase follows a clean 6-layer architecture with clear separation of conce
 
 Pure functions that transform raw Kubernetes JSON into structured data. Zero I/O, no side effects, highly testable.
 
-**Examples:**
-- `extract_pipelinerun_metadata()` - Extract commit SHA, URLs, author from PR JSON
-- `extract_error_from_logs()` - Parse logs for error patterns
-- `classify_build_status()` - Map Tekton status to BuildStatus enum
-
-**Pattern:** All functions take `Dict[str, Any]` (Kubernetes JSON) and return typed data. No network calls, no database, no file I/O.
+- `extract_pipelinerun_metadata()` — Extract commit SHA, URLs, author from PR JSON
+- `extract_error_from_logs()` — Parse logs for error patterns
+- `classify_build_status()` — Map Tekton status to BuildStatus enum
 
 ### Layer 2: Clients (I/O Adapters)
 
 **Directory:** `clients/`
 
-Adapters that fetch data from external systems. Abstract away transport details (HTTP, subprocess, API quirks) behind a common interface.
+Adapters that fetch data from external systems behind a common interface.
 
-**Key pattern:** `PipelineRunSource` ABC defines the contract. Each client implements:
+**Key pattern:** `PipelineRunSource` ABC defines the contract:
 - `get_pipelinerun(name)` → Dict
-- `get_taskrun(name)` → Dict  
+- `get_taskrun(name)` → Dict
 - `get_pod_logs(pod, container)` → str
 
-**Clients:**
-- **KubeArchiveClient** - HTTP queries to archived K8s resources
-- **KubernetesClient** - Live cluster via `oc` CLI
-- **TektonResultsClient** - Tekton Results API
-- **UnifiedPipelineClient** - Tries all sources with fallback
+**Pipeline clients:**
+- **KubeArchiveClient** — HTTP queries to archived K8s resources
+- **KubernetesClient** — Live cluster via kubernetes Python API
+- **TektonResultsClient** — Tekton Results API
+- **UnifiedPipelineClient** — Tries all sources with fallback
 
-**See:** `clients/README.md` for detailed explanation of the ABC pattern and source priority.
+**Integration clients:**
+- **GitHubClient** — Commit diffs, PRs, file content, PR creation
+- **GitLabClient** — Policy exception files, MRs
+- **JiraClient** — Ticket creation, comment polling, AI reply drafts
+- **QuayClient** — Container image SARIF vulnerability scanning
+
+**AI clients:**
+- **LLMProvider ABC** — Provider-independent LLM interface
+- **VertexAIProvider** — Claude on Google Cloud Vertex AI
+- **AnthropicDirectProvider** — Direct Anthropic API
+- **LangfuseTracker** — LLM observability and cost tracking
 
 ### Layer 3: Repositories (Database)
 
@@ -111,231 +117,89 @@ Adapters that fetch data from external systems. Abstract away transport details 
 
 SQL operations on PostgreSQL tables. Parameterized queries, no business logic.
 
-**Pattern:** One repository per table, methods grouped by query type (find, insert, update, mark_resolved).
-
 **Repositories:**
-- **BuildFailureRepository** - `build_failures` table (10 methods)
-- **ConformaRepository** - `conforma_results` table
-- **SyncStatusRepository** - `sync_status` cache table
-
-**Example:**
-```python
-def find_failing_component_names(self, application):
-    # type: (str) -> Set[str]
-    with self.db.connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT DISTINCT component_name
-            FROM build_failures
-            WHERE is_resolved = FALSE AND application = %s
-        """, (application,))
-        return {row[0] for row in cursor.fetchall()}
-```
+- **BuildFailureRepository** — `build_failures` table
+- **AIAnalysisRepository** — `ai_analysis` table
+- **ConformaRepository** — `conforma_results` table
+- **ComponentHealthRepository** — `component_health` table
+- **ErrorPatternRepository** — `error_patterns` table
+- **SyncStatusRepository** — `sync_status` cache table
 
 ### Layer 4: Collectors (Orchestration)
 
-**Directory:** `src/collectors/`
+**Directory:** `collectors/`
 
-High-level workflows that coordinate clients + repositories to accomplish tasks.
+High-level workflows that coordinate clients + repositories.
 
-**Collectors:**
-- **BuildFailureCollector** - Discover failing components, fetch comprehensive logs, store in DB
-- **ConformaViolationCollector** - Collect Conforma test violations and detailed reports
-- **StatusSynchronizer** - Mark resolved failures, record successes, maintain status cache
+- **BuildFailureCollector** — Discover failing components, fetch logs, store in DB
+- **ConformaViolationCollector** — Collect policy violations and detailed reports
+- **StatusSynchronizer** — Mark resolved failures, record successes
+- **CommitContextCollector** — Fetch diffs, Dockerfiles, Tekton configs from GitHub
 
-**Pattern:** Thin orchestration. Collectors delegate to clients for I/O and repositories for persistence. Business logic stays in parsers.
-
-### Layer 5: Analyzers (AI Orchestration)
+### Layer 5: Analyzers (AI)
 
 **Directory:** `analyzers/`
 
-AI-powered analysis workflows that use LLM providers to diagnose failures and recommend fixes. Follows the same orchestration pattern as collectors.
+LLM-powered analysis workflows with confidence scoring.
 
-**Analyzers:**
-- **BuildFailureAnalyzer** - Analyze build failures (code bugs, dependency issues, config errors)
-- **ConformaAnalyzer** - Analyze Conforma violations (policy compliance issues)
+- **BuildFailureAnalyzer** — Analyze build failures (dependency issues, config errors, etc.)
+- **ConformaAnalyzer** — Analyze policy violations (hermetic builds, signing, package sources)
+- **ReleaseAnalyzer** — Release readiness assessment
 
-**Pattern:** Thin orchestration delegating to:
-- **LLM Clients** (`LLMProvider` ABC) - Provider-independent interface to Claude/Gemini/etc.
-- **Repositories** (`AIAnalysisRepository`) - Store analysis results in unified `ai_analysis` table
-- **Langfuse** (`LangfuseTracker`) - Track LLM calls for observability
-
-**LLMProvider ABC:**
-```python
-class LLMProvider(ABC):
-    @abstractmethod
-    def create_message(self, system, user_content, tools=None, max_tokens=4096):
-        # type: (...) -> LLMResponse
-        # Returns LLMResponse (provider-independent dataclass)
-
-    @abstractmethod
-    def model_name(self):
-        # type: () -> str
-        # Returns model identifier for tracking
-```
-
-**Implementations:**
-- **VertexAIProvider** - Claude on Google Cloud Vertex AI (current default)
-- **AnthropicDirectProvider** - Direct Anthropic API (future)
-
-**Provider independence:** Swap providers by changing `LLM_PROVIDER` env var. Analyzers never import SDK-specific code.
-
-**Output Validation:** Uses Pydantic models (Python 3.7+) to validate LLM outputs:
+**Output validation** uses Pydantic models:
 ```python
 class AnalysisResult(BaseModel):
     root_cause: str = Field(..., min_length=10)
     failure_category: Literal['dependency_issue', 'build_error', ...]
     confidence_score: float = Field(..., ge=0.0, le=1.0)
     recommended_fix: str
-    recommended_files: List[str]
     can_auto_fix: bool
     requires_human_review: bool
 ```
 
-**Example:**
-```python
-# Build failure analysis
-analyzer = BuildFailureAnalyzer(config)
-result = analyzer.run(limit=5)  # Analyze up to 5 pending failures
-# Internally: fetch failures -> build prompts -> call LLM -> validate with Pydantic -> store
+### Layer 6: Fixers
 
-# Conforma violation analysis
-analyzer = ConformaAnalyzer(config)
-result = analyzer.run(limit=5, component_filter="acme-autorag-v3-4")
-# Different categories: policy_hermetic_build, policy_package_source, etc.
-```
+**Directory:** `fixers/`
 
-### Layer 6: MCP Server + REST API (External Interfaces)
+Autonomous fix generation with safety gates.
 
-**Directories:** `src/mcp_server/` (MCP tools), `src/api/` (REST API)
+- **FixGenerator** — Generate code fixes and create GitHub PRs
+- **JiraManager** — Create tickets, poll comments, draft AI replies
+- **VerifyFix** — Check if fix PRs merged and builds passed
 
-Both share the same repository layer, connection pool (`PooledDatabaseConnection`), and Pydantic models (`mcp_server/models.py`). Zero inline SQL — all queries go through repository methods.
+**Safety gates** (all must pass for autonomous mode):
+- AI confidence >= 0.95
+- `can_auto_fix = true`
+- `requires_human_review = false`
+- No prior fix attempts
+- No existing fix branch
+- Rate-limited to 3 PRs per cron run
 
-**MCP Server** (FastMCP, 23 tools):
-- Transports: stdio (Claude Desktop) and SSE (remote agents)
+### Layer 7: Interfaces
+
+**Three interfaces, one data layer:**
+
+**CLI (`ic`)** — Bash wrapper delegating to Python Click CLI. Context-aware via `.env`.
+
+**MCP Server** (FastMCP, 40+ tools):
+- Transports: stdio (Claude Code) and SSE (remote agents)
 - Each tool accepts `application` parameter for multi-version queries
-- Run: `python -m mcp_server` or `python -m serve --mcp`
+- Run: `python -m serve --mcp`
 
-**REST API** (FastAPI, 23 endpoints):
-- Auto-generated OpenAPI docs at `/docs` and `/redoc`
-- API key auth via `IC_API_KEY` env var (designed for OAuth/SSO upgrade)
-- All GET, read-only
+**REST API** (FastAPI):
+- OpenAPI docs at `/docs`
+- API key auth via `IC_API_KEY` env var
 - Run: `python -m serve --api`
 
 **Combined:** `python -m serve --api --mcp-sse` runs both in one process.
-
-**Tool/Endpoint categories:**
-- **Query:** `list_applications`, `list_alerts`, `get_failure`, `get_violation`, `get_analysis`, `search_failures`, `get_stats`
-- **Triage:** `get_triage`, `get_working`, `get_resolved`, `get_component_history`, `get_daily_stats`
-- **Health:** `get_health`, `get_health_warnings`, `get_dashboard`
-- **Patterns:** `list_patterns`, `get_pattern`, `get_fix_history`, `get_conforma_report`
-- **Export:** `export_jira`, `export_markdown`, `export_json`, `export_slack`
-
-**Shared Pydantic models:**
-- `ApplicationInfo`, `FailureSummary`, `BuildFailureDetails`, `ConformaViolationDetails`
-- `AnalysisDetails`, `AlertsSummary`, `StatsResponse`, `TriageResponse`
-- `ComponentHistoryResponse`, `DashboardResponse`, `HealthWarning`
-
-**Three consumers, one source of truth:**
-- **CLI (`ic`):** Context-aware (set `APPLICATION_NAME` in `.env`)
-- **MCP Server:** Context-flexible (specify `application` per query)
-- **REST API:** Same as MCP but HTTP-accessible, OpenAPI documented
-
----
-
-## SOLID Principles Applied
-
-This codebase was refactored to follow SOLID principles.
-
-### 1. Dependency Inversion Principle
-
-**All collectors accept dependencies via constructor with defaults:**
-
-```python
-class BuildFailureCollector:
-    def __init__(self, config, db=None, build_repo=None,
-                 kubearchive=None, k8s=None, tekton_results=None, unified=None):
-        self.config = config
-        if db is None:
-            db = DatabaseConnection(config.db)
-        self.build_repo = build_repo or BuildFailureRepository(db)
-        self.kubearchive = kubearchive or KubeArchiveClient(...)
-        # ... etc
-```
-
-**Benefits:**
-- Easy to test (inject mocks)
-- Easy to compose (inject custom implementations)
-- Entry points call with config only; tests inject mocks directly
-
-### 2. Single Responsibility Principle
-
-**Eliminated duplicate code:**
-- **Before:** 6 duplicate "query KubeArchive + live cluster" implementations
-- **After:** Shared `query_pipelineruns()` function in `clients/pipelinerun_query.py`
-
-- **Before:** Duplicate status classification in 3 places
-- **After:** Single `classify_build_status()` pure function
-
-- **Before:** 3 duplicate `get_component_metadata()` subprocess calls
-- **After:** Single `KubernetesClient.get_component_metadata()` method
-
-### 3. Interface Segregation Principle
-
-**Removed dead code:**
-- Deleted 3 unused methods from BuildFailureRepository (11 methods → 10 methods)
-- `get_pipelineruns_without_logs()`, `update_logs()`, `insert_pipelinerun()` had zero callers
-
-### 4. Open/Closed Principle
-
-**Clients extend via ABC without modifying existing code:**
-- `PipelineRunSource` ABC defines contract
-- New data sources implement the ABC
-- `UnifiedPipelineClient` composes multiple sources transparently
-
-### 5. Liskov Substitution Principle
-
-**Any PipelineRunSource can be swapped:**
-```python
-# All valid, all work identically
-source = KubeArchiveClient(...)
-source = KubernetesClient(...)
-source = TektonResultsClient(...)
-
-# Client code doesn't care which one
-pr_data = source.get_pipelinerun('my-pipeline-run')
-```
 
 ---
 
 ## Key Patterns
 
-### Pattern 1: Query Deduplication by UID
+### Fallback Source Chain
 
-**Problem:** PipelineRuns appear in both KubeArchive (archived) and live cluster. Fetching from both sources creates duplicates.
-
-**Solution:** `query_pipelineruns()` deduplicates by UID:
-
-```python
-def query_pipelineruns(namespace, label_selector, ...):
-    by_uid = {}
-    
-    # Fetch from KubeArchive
-    for pr in kubearchive_results:
-        by_uid[pr['metadata']['uid']] = pr
-    
-    # Fetch from live cluster (overwrites with newer data)
-    for pr in live_cluster_results:
-        by_uid[pr['metadata']['uid']] = pr
-    
-    return list(by_uid.values())
-```
-
-Live cluster data takes precedence (newer metadata).
-
-### Pattern 2: Fallback Source Chain
-
-**UnifiedPipelineClient tries sources in priority order:**
+UnifiedPipelineClient tries sources in priority order:
 
 ```
 KubeArchive (fastest, most reliable)
@@ -345,226 +209,79 @@ Live Cluster (current data)
 Tekton Results API (alternative historical source)
 ```
 
-Callers don't know or care which source succeeded.
+### Query Deduplication by UID
 
-### Pattern 3: Structured Logging
+PipelineRuns appear in both KubeArchive and live cluster. `query_pipelineruns()` deduplicates by UID, with live cluster data taking precedence.
 
-**Never use `print()` for application output:**
+### Dependency Inversion
 
-```python
-# ❌ Bad
-print("Fetching component data...")
-
-# ✅ Good
-logger.info("Fetching component data...")
-```
-
-**Use `print(json.dumps())` only for machine-readable output:**
+All collectors accept dependencies via constructor with defaults:
 
 ```python
-# CLI tools that output JSON for scripts
-print(json.dumps({'status': 'ok', 'count': 42}))
+class BuildFailureCollector:
+    def __init__(self, config, db=None, build_repo=None,
+                 kubearchive=None, k8s=None, unified=None):
+        self.build_repo = build_repo or BuildFailureRepository(db)
+        self.kubearchive = kubearchive or KubeArchiveClient(...)
 ```
 
-See `STYLE.md` for full logging guidelines.
+Production code passes config only; tests inject mocks directly.
 
-### Pattern 4: Type Comments (Python 3.6 Compatibility)
+### Error Pattern Learning
 
-**Use `# type:` comments instead of inline annotations:**
-
-```python
-def get_pipelinerun(self, name, namespace=None):
-    # type: (str, Optional[str]) -> Optional[Dict[str, Any]]
-    """Fetch PipelineRun by name."""
-```
-
-**Why:** Python 3.6.8 constraint. Modern syntax like `def foo(x: str) -> int:` breaks on 3.6.
-
----
-
-## Entry Points
-
-### Collection Scripts (Cron Jobs)
-
-**`collect_comprehensive.py`**
-- Discovers failing components from cluster
-- Fetches last failure per component with comprehensive logs
-- Stores in `build_failures` table
-- **Used by:** `cron/collect-comprehensive.sh`
-
-**`collect_conforma.py`**
-- Discovers failing Conforma test PipelineRuns
-- Extracts violation details from `verify` TaskRun logs
-- Stores in `conforma_results` table
-- **Used by:** `cron/collect-comprehensive.sh`
-
-**`sync_component_status.py`**
-- Marks failures as resolved when component builds succeed
-- Records successful builds in database
-- **Used by:** `cron/collect-comprehensive.sh`
-
-### Status Check Scripts (Cache Updates)
-
-**`check_sync_status.py`**
-- Queries cluster for currently failing push builds
-- Updates `sync_status` cache table
-- Powers `ic get components` out-of-sync warnings
-- **Used by:** `cron/collect-comprehensive.sh`, `ic` CLI
-
-**`check_conforma_status.py`**
-- Queries cluster for failing Conforma tests
-- Updates `sync_status` cache table
-- Powers `ic get conforma` listings
-- **Used by:** `cron/collect-comprehensive.sh`, `ic` CLI
+The `error_patterns` table accumulates institutional knowledge from repeated analyses. When analyzing new failures, the system matches against known patterns to improve accuracy over time.
 
 ---
 
 ## Data Flow
 
-### Build Failure Collection Flow
+### Cron Pipeline (every 20 minutes)
 
 ```
-1. BuildFailureCollector.discover_components_from_cluster()
-   ↓
-2. query_pipelineruns(namespace, 'type=build')
+collect_comprehensive.py     → Scan for new build failures
+sync_component_status.py     → Mark resolved / passed components
+verify_fixes.py              → Check if fix PRs merged and builds passed
+check_conforma_status.py     → Update Conforma pass/fail status
+collect_conforma.py          → Fetch violation details
+collect_commit_context.py    → Gather diffs, Dockerfiles, Tekton configs
+analyze_failures.py          → AI root cause analysis
+auto_fix.py                  → Generate fix PRs (autonomous, opt-in)
+poll_jira_comments.py        → Draft replies to Jira comments
+```
+
+### Build Failure Collection
+
+```
+1. Discover failing components from cluster
    ├─ KubeArchive: archived PipelineRuns
    └─ Live cluster: current PipelineRuns
-   ↓
-3. Filter to push builds with status='False'
-   ↓
-4. For each failing component:
+2. Filter to push builds with status='False'
+3. For each failing component:
    ├─ get_component_metadata() → repo URL, branch
-   ├─ get_last_failed_pipelinerun() → PR name, UID, status
    ├─ UnifiedPipelineClient.get_logs_complete() → comprehensive logs
-   ├─ UnifiedPipelineClient.get_pipelinerun_complete() → metadata
    ├─ extract_error_from_logs() → error message, type
    └─ BuildFailureRepository.upsert_failure() → store in DB
 ```
 
-### Status Synchronization Flow
-
-```
-1. StatusSynchronizer.run()
-   ↓
-2. BuildFailureRepository.find_unresolved_component_names()
-   ↓
-3. For each unresolved component:
-   ├─ get_current_status() → latest push build status
-   │   └─ query_pipelineruns() → KubeArchive + live cluster
-   ├─ If status == SUCCEEDED:
-   │   ├─ mark_resolved() → update is_resolved=TRUE
-   │   └─ record_successful_build() → insert success record
-   └─ get_component_metadata() → enrich repo/branch info
-```
-
-### IC CLI Query Flow
-
-```
-1. User runs: ic get components
-   ↓
-2. ic (Go binary) queries PostgreSQL:
-   SELECT * FROM build_failures WHERE is_resolved=FALSE
-   ↓
-3. ic queries sync_status cache:
-   SELECT * FROM sync_status WHERE type='build'
-   ↓
-4. Compare cluster vs DB, show out-of-sync warnings
-   ↓
-5. If stale, spawn background job:
-   python3 check_sync_status.py
-```
-
 ---
 
-## Testing Strategy
+## Testing
 
-**Location:** `tests/` directory (120 tests, all passing)
+**223 tests**, all passing. Run with `task test`.
 
-### Pure Function Tests (tekton_parsers)
-- Unit tests with mock Kubernetes JSON
-- Test all edge cases (missing fields, malformed data, empty arrays)
-- Fast (no I/O), deterministic
-
-### Client Tests (with mocks)
-- Mock HTTP responses (KubeArchive)
-- Mock subprocess output (Kubernetes, TektonResults)
-- Verify retry logic, error handling, timeout behavior
-
-### Collector Tests (with dependency injection)
-- Inject `MagicMock()` for all dependencies
-- Test orchestration logic in isolation
-- No network, no database, no cluster access
-
-**Example:**
-```python
-@pytest.fixture
-def collector():
-    config = CollectorConfig(...)
-    return BuildFailureCollector(
-        config,
-        db=MagicMock(),
-        build_repo=MagicMock(),
-        kubearchive=MagicMock(),
-        k8s=MagicMock(),
-        tekton_results=MagicMock(),
-        unified=MagicMock(),
-    )
-```
-
-**Run tests:**
-```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -v
-```
+- **Parser tests** — Pure function tests with mock Kubernetes JSON, no I/O
+- **Client tests** — Mock HTTP/API responses, verify retry and error handling
+- **Collector tests** — Inject mocks for all dependencies, test orchestration logic
+- **CLI tests** — Test command output formatting and argument parsing
+- **Repository tests** — Test SQL query construction with mock cursors
 
 ---
 
 ## Configuration
 
-**Environment variables:**
-```bash
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=ciautohealing
-DB_PASSWORD=...
-DB_NAME=ciautohealing
-K8S_NAMESPACE=my-tenant
-K8S_APPLICATION_NAME=my-app
-KUBEARCHIVE_API_URL=https://kubearchive-api-server...
-```
+All configuration via environment variables in `.env`. See `.env.example` for the full list.
 
-**See:** `config.py` for `CollectorConfig` dataclass and `from_env()` loader.
-
----
-
-## Evolution
-
-**Refactoring history:**
-
-1. **Step 1-8 (Code Quality)** - Extracted pure functions, created ABC for clients, parameterized SQL, structured logging
-2. **SOLID Refactoring (Steps 1-5)** - Applied dependency inversion, eliminated duplicate code, removed dead methods
-3. **Test Organization** - Moved tests to `tests/` directory, removed obsolete utilities
-
-**Commits:**
-- `274f87f` - Create collectors/ package and convert entry points to thin shims
-- `dca6754` - Update STYLE.md with descriptive naming guidance
-- `105b2d5` - Apply Dependency Inversion: constructors accept optional dependencies
-- `6012445` - Unify status classification with classify_build_status pure function
-- `ffd4df4` - Remove dead code from BuildFailureRepository (ISP cleanup)
-- `8d7a4b1` - Extract shared PipelineRun query and component metadata (SRP)
-- `3f35121` - Organize tests and remove unused utilities
-
-**Current stats:**
-- 120 tests passing
-- ~3000 lines of production code
-- ~1600 lines of test code
-- 18 root modules + 3 organized subsystems
-- Zero flake8 violations
-- Type-checked with mypy (Python 3.6 mode)
-
----
-
-## Related Documentation
-
-- **[STYLE.md](../../../STYLE.md)** - Code style, naming conventions, logging
-- **[clients/README.md](../clients/README.md)** - Client ABC pattern, source priority
-- **[SOLID Plan](.claude/plans/streamed-dreaming-spark.md)** - Detailed refactoring plan and rationale
+Core: `NAMESPACE`, `APPLICATION_NAME`
+Database: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+AI: `LLM_PROVIDER`, `ANTHROPIC_API_KEY`
+Integrations: `GITHUB_TOKEN`, `JIRA_URL`, `JIRA_TOKEN`, `KUBEARCHIVE_URL`
