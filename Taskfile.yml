@@ -64,7 +64,7 @@ tasks:
       - src/**/*.py
 
   up:
-    desc: Start all services (server + PostgreSQL)
+    desc: Start all services (server + PostgreSQL) and apply migrations
     deps: [build]
     preconditions:
       - sh: docker info > /dev/null 2>&1 || podman info > /dev/null 2>&1
@@ -74,6 +74,7 @@ tasks:
               or:   systemctl --user start podman
     cmds:
       - docker compose up -d || podman-compose up -d
+      - task: db:migrate
 
   down:
     desc: Stop all services

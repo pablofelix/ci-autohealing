@@ -120,7 +120,7 @@ ENDOFOUTPUT
 
 OUTPUT_APPS=$(cat <<ENDOFOUTPUT
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ${BOLD}Available RHOAI Applications${NC}
+  ${BOLD}Available Applications${NC}
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
       acme-v2-0 — 263 records
@@ -153,8 +153,8 @@ OUTPUT_ALERTS=$(cat <<ENDOFOUTPUT
     #    Component                                Policy      Viol   Warn Exception              Since  JIRA
     ───  ──────────────────────────────────────── ───────── ────── ────── ────────────────────── ────── ────────
     ${WHITE}3${NC}    acme-fbc-fragment-v3-5-ea-1             ${RED}reg-prod${NC}      22     30 -                      25 May -
-    ${WHITE}4${NC}    rhai-on-openshift-chart-v3-5-ea-1        ${RED}reg-prod${NC}      16     12 -                      21 May -
-    ${WHITE}5${NC}    rhai-on-xks-chart-v3-5-ea-1              ${RED}reg-prod${NC}      16     10 -                      25 May -
+    ${WHITE}4${NC}    acme-openshift-chart-v3-5-ea-1        ${RED}reg-prod${NC}      16     12 -                      21 May -
+    ${WHITE}5${NC}    acme-xks-chart-v3-5-ea-1              ${RED}reg-prod${NC}      16     10 -                      25 May -
     ${WHITE}6${NC}    acme-fbc-fragment-v3-5-ea-1             ${RED}fbc-prod${NC}      10      5 -                      25 May -
     ${WHITE}7${NC}    acme-core-engine-v3-5-ea-1                   ${RED}reg-prod${NC}       4     28 -                      18 May -
 
@@ -186,17 +186,17 @@ OUTPUT_ALERTS_GROUP=$(cat <<ENDOFOUTPUT
       ${DIM}"step-build exited with code 1: Error"${NC}
       acme-api-registry-sync-v3-5-ea-1
 
-    ${RED}init-task / Task Failure${NC} (1 component)
+    ${RED}acme-init / Task Failure${NC} (1 component)
       ${DIM}"failed to create task run pod"${NC}
       acme-inference-operator-v3-5-ea-1
 
   ${BOLD}Conforma Failures:${NC}
 
-    ${RED}conforma-registry-acme-prod-v2-1-ea-1${NC} (4 components, ${BOLD}58 total violations${NC})
-      acme-core-engine(4), rhai-on-openshift-chart(16),
-      rhai-on-xks-chart(16), acme-fbc-fragment(22)
+    ${RED}conforma-registry-acme-prod-v3-5-ea-1${NC} (4 components, ${BOLD}58 total violations${NC})
+      acme-core-engine(4), acme-openshift-chart(16),
+      acme-xks-chart(16), acme-fbc-fragment(22)
 
-    ${RED}conforma-fbc-acme-prod-v2-1-ea-1${NC} (1 component, 10 total violations)
+    ${RED}conforma-fbc-acme-prod-v3-5-ea-1${NC} (1 component, 10 total violations)
       acme-fbc-fragment(10)
 ENDOFOUTPUT
 )
@@ -220,11 +220,11 @@ OUTPUT_DESCRIBE_1=$(cat <<ENDOFOUTPUT
 
   PipelineRun: acme-api-registry-sync-v3-5-ea-1-on-push-hj9zn
   Status: ${RED}Failed${NC}
-  Repository: https://github.com/acme-org/model-registry
-  Branch: acme-3.5-ea.1
+  Repository: https://github.com/acme-org/api-registry
+  Branch: acme-2.1-ea.1
   Commit:      ${CYAN}eca2830b${NC}
   Author:      jsmith
-  Message:     Merge pull request #1305 — Fix missing rh-model-signing package
+  Message:     Merge pull request #1305 — Fix missing dependency-signing package
 
   ${BOLD}Failure Info:${NC}
     Failed Step: ${RED}build-images${NC}
@@ -313,7 +313,7 @@ OUTPUT_AI_STATUS=$(cat <<ENDOFOUTPUT
    2  │ acme-api-registry-sync-v3-5-ea-1 │ Build    │ ${CYAN}dependency_issue${NC}       │ ${GREEN}78%${NC}  │ ✗
    3  │ acme-fbc-fragment-v3-5-ea-1                  │ Conforma │ ${YELLOW}policy_fips_check${NC}      │ ${YELLOW}65%${NC}  │ ✗
    4  │ acme-automl-v3-5-ea-1                          │ Build    │ ${CYAN}infrastructure${NC}         │ ${GREEN}82%${NC}  │ ✗
-   5  │ rhai-on-xks-chart-v3-5-ea-1                   │ Conforma │ ${CYAN}config_error${NC}           │ ${GREEN}82%${NC}  │ ✗
+   5  │ acme-xks-chart-v3-5-ea-1                   │ Conforma │ ${CYAN}config_error${NC}           │ ${GREEN}82%${NC}  │ ✗
    6  │ acme-fbc-fragment-v3-5-ea-1                  │ Conforma │ ${CYAN}policy_untrusted_image${NC} │ ${GREEN}82%${NC}  │ ✗
    7  │ acme-operator-v3-5-ea-1                        │ Build    │ ${YELLOW}build_error${NC}            │ ${YELLOW}30%${NC}  │ ✗
   (10 rows)
@@ -365,11 +365,11 @@ OUTPUT_DESCRIBE_CONFORMA=$(cat <<ENDOFOUTPUT
   ${BOLD}Conforma Results: acme-core-engine-v3-5-ea-1${NC}
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Scenario:    conforma-registry-acme-prod-v2-1-ea-1-single-component
+  Scenario:    conforma-registry-acme-prod-v3-5-ea-1-single-component
   Result:      ${RED}FAILURE${NC} (4 violations, 28 warnings, 508 successes)
-  Repository:  https://github.com/acme-org/ogx-distribution
+  Repository:  https://github.com/acme-org/core-engine
   Commit:      ${CYAN}8f2d9d17${NC}
-  Image:       quay.io/acme/acme-core-engine-rhel9@sha256:c10be78...
+  Image:       quay.io/acme/core-engine-rhel9@sha256:c10be78...
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ${BOLD}Violations${NC}
@@ -477,7 +477,7 @@ OUTPUT_READINESS=$(cat <<ENDOFOUTPUT
   ${BOLD}Epoch:${NC}    ${CYAN}1779415746${NC}  (2026-05-22)
   ${BOLD}Schedule:${NC} Release: ${RED}Jun 17 (22d)${NC}  │  Rel Window: Jun 16 (21d)  │  RC: May 21 (passed)
                     Code Freeze: May 15 (passed)
-  ${BOLD}Next:${NC}     acme-3.5.EA2
+  ${BOLD}Next:${NC}     acme-2.1.EA2
 
   ${RED}❄ PIPELINE FROZEN${NC} until May 25 — Memorial Day
 
@@ -491,14 +491,14 @@ OUTPUT_READINESS=$(cat <<ENDOFOUTPUT
     Failing: ${RED}2${NC}    Fixed (7d): ${GREEN}92${NC}
       ${RED}✗${NC} acme-inference-operator-v3-5-ea-1   (score: -, 0 consecutive)
       ${RED}✗${NC} acme-api-registry-sync-v3-5-ea-1 (score: -, 0 consecutive)
-      ${GREEN}✓${NC} acme-ml-pipelines-api-v3-5-ea-1 (fixed May 25)
-      ${GREEN}✓${NC} acme-kube-auth-proxy-v3-5-ea-1            (fixed May 25)
-      ${GREEN}✓${NC} acme-ml-pipelines-driver-v3-5-ea-1        (fixed May 25)
+      ${GREEN}✓${NC} acme-pipelines-api-v3-5-ea-1 (fixed May 25)
+      ${GREEN}✓${NC} acme-auth-proxy-v3-5-ea-1            (fixed May 25)
+      ${GREEN}✓${NC} acme-pipelines-driver-v3-5-ea-1        (fixed May 25)
 
   ── ${BOLD}Conforma Compliance${NC} — ${YELLOW}22d to release${NC} ─────────────────────────────
       ${RED}✗${NC} acme-core-engine-v3-5-ea-1                   (4 violations, ${RED}NO exception${NC})
-      ${RED}✗${NC} rhai-on-openshift-chart-v3-5-ea-1        (16 violations, ${RED}NO exception${NC})
-      ${RED}✗${NC} rhai-on-xks-chart-v3-5-ea-1              (16 violations, ${RED}NO exception${NC})
+      ${RED}✗${NC} acme-openshift-chart-v3-5-ea-1        (16 violations, ${RED}NO exception${NC})
+      ${RED}✗${NC} acme-xks-chart-v3-5-ea-1              (16 violations, ${RED}NO exception${NC})
       ${RED}✗${NC} acme-fbc-fragment-v3-5-ea-1             (22 violations, ${RED}NO exception${NC})
     Summary: ${RED}4 blocking${NC}
 
@@ -569,9 +569,9 @@ OUTPUT_EXPORT_JIRA=$(cat <<ENDOFOUTPUT
 
   * Component: acme-api-registry-sync-v3-5-ea-1
   * Application: acme-v2-1-ea-1
-  * Repository: model-registry (github.com/acme-org/model-registry)
+  * Repository: model-registry (github.com/acme-org/api-registry)
   * Triggering commit: eca2830b by jsmith
-  * Commit message: Fix missing rh-model-signing package
+  * Commit message: Fix missing dependency-signing package
 
   ${DIM}h3. Recommended Fix (AI-generated, 78% confidence)${NC}
 
@@ -634,7 +634,7 @@ intro_apps() {
     echo ""
     type_cmd "ic get apps"
     show_output "$OUTPUT_APPS"
-    narrate "30 RHOAI versions tracked. The current one (${GREEN}✓${NC}${DIM}) has 148 failure records."
+    narrate "30 application versions tracked. The current one (${GREEN}✓${NC}${DIM}) has 148 failure records."
     narrate "Switch versions with: ic config set-app <name>"
     advance 5
 }

@@ -30,15 +30,15 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
                                    │
   ┌──────────┐    ┌────────────────▼────────────────┐    ┌───────────┐
   │  ic CLI  │───▶│         Shared Data Layer       │◀───│ REST API  │
-  └──────────┘    │  Repositories · Analyzers ·     │    │  /docs    │
-                  │  Collectors · Fixers · Clients   │    └───────────┘
+  └──────────┘    │  Repositories · Analyzers ·     │    │           │
+                  │  Collectors · Fixers · Clients   │   └───────────┘
                   └────────────────┬────────────────┘
                                    │
                   ┌────────────────▼────────────────┐
-                  │          PostgreSQL              │
-                  │  build_failures · conforma ·     │
-                  │  ai_analysis · error_patterns ·  │
-                  │  component_health · releases     │
+                  │          PostgreSQL             │
+                  │  build_failures · conforma ·    │
+                  │  ai_analysis · error_patterns · │
+                  │  component_health · releases    │
                   └─────────────────────────────────┘
                                    ▲
                   ┌────────────────┴────────────────┐
@@ -60,7 +60,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 
 ### Prerequisites
 
-- Python 3.9+ and pip
+- Python 3.11+
 - Docker or Podman
 - [Task](https://taskfile.dev/) — install: `go install github.com/go-task/task/v3/cmd/task@latest`
 
@@ -68,8 +68,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 
 ```bash
 cp .env.example .env              # edit with your namespace and app name
-task db:start && task db:migrate  # start PostgreSQL and apply schema
-pip install -r src/requirements.txt
+task up                           # starts PostgreSQL + server, applies schema
 ./ic get apps                     # verify — should list your application
 ```
 
