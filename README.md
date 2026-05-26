@@ -1,326 +1,219 @@
-# CI Auto-Healing
+# CI AutoHealing
 
-Monitors Konflux CI/CD pipeline failures, diagnoses root causes with AI, generates fixes, and manages Jira communication — all from the command line.
+**Autonomous Multi-Agent AI for CI Observability & Self-Remediation**
 
----
-
-## How it works
-
-```
-Konflux pipeline fails
-        │
-        ▼  every 20 min (cron)
-┌─────────────────────────────────────────────────────────────────┐
-│  collect-comprehensive.sh                                       │
-│  Step 1  collect_comprehensive.py   → build_failures           │
-│  Step 2  sync_component_status.py   → mark resolved / passed   │
-│  Step 2.5 verify_fixes.py          → check PR merged + green   │
-│  Step 3  check_sync_status.py       → sync cache               │
-│  Step 4  check_conforma_status.py   → conforma pass/fail       │
-│  Step 5  collect_conforma.py        → violation details        │
-│  Step 6  collect_commit_context.py  → diff + Dockerfile        │
-│  Step 7  analyze_failures.py        → AI root cause            │
-│  Step 7.5 auto_fix.py             → autonomous PRs (opt-in)   │
-│  Step 8  collect_doc_context.py     → enrich error patterns    │
-│  Step 9  poll_jira_comments.py      → Jira reply drafts        │
-└─────────────────────────────────────────────────────────────────┘
-        │
-        ▼  you
-┌───────────────────┐
-│   ic CLI          │  ic get alerts → ic 1 → ic fix 1
-└───────────────────┘
-        │
-        ├──► PR      branch → commit → GitHub PR → verify next cron
-        ├──► Jira    generate ticket → edit → POST (--execute)
-        └──► Slack   generate message → clipboard → paste
-```
-
-Steps 6 (commit context), 7 (AI analysis), 7.5 (autonomous), and 9 (Jira polling) are optional — they require additional credentials and are skipped gracefully if not configured.
+CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, detects build failures and policy violations, uses LLMs to diagnose root causes, and autonomously generates fix PRs — all orchestrated through a kubectl-style CLI, an MCP server for AI agents, and a REST API.
 
 ---
 
-## Setup
+## Key Features
 
-### 1. Start the database
+- **Continuous Monitoring** — Cron-driven pipeline scans every 20 minutes across multiple application versions, tracking build failures, Conforma (Enterprise Contract) policy violations, and release readiness.
+- **AI Root Cause Analysis** — LLM-powered failure classification with confidence scoring, actionable fix recommendations, and automatic error pattern learning.
+- **Autonomous Fix PRs** — High-confidence failures get automatically fixed via GitHub PRs, with safety gates (confidence >= 0.95, no prior attempts, branch deduplication) and verification on the next cron cycle.
+- **CVE Scanning** — Parallel SARIF vulnerability scanning across all container images in a snapshot, surfacing critical and high CVEs before release.
+- **Jira Integration** — Create tickets, monitor comments, draft AI replies, and track resolution — all from the CLI.
+- **MCP Server** — 40+ tools accessible by Claude Code, GitHub Copilot, or any MCP-compatible AI agent for interactive triage sessions.
+- **Pattern Learning** — An `error_patterns` table accumulates institutional knowledge from repeated analyses, improving diagnosis accuracy over time.
+- **Three Interfaces, One Data Layer** — CLI, MCP server, and REST API all share the same repositories and PostgreSQL database.
 
-```bash
-task db:start
+---
+
+## Architecture
+
 ```
-
-### 2. Apply migrations
-
-```bash
-task db:migrate
-```
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env` and fill in values. The file is sourced by `ic` automatically.
-
-```bash
-# Always required
-NAMESPACE=my-tenant
-APPLICATION_NAME=my-app
-
-# Required for AI analysis (choose one)
-LLM_PROVIDER=vertex_ai
-ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project    # Vertex AI (uses GCP ADC)
-# or
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...                  # Direct API
-
-# Required for PR creation and commit context
-GITHUB_TOKEN=ghp_...
-
-# Required for Jira ticket creation and comment monitoring
-JIRA_EMAIL=you@example.com
-JIRA_TOKEN=...
-JIRA_URL=https://your-jira.example.com
-JIRA_PROJECT=MYPROJECT
-```
-
-Full variable reference is at the bottom of this file.
-
-### 4. Install the cron job
-
-```bash
-./cron/install-cron.sh   # every 20 minutes
-```
-
-### 5. Verify
-
-```bash
-ic stats
+                    ┌─────────────────────────────────┐
+                    │        AI Agents                │
+                    │  Claude Code · Copilot · Custom │
+                    └──────────────┬──────────────────┘
+                                   │ MCP protocol
+                                   │
+  ┌──────────┐    ┌────────────────▼────────────────┐    ┌───────────┐
+  │  ic CLI  │───▶│         Shared Data Layer       │◀───│ REST API  │
+  └──────────┘    │  Repositories · Analyzers ·     │    │  /docs    │
+                  │  Collectors · Fixers · Clients   │    └───────────┘
+                  └────────────────┬────────────────┘
+                                   │
+                  ┌────────────────▼────────────────┐
+                  │          PostgreSQL              │
+                  │  build_failures · conforma ·     │
+                  │  ai_analysis · error_patterns ·  │
+                  │  component_health · releases     │
+                  └─────────────────────────────────┘
+                                   ▲
+                  ┌────────────────┴────────────────┐
+                  │     Cron Pipeline (20 min)      │
+                  │  Collect → Sync → Analyze →     │
+                  │  Auto-fix → Verify → Enrich     │
+                  └─────────────────────────────────┘
+                                   ▲
+                  ┌────────────────┴────────────────┐
+                  │       Konflux Platform          │
+                  │  Tekton · KubeArchive · Quay ·  │
+                  │  GitHub · GitLab · Jira         │
+                  └─────────────────────────────────┘
 ```
 
 ---
 
-## Daily operator workflow
+## Quick Start
 
-### Morning triage
+### Prerequisites
+
+- Python 3.9+ and pip
+- Docker or Podman
+- [Task](https://taskfile.dev/) — install: `go install github.com/go-task/task/v3/cmd/task@latest`
+
+### Setup
 
 ```bash
-ic get alerts            # unified view: build failures + conforma violations
-ic get alerts --all      # same, across all application versions
+cp .env.example .env              # edit with your namespace and app name
+task db:start && task db:migrate  # start PostgreSQL and apply schema
+pip install -r src/requirements.txt
+./ic get apps                     # verify — should list your application
 ```
 
-The alert view shows:
-- Build failures: component name, consecutive failure count, last failed date, AI category
-- Conforma violations: component, scenario, violation/warning counts, linked Jira key
+Minimum `.env` config:
 
 ```bash
-ic 1                     # inspect failure #1 in detail
-ic describe component odh-mlmd-grpc-server-v3-4  # by name
-ic why odh-mlmd-grpc-server-v3-4                 # AI root cause only
+NAMESPACE=your-tenant
+APPLICATION_NAME=your-app-name
 ```
 
-### Conforma standup report
+Everything else (AI, Jira, GitHub) is optional and will be skipped gracefully if not configured.
+
+---
+
+## Try It Without a Cluster
+
+The interactive demo uses pre-recorded output with synthetic data — no database, cluster, or credentials needed:
 
 ```bash
-ic conforma report           # full table: all versions
-ic conforma report 3.4       # filter to acme-v2-0
-ic conforma report 3.4 3.5   # multiple versions side by side
-ic conforma report --summary # summary row only
+./demo.sh              # press Enter to advance through each section
+./demo.sh --auto       # auto-play with timed delays (good for recordings)
 ```
 
-### Check what was resolved
+Covers: alert dashboard, failure inspection, AI analysis, Conforma violations, Jira/Slack export, release readiness, and more.
+
+---
+
+## Daily Workflow
+
+### Triage
 
 ```bash
-ic stats                 # overall counts
-ic stats daily           # failures by day
-ic resolved              # recently resolved components
-ic working               # components where last build passed
+ic get alerts                 # all current failures and violations
+ic 1                          # inspect failure #1 in detail
+ic why my-component-v3-4      # AI root cause summary
+```
+
+### Fix
+
+```bash
+ic fix 1                      # interactive: AI analysis → action menu
+ic fix 1 --execute            # push fix PR to GitHub
+ic get fixes                  # track all fix attempts
+```
+
+### Report
+
+```bash
+ic export 1 jira              # generate Jira ticket
+ic export 1 slack             # generate Slack message
+ic conforma report            # Conforma standup table
 ```
 
 ---
 
-## Fixing a failure
+## Claude Code Integration
 
-`ic fix` is the main triage command. It shows the AI analysis and lets you choose what to do.
+### MCP Server
 
-```bash
-ic fix 1                              # by number from ic get alerts
-ic fix odh-mlmd-grpc-server-v3-4      # by name
-```
-
-The interactive menu shows:
-
-```
-[1] Create GitHub PR (auto-fix)
-[2] Create Jira ticket
-[3] Generate Slack message
-[q] Quit
-```
-
-### Option 1: GitHub PR
-
-Available when AI analysis says `can_auto_fix=true`. The fixer generates a branch, commits the change, and shows a diff.
-
-```
-→ dry-run by default. Review the diff, then re-run with --execute to push.
-```
+The MCP server exposes 40+ tools for AI agents to query failures, run analysis, and generate exports programmatically.
 
 ```bash
-ic fix 1 --execute       # push branch and open PR
+task mcp:setup                # generate .mcp.json for Claude Code
+task serve:mcp                # run MCP server (stdio)
+task serve                    # run REST API + MCP SSE on port 8000
 ```
 
-PR branches follow the format `ci-autohealing/conforma/<component>/<id>` or `ci-autohealing/build/<component>/<id>`. After the next cron run, `verify_fixes.py` checks if the PR merged and the subsequent build passed, and marks the failure resolved.
+### Slash Commands
 
-Track all fix attempts:
+The project includes custom Claude Code slash commands for guided workflows. Open the project with `claude` and use:
 
-```bash
-ic get fixes             # last 30 days
-ic get fixes --all       # all time
-```
-
-### Option 2: Jira ticket
-
-The Jira export generates a fully-formatted ticket description with failure details, AI analysis, reproduction steps, and links.
-
-```bash
-# Preview only (no API call)
-ic export 1 jira
-ic export odh-mlmd-grpc-server-v3-4 jira
-
-# Copy to clipboard
-ic export 1 jira --clipboard
-
-# For conforma violations specifically (also supports --execute to POST)
-ic jira create conforma odh-mlmd-grpc-server-v3-4             # dry-run
-ic jira create conforma odh-mlmd-grpc-server-v3-4 --execute   # POST to Jira
-```
-
-Link an existing Jira key to a failure in the DB:
-
-```bash
-ic jira link odh-mlmd-grpc-server-v3-4 MYPROJECT-12345
-```
-
-View all linked tickets with live status:
-
-```bash
-ic get jira
-ic get jira MYPROJECT-12345   # single ticket details
-ic describe jira MYPROJECT-12345
-```
-
-### Option 3: Slack message
-
-Generates a polite mrkdwn message asking the component team for help. Includes the Jira link, failure summary, and Konflux link.
-
-```bash
-ic export 1 slack
-ic export 1 slack --jira MYPROJECT-12345    # include Jira link
-ic export 1 slack --clipboard              # copy instead of print
-
-# Conforma-specific
-ic export conforma odh-mlmd-grpc-server-v3-4 slack --jira MYPROJECT-99999
-```
-
-Paste the output directly into the team's Slack channel. The message tags the correct team handle from the RHOAI component data YAML.
+| Command | Purpose |
+|---------|---------|
+| `/triage [component]` | Investigate a failure — auto-routes to build or Conforma |
+| `/triage-build <component>` | Deep-dive into build failure: logs, diffs, fix options |
+| `/triage-conforma <component>` | Policy violation analysis: rules, exceptions, remediation |
+| `/analyze <N or name>` | AI root cause analysis with evidence |
+| `/release` | Daily release workflow: readiness, blockers, fix, report |
+| `/status` | CI health briefing: trends, costs, pattern summary |
+| `/export <N> [format]` | Generate Jira ticket, Slack message, or Markdown |
+| `/demo` | Interactive guided tour of all ic features |
+| `/konflux` | Look up Konflux platform documentation |
 
 ---
 
-## Jira comment monitoring
+## How It Works
 
-When a Jira ticket linked to a failure receives new comments, the cron job (step 9) drafts an AI reply and fires a desktop notification.
+Every 20 minutes, the cron pipeline runs:
 
-### View the inbox
+| Step | Script | What it does |
+|------|--------|-------------|
+| 1 | `collect_comprehensive.py` | Scan for new build failures |
+| 2 | `sync_component_status.py` | Mark resolved / passed components |
+| 3 | `verify_fixes.py` | Check if fix PRs merged and builds passed |
+| 4 | `check_conforma_status.py` | Update Conforma pass/fail status |
+| 5 | `collect_conforma.py` | Fetch violation details |
+| 6 | `collect_commit_context.py` | Gather diffs, Dockerfiles, Tekton configs |
+| 7 | `analyze_failures.py` | AI root cause analysis |
+| 8 | `auto_fix.py` | Generate fix PRs (autonomous, opt-in) |
+| 9 | `poll_jira_comments.py` | Draft replies to Jira comments |
+
+Steps 6-9 are optional — they require additional credentials and are skipped if not configured.
+
+Install the cron job:
 
 ```bash
-ic jira inbox            # unreviewed items with original comment + AI draft
+./cron/install-cron.sh
 ```
 
-### Refine a draft
+### Autonomous Mode
+
+When `AUTONOMOUS_MODE=true`, the system automatically creates fix PRs for high-confidence failures.
+
+Safety gates (all must pass): AI confidence >= 0.95, `can_auto_fix = true`, `requires_human_review = false`, no prior fix attempts, no existing fix branch. Rate-limited to 3 PRs per cron run.
+
+Enable only after manual validation of at least 5 fixes.
+
+---
+
+## Taskfile Commands
 
 ```bash
-ic jira inbox refine 3   # interactive refinement loop for item #3
-```
+task test              # run 223 tests
+task lint              # ruff linter
+task check             # lint + tests
 
-Give feedback in the prompt (e.g. "make it shorter", "add the PR link", "be more specific about the fix"). The LLM revises the draft. Repeat until satisfied.
+task db:start          # start PostgreSQL
+task db:migrate        # apply migrations
+task db:psql           # open psql shell
 
-When you exit, if you made revisions the system proposes an addition to the reply-drafting prompt (`prompts/jira_reply_drafter.md`) based on what it learned about your style. You approve or skip.
+task serve             # API + MCP server (port 8000)
+task serve:mcp         # MCP stdio (for Claude Code)
+task mcp:setup         # generate .mcp.json
 
-### Mark as done
-
-After posting the reply in Jira manually:
-
-```bash
-ic jira inbox done 3     # mark item 3 reviewed
+task up                # docker compose: server + db
+task down              # stop containers
+task deploy            # deploy to Kubernetes
+task deps:check        # verify all dependencies
 ```
 
 ---
 
-## AI management
-
-AI analysis runs automatically in cron step 7. These commands let you inspect and trigger it manually.
-
-```bash
-ic ai status                    # pending / analyzed / skipped counts
-ic ai stats                     # breakdown by category and date
-
-ic ai analyze odh-mlmd-grpc-server-v3-4   # analyze one component now
-ic ai analyze 1                            # by number
-ic ai analyze --all                        # all pending (slow)
-
-ic analyze odh-mlmd-grpc-server-v3-4      # alias
-ic why odh-mlmd-grpc-server-v3-4          # just the AI summary
-```
-
-### Error pattern library
-
-The system builds up institutional memory in an `error_patterns` table. Patterns accumulate from repeated analyses of the same failure category and are injected into the prompt on re-analysis.
-
-```bash
-ic patterns list              # known patterns with frequency
-ic patterns show dependency_issue
-```
-
----
-
-## Autonomous mode (opt-in)
-
-When `AUTONOMOUS_MODE=true`, cron step 7.5 automatically creates PRs for high-confidence conforma violations without human approval.
-
-**Safety gates** — all must pass before a PR is created:
-- `can_auto_fix = TRUE` and `requires_human_review = FALSE` (from AI analysis)
-- `confidence_score >= 0.95`
-- `ai_fix_attempted = FALSE` (not already tried)
-- No existing `ci-autohealing/conforma/<component>/<id>` branch on GitHub
-
-**Rate limit:** 3 PRs per cron run (configurable with `AUTO_FIX_MAX_PER_RUN`).
-
-**How to enable** (only after manual validation):
-
-```bash
-# 1. Run ic fix manually on at least 5 conforma violations across two versions
-# 2. Review the generated PRs — confirm the diffs are correct
-# 3. Enable in .env:
-AUTONOMOUS_MODE=true
-```
-
-To disable: remove `AUTONOMOUS_MODE=true` or set it to `false`.
-
-The `attempted_by` column in `resolution_attempts` records `'autonomous'` vs `'ic-fix'` so you can see which PRs came from which path.
-
----
-
-## Export formats
-
-All export subcommands accept either a number (from `ic get alerts`) or a component name.
-
-```bash
-ic export 1 jira         # Jira ticket description (ADF format)
-ic export 1 slack        # Slack mrkdwn message
-ic export 1 markdown     # GitHub-flavored Markdown
-ic export 1 json         # Raw JSON (for scripting)
-
-ic export 1 --clipboard  # copy output to clipboard (any format)
-```
-
----
-
-## Full command reference
+<details>
+<summary><strong>Full CLI Reference</strong></summary>
 
 ### Inspection
 
@@ -328,24 +221,20 @@ ic export 1 --clipboard  # copy output to clipboard (any format)
 ic get alerts                              # unified: build + conforma
 ic get alerts --all                        # all application versions
 ic get alerts --date 2026-05-10            # failures on a specific date
-ic get alerts --from 2026-05-01 --to 2026-05-10   # changes in a range
 ic get components                          # components with active build failures
 ic get conforma                            # conforma violation summary
 ic get exceptions                          # policy exceptions expiring soon
 ic get pipelineruns [--limit N]            # recent PipelineRun failures
-ic get pipelinerun <name>                  # single PipelineRun details
 ic get apps                                # available application versions
-ic get failures [--limit N]                # raw failure list
 ic get vulnerabilities [--component X]     # CVE summary from SARIF scans
 ```
 
-### Detail views
+### Detail Views
 
 ```bash
-ic <N>                                     # shortcut: Nth component from alerts
+ic <N>                                     # Nth component from alerts
 ic describe component <name> [--log]       # full build failure + logs
 ic describe conforma <name>                # conforma violation details
-ic describe pipelinerun <name>             # PipelineRun details + logs
 ic history <component>                     # full build history
 ```
 
@@ -353,199 +242,131 @@ ic history <component>                     # full build history
 
 ```bash
 ic fix <N|name>                            # interactive: AI → action menu
-ic fix <N|name> --execute                  # skip confirmation, push PR
+ic fix <N|name> --execute                  # push PR directly
 ic get fixes                               # PR fix attempts (last 30 days)
-ic get fixes --all                         # all time
 ```
 
 ### AI
 
 ```bash
-ic ai analyze <N|name>                     # analyze one failure now
+ic ai analyze <N|name>                     # analyze one failure
 ic ai analyze --all                        # all pending
 ic ai status                               # pending / analyzed / skipped
-ic ai stats                                # by category and date
 ic why <name>                              # AI root cause (quick view)
-ic analyze <name>                          # full AI analysis (alias)
-ic errors <name>                           # extract raw error messages
-ic triage                                  # components where last build = failed
+ic patterns list                           # error pattern library
+ic patterns show <name>                    # pattern details
 ```
 
 ### Conforma
 
 ```bash
-ic get conforma                            # violation summary
 ic conforma report [version...]            # daily standup table
-ic conforma report 3.4                     # filter by version
-ic conforma report 3.4 3.5                 # multiple versions
 ic conforma report --summary               # summary row only
 ic describe conforma <name>                # violation details
 ic conforma history <name>                 # historical violations
-ic conforma csv                            # dump violations as CSV
-ic get exceptions                          # expiring/expired policy exceptions
+ic get exceptions                          # expiring policy exceptions
 ```
 
 ### Jira
 
 ```bash
-ic get jira [key]                          # linked tickets with live status
-ic describe jira <key>                     # full ticket detail
-ic jira link <component> <key>             # link existing ticket to component
-ic jira create conforma <name>             # dry-run: preview ticket
-ic jira create conforma <name> --execute   # POST ticket to Jira
-ic jira inbox                              # unreviewed comment drafts
-ic jira inbox refine <N>                   # refine draft N interactively
-ic jira inbox done <N>                     # mark item reviewed
+ic get jira [key]                          # linked tickets with status
+ic jira link <component> <key>             # link ticket to component
+ic jira create conforma <name>             # preview ticket
+ic jira create conforma <name> --execute   # POST to Jira
+ic jira inbox                              # unreviewed AI reply drafts
+ic jira inbox refine <N>                   # refine draft interactively
 ```
 
 ### Export
 
 ```bash
-ic export <N|name> jira
-ic export <N|name> slack [--jira KEY]
-ic export <N|name> markdown
-ic export <N|name> json
-ic export <N|name> <format> --clipboard
+ic export <N|name> jira                    # Jira ticket format
+ic export <N|name> slack [--jira KEY]      # Slack mrkdwn
+ic export <N|name> markdown                # GitHub Markdown
+ic export <N|name> json                    # raw JSON
+ic export <N|name> <format> --clipboard    # copy to clipboard
 ```
 
 ### Releases
 
 ```bash
 ic get releases                            # recent Release CRs
-ic release status                          # pipeline checklist (stage → prod)
-ic release readiness                       # go/no-go verdict with blockers
-ic get policy-gap                          # stage vs prod policy differences
-ic dashboard                               # operational metrics overview
-```
-
-### Stats and history
-
-```bash
-ic stats                                   # overall counts
-ic stats daily                             # by day
-ic stats resolved                          # resolved failures
-ic resolved                                # recently resolved components
-ic working                                 # components where last build passed
-ic patterns list                           # error pattern library
-ic patterns show <name>                    # full pattern + doc excerpt
+ic release status                          # pipeline checklist
+ic release readiness                       # go/no-go verdict
+ic dashboard                               # operational metrics
 ```
 
 ### Configuration
 
 ```bash
 ic config                                  # show current config
-ic config set-app acme-v2-1-ea-1          # switch APPLICATION_NAME
-ic get apps                                # available versions (alias: ic apps)
+ic config set-app my-app-v2-1              # switch application
 ic db status                               # check DB connection
-ic db query "SELECT ..."                   # run custom SQL
 ```
+
+</details>
+
+<details>
+<summary><strong>Configuration</strong></summary>
+
+Copy `.env.example` to `.env`. The file is sourced by `ic` automatically.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NAMESPACE` | Yes | Kubernetes namespace for your tenant |
+| `APPLICATION_NAME` | Yes | Konflux application name (e.g., `my-app-v2-1`) |
+| `KNOWN_APPLICATIONS` | No | Space-separated list for `--all` queries |
+| `DB_HOST` / `DB_PORT` | No | PostgreSQL connection (default: `localhost:5432`) |
+| `GITHUB_TOKEN` | For fixes | GitHub token for commit context and PR creation |
+| `LLM_PROVIDER` | For AI | `anthropic` or `vertex_ai` |
+| `ANTHROPIC_API_KEY` | For AI | Direct Anthropic API key |
+| `JIRA_URL` / `JIRA_TOKEN` | For Jira | Jira instance and API token |
+| `KUBEARCHIVE_URL` | For logs | KubeArchive API endpoint |
+| `KONFLUX_UI_BASE` | For links | Konflux UI base URL |
+| `QUAY_ORG` | For CVEs | Quay.io organization for container images |
+| `AUTONOMOUS_MODE` | No | `true` to enable autonomous fix PRs (default: `false`) |
+
+See `.env.example` for the full list with descriptions.
+
+</details>
+
+<details>
+<summary><strong>Project Structure</strong></summary>
+
+```
+.
+├── ic                        # Main CLI (bash wrapper → Python)
+├── ic-config.sh              # Configuration defaults
+├── Taskfile.yml              # Task runner: db, serve, test, deploy
+├── docker-compose.yml        # Local dev: server + PostgreSQL
+├── demo.sh                   # Standalone interactive demo
+│
+├── src/
+│   ├── cli/                  # CLI implementation (Click)
+│   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
+│   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
+│   ├── analyzers/            # LLM analyzers (build, conforma, release)
+│   ├── fixers/               # Fix generators (PR, Jira, verification)
+│   ├── collectors/           # Data collectors (failures, violations)
+│   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay)
+│   ├── repositories/         # Database repositories (SQL)
+│   ├── proactive/            # Health monitoring and CVE warnings
+│   ├── tests/                # Test suite (223 tests)
+│   └── serve.py              # Unified server entry point
+│
+├── prompts/                  # LLM system prompts (editable without code changes)
+├── db/migrations/            # PostgreSQL schema migrations (001–015)
+├── cron/                     # Cron scripts for automated collection
+├── k8s/                      # Kubernetes deployment manifests
+├── .claude/commands/         # Claude Code slash commands (/triage, /release, etc.)
+└── .env.example              # Configuration template
+```
+
+</details>
 
 ---
 
-## Server mode
+## License
 
-The same data is available through three interfaces:
-
-```bash
-task serve            # REST API + MCP SSE on port 8000
-task serve:api        # REST API only
-task serve:mcp        # MCP stdio (for Claude Code)
-```
-
-- **CLI** (`./ic`) — daily triage, interactive fixes
-- **MCP server** — Claude Code accesses tools directly (32 tools)
-- **REST API** — OpenAPI docs at `/docs`, for dashboards and automation
-
-Generate the MCP config for Claude Code:
-
-```bash
-task mcp:setup        # creates .mcp.json
-```
-
----
-
-## Demo
-
-Run the pre-recorded interactive demo (no database or cluster required):
-
-```bash
-./demo.sh             # interactive — press Enter to advance
-./demo.sh --auto      # auto-play with timed delays
-```
-
----
-
-## Environment variables
-
-```bash
-# Database
-DB_CONTAINER=ci-autohealing-db            # Docker container name
-DB_NAME=konflux_monitoring
-DB_USER=postgres
-PGPASSWORD=admin
-
-# Kubernetes / Konflux
-NAMESPACE=my-tenant
-APPLICATION_NAME=my-app
-KNOWN_APPLICATIONS=my-app-v1 my-app-v2       # space-separated; used by --all
-
-# AI analysis
-LLM_PROVIDER=vertex_ai                    # or: anthropic
-ANTHROPIC_VERTEX_PROJECT_ID=...           # Vertex AI (GCP ADC)
-ANTHROPIC_API_KEY=...                     # Direct Anthropic API
-
-# Observability
-LANGFUSE_HOST=http://localhost:3000
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-
-# GitHub (commit context + PR creation)
-GITHUB_TOKEN=ghp_...
-
-# Jira
-JIRA_EMAIL=you@example.com
-JIRA_TOKEN=...
-JIRA_URL=https://your-jira.example.com
-JIRA_PROJECT=MYPROJECT
-
-# Autonomous mode
-AUTONOMOUS_MODE=false                     # set true only after manual validation
-AUTO_FIX_MAX_PER_RUN=3                    # max PRs per cron run
-AUTO_FIX_MIN_CONFIDENCE=0.95              # min AI confidence score
-
-# Component data (team handle lookup)
-COMPONENT_DATA_URL=                       # URL to component-data YAML
-COMPONENT_DATA_CACHE=/tmp/component-data.yaml
-COMPONENT_DATA_TTL=86400                  # seconds (24h)
-
-# KubeArchive / Konflux UI
-KUBEARCHIVE_URL=                          # KubeArchive API endpoint
-KONFLUX_UI_BASE=                          # Konflux UI base URL
-```
-
----
-
-## Key files
-
-| Path | Purpose |
-|------|---------|
-| `ic` | Main CLI (bash wrapper delegating to Python) |
-| `ic-config.sh` | Configuration defaults (sourced by `ic`) |
-| `Taskfile.yml` | DevOps tasks: `task db:start`, `task db:migrate`, `task check` |
-| `src/serve.py` | Unified server entry point (REST API + MCP SSE) |
-| `src/mcp_server/` | MCP server tools and models |
-| `src/api/` | REST API (FastAPI) — same data as MCP tools |
-| `src/cli/` | Python CLI implementation (`ic.py` → `cli/main.py`) |
-| `src/analyzers/` | LLM analyzers (build failures, conforma, release, scenarios) |
-| `src/fixers/` | PR/Jira fix generator, autonomous runner, verification loop |
-| `src/clients/` | External API clients (Jira, GitHub, GitLab, Pyxis, K8s, LLM) |
-| `src/repositories/` | All DB repository classes |
-| `src/collectors/` | Data collectors (build failures, conforma violations) |
-| `src/cron/` | Cron scripts (batch analysis, context enrichment) |
-| `src/tests/` | Test suite (221 tests) |
-| `prompts/*.md` | LLM system prompts (edit without code changes) |
-| `db/migrations/` | Schema migrations (001–010) |
-| `docs/ARCHITECTURE.md` | System architecture and data flow |
-| `docker-compose.yml` | Local dev: server + PostgreSQL |
-| `k8s/` | Kubernetes deployment manifests |
-| `.env` | Local secrets (not committed) |
+MIT License — see [LICENSE](LICENSE) for details.
