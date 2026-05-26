@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Query advisory status from Pyxis.
 
 Fetches advisory lifecycle data (QE, REL_PREP, SHIPPED_LIVE) from Pyxis

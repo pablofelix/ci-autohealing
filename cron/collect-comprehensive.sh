@@ -50,7 +50,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
         echo "[2.5] Verifying fix resolution attempts..."
         echo "========================================================================"
         echo ""
-        python3.11 fixers/verify_fixes.py 2>&1 || {
+        python3 fixers/verify_fixes.py 2>&1 || {
             echo "Fix verification failed (non-critical - continuing)"
         }
     else
@@ -89,7 +89,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
         echo "[6/7] Collecting commit context from GitHub..."
         echo "========================================================================"
         echo ""
-        python3.11 collect_commit_context.py 2>&1 || {
+        python3 collect_commit_context.py 2>&1 || {
             echo "Commit context collection failed (non-critical - continuing)"
         }
     else
@@ -98,14 +98,13 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
     fi
 
     # Step 7: AI analysis (optional - only if LLM_PROVIDER is set)
-    # Note: Uses python3.11 for anthropic SDK compatibility (requires Python 3.7+)
     if [ -n "$LLM_PROVIDER" ]; then
         echo ""
         echo "========================================================================"
         echo "[7/8] Running AI analysis on new failures..."
         echo "========================================================================"
         echo ""
-        python3.11 analyze_failures.py 2>&1 || {
+        python3 analyze_failures.py 2>&1 || {
             echo "AI analysis failed (non-critical - continuing)"
         }
     else
@@ -122,7 +121,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
         echo "[7.5/8] Running autonomous conforma fix (AUTONOMOUS_MODE=true)..."
         echo "========================================================================"
         echo ""
-        python3.11 fixers/auto_fix.py 2>&1 || {
+        python3 fixers/auto_fix.py 2>&1 || {
             echo "Autonomous fix failed (non-critical - continuing)"
         }
     fi
@@ -135,7 +134,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
     echo "[8/8] Refreshing doc context for error patterns..."
     echo "========================================================================"
     echo ""
-    python3.11 collect_doc_context.py 2>&1 || {
+    python3 collect_doc_context.py 2>&1 || {
         echo "Doc context collection failed (non-critical - continuing)"
     }
 
@@ -146,7 +145,7 @@ LOG_FILE="$LOG_DIR/collect-comprehensive-${TIMESTAMP}.log"
         echo "[9/9] Polling Jira tickets for new comments..."
         echo "========================================================================"
         echo ""
-        python3.11 poll_jira_comments.py 2>&1 || {
+        python3 poll_jira_comments.py 2>&1 || {
             echo "Jira comment polling failed (non-critical - continuing)"
         }
     else

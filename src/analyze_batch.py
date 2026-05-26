@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Batch analysis CLI - entry point for automated cron jobs.
 
 Usage:

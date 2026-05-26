@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Autonomous fix runner for conforma violations.
 
 Called from cron step 7.5 when AUTONOMOUS_MODE=true. Queries for conforma
@@ -13,7 +13,7 @@ Safety gates (all must pass before a PR is created):
   - No open ci-autohealing branch for this violation on GitHub
 
 Usage (from cron):
-  python3.11 fixers/auto_fix.py
+  python3 fixers/auto_fix.py
 
 Env vars:
   AUTONOMOUS_MODE          Set to "true" to enable (required)

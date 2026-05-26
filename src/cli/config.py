@@ -36,16 +36,18 @@ def app_to_reporter_branch(app_name):
     # type: (str) -> str
     """Convert APPLICATION_NAME to conforma-reporter branch name.
 
-    acme-v2-0 -> acme-3.4, acme-v2-0-ea-1 -> acme-3.4-ea.1
+    product-v3-4 -> product-3.4, product-v3-4-ea-1 -> product-3.4-ea.1
     """
-    version = app_name.replace('rhoai-v', '', 1)
-    parts = version.split('-', 2)
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        version = '{}.{}'.format(parts[0], parts[1])
-        if len(parts) > 2:
-            rest = parts[2].replace('-', '.')
-            version = '{}-{}'.format(version, rest)
-    return 'rhoai-{}'.format(version)
+    import re
+    m = re.match(r'(.+)-v(\d+)-(\d+)(.*)', app_name)
+    if not m:
+        return app_name
+    product, major, minor, rest = m.group(1), m.group(2), m.group(3), m.group(4)
+    version = '{}.{}'.format(major, minor)
+    if rest:
+        suffix = rest[1:] if rest.startswith('-') else rest
+        version += '-' + suffix.replace('-', '.') if suffix else ''
+    return '{}-{}'.format(product, version)
 
 
 def conforma_scenario_label(scenario):

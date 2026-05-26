@@ -1,7 +1,5 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Entry point for AI analysis of build failures.
-
-Note: Requires Python 3.7+ for anthropic SDK. Uses python3.11 explicitly.
 
 Thin shim that loads config and runs BuildFailureAnalyzer.
 Follows the same pattern as collect_comprehensive.py and sync_component_status.py.

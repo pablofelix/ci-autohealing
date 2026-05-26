@@ -6,7 +6,7 @@ as the primary source for EC policy exception data.
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -291,3 +291,48 @@ class KonfluxClient:
                 'target': target,
             })
         return results
+
+    def get_dependency_updates(self, component_filter=None, hours=48):
+        # type: (Optional[str], int) -> List[Dict[str, Any]]
+        data = self._get('dependencyupdatechecks')
+        if not data:
+            return []
+        items = data.get('items', [])
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=hours)
+        results = []
+        for item in items:
+            meta = item.get('metadata', {})
+            ts = meta.get('creationTimestamp', '')
+            if ts:
+                try:
+                    created = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+                    created = created.replace(tzinfo=timezone.utc)
+                    if created < cutoff:
+                        continue
+                except ValueError:
+                    pass
+            update = self.extract_dependency_update(item)
+            if component_filter and update.get('component') != component_filter:
+                continue
+            results.append(update)
+        results.sort(key=lambda u: u.get('created', ''), reverse=True)
+        return results
+
+    @staticmethod
+    def extract_dependency_update(duc):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
+        meta = duc.get('metadata', {})
+        spec = duc.get('spec', {})
+        status = duc.get('status', {})
+        labels = meta.get('labels', {})
+        return {
+            'name': meta.get('name', ''),
+            'component': labels.get('appstudio.openshift.io/component', ''),
+            'package': spec.get('packageName', ''),
+            'from_version': spec.get('currentVersion', ''),
+            'to_version': spec.get('newVersion', ''),
+            'pr_url': status.get('pullRequestUrl', ''),
+            'merged': status.get('merged', False),
+            'created': meta.get('creationTimestamp', ''),
+        }

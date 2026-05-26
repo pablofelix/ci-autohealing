@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Entry point for AI analysis of release pipeline failures.
 
 Thin shim that loads config and runs ReleaseFailureAnalyzer.

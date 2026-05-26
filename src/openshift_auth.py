@@ -7,6 +7,8 @@ Uses the Python kubernetes client library to read kubeconfig instead of
 shelling out to the oc CLI.
 """
 
+import os
+
 import requests
 
 from kubernetes import client, config
@@ -60,8 +62,9 @@ def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
     try:
         _ensure_k8s_config()
         v1 = client.CoreV1Api()
+        ka_ns = os.environ.get('KUBEARCHIVE_NAMESPACE', 'product-kubearchive')
         cm = v1.read_namespaced_config_map(
-            'kubearchive-api-url', 'product-kubearchive',
+            'kubearchive-api-url', ka_ns,
             _request_timeout=10,
         )
         url = (cm.data or {}).get('URL', '')

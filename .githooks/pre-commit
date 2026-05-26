@@ -4,7 +4,7 @@
 
 set -e
 
-PYTHON=python3.11
+PYTHON="${PYTHON:-python3}"
 ROOT=$(git rev-parse --show-toplevel)
 COLLECTORS="$ROOT/src"
 RH_PYTHON="${RH_PRE_COMMIT_PYTHON:-${HOME}/.local/share/rh-pre-commit/venv/bin/python3}"

@@ -161,7 +161,7 @@ KUBEARCHIVE_API_URL=https://test-api.example.com
 
             # Check defaults
             self.assertEqual(config.db.host, "localhost")
-            self.assertEqual(config.db.port, 5433)
+            self.assertEqual(config.db.port, 5432)
             self.assertEqual(config.db.user, "postgres")
             self.assertEqual(config.db.password, "secret")
             self.assertEqual(config.db.database, "konflux_monitoring")

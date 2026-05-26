@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Fetch and cache documentation pages for known error patterns.
 
 Reads error_patterns rows that have a doc_url but missing or stale doc_context,

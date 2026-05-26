@@ -1,9 +1,10 @@
 """Proactive health monitoring — detect degrading components and pattern cascades.
 
 Uses component_health table and cross-app pattern data to generate warnings
-before failures fully manifest. No API cost — SQL queries only.
+before failures fully manifest. CVE checks query the OCI registry for SARIF data.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -37,6 +38,7 @@ class HealthMonitor:
         warnings.extend(self.get_degrading_components())
         warnings.extend(self.get_pattern_cascades())
         warnings.extend(self.get_repeat_failures())
+        warnings.extend(self.get_cve_warnings())
         return warnings
 
     def get_degrading_components(self):
@@ -171,6 +173,66 @@ class HealthMonitor:
                 evidence=r
             ))
         return warnings
+
+    def get_cve_warnings(self, application=None):
+        # type: (Optional[str],) -> List[HealthWarning]
+        """Check latest snapshot for critical/high CVEs via SARIF referrers."""
+        namespace = os.environ.get('NAMESPACE', '')
+        app_name = application or os.environ.get('APPLICATION_NAME', '')
+        if not namespace or not app_name:
+            return []
+
+        try:
+            from clients.konflux_client import KonfluxClient
+            from clients.registry_client import RegistryClient
+
+            kc = KonfluxClient(namespace=namespace)
+            snapshots = kc.get_snapshots(app_filter=app_name, limit=1)
+            if not snapshots:
+                return []
+
+            snapshot = snapshots[0]
+            components = snapshot.get('spec', {}).get('components', [])
+            rc = RegistryClient()
+            batch = rc.fetch_sarif_batch(components, timeout=60)
+
+            severity_map = {'error': 'critical', 'warning': 'high', 'note': 'medium'}
+            warnings = []
+            for name, results in batch.items():
+                if not results:
+                    continue
+
+                counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+                for r in results:
+                    sev = severity_map.get(r.get('level', ''), 'low')
+                    counts[sev] += 1
+
+                if counts['critical'] > 0:
+                    msg = '{} — {} critical, {} high CVEs in latest image'.format(
+                        name, counts['critical'], counts['high'])
+                    warnings.append(HealthWarning(
+                        component_name=name,
+                        application=app_name,
+                        signal_type='critical_cves',
+                        severity='critical',
+                        message=msg,
+                        evidence=counts,
+                    ))
+                elif counts['high'] >= 5:
+                    msg = '{} — {} high CVEs in latest image'.format(name, counts['high'])
+                    warnings.append(HealthWarning(
+                        component_name=name,
+                        application=app_name,
+                        signal_type='high_cves',
+                        severity='warning',
+                        message=msg,
+                        evidence=counts,
+                    ))
+
+            return warnings
+        except Exception as e:
+            logger.debug("CVE health check skipped: %s", e)
+            return []
 
     def get_component_health_summary(self, application=None):
         # type: (Optional[str],) -> List[Dict[str, Any]]

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Query IntegrationTestScenario CRDs from the K8s API.
 
 Outputs JSON to stdout for consumption by the ic shell script.

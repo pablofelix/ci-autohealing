@@ -26,6 +26,7 @@ class FailureSummary(BaseModel):
     has_logs: bool
     has_context: bool = False
     has_analysis: bool
+    possible_cause: Optional[str] = None
 
 
 class BuildFailureDetails(BaseModel):

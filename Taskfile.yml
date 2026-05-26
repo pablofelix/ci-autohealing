@@ -19,13 +19,13 @@ tasks:
     desc: Run test suite
     dir: "{{.SRC_DIR}}"
     preconditions:
-      - sh: command -v python3.11
+      - sh: command -v python3
         msg: |
-          python3.11 is not installed.
-          Install: sudo dnf install python3.11  (RHEL/Fedora)
-                   sudo apt install python3.11  (Debian/Ubuntu)
+          python3 is not installed.
+          Install: sudo dnf install python3  (RHEL/Fedora)
+                   sudo apt install python3  (Debian/Ubuntu)
     cmds:
-      - python3.11 -m pytest tests/ -x -q {{.CLI_ARGS}}
+      - python3 -m pytest tests/ -x -q {{.CLI_ARGS}}
 
   lint:
     desc: Run ruff linter
@@ -34,7 +34,7 @@ tasks:
       - sh: command -v ruff
         msg: |
           ruff is not installed.
-          Install: pip3.11 install ruff
+          Install: pip install ruff
     cmds:
       - ruff check . {{.CLI_ARGS}}
 
@@ -104,19 +104,19 @@ tasks:
     desc: Run API + MCP server locally
     dir: "{{.SRC_DIR}}"
     cmds:
-      - python3.11 -m serve --api --mcp-sse --port {{.PORT}}
+      - python3 -m serve --api --mcp-sse --port {{.PORT}}
 
   serve:api:
     desc: Run REST API only (local)
     dir: "{{.SRC_DIR}}"
     cmds:
-      - python3.11 -m serve --api --port {{.PORT}}
+      - python3 -m serve --api --port {{.PORT}}
 
   serve:mcp:
     desc: Run MCP server stdio (local, for Claude Desktop)
     dir: "{{.SRC_DIR}}"
     cmds:
-      - python3.11 -m serve --mcp
+      - python3 -m serve --mcp
 
   # ===========================================================================
   # Kubernetes
@@ -225,7 +225,7 @@ tasks:
     desc: Run database migrations
     dir: db
     cmds:
-      - python3.11 migrate.py
+      - python3 migrate.py
 
   db:psql:
     desc: Open psql shell
@@ -250,8 +250,8 @@ tasks:
           fi
         }
         echo "Required:"
-        check python3.11  "sudo dnf install python3.11"
-        check ruff        "pip3.11 install ruff"
+        check python3      "sudo dnf install python3"
+        check ruff         "pip install ruff"
         echo ""
         echo "Docker/Container:"
         check docker       "https://docs.docker.com/engine/install/"
@@ -286,13 +286,50 @@ tasks:
       - sh: command -v curl
         msg: "curl is required. Install: sudo dnf install curl"
     cmds:
-      - "curl -sf http://localhost:{{.PORT}}/health | python3.11 -m json.tool"
+      - "curl -sf http://localhost:{{.PORT}}/health | python3 -m json.tool"
 
   api:docs:
     desc: Open API docs in browser
     cmds:
       - echo "API docs available at http://localhost:{{.PORT}}/docs"
       - xdg-open "http://localhost:{{.PORT}}/docs" 2>/dev/null || open "http://localhost:{{.PORT}}/docs" 2>/dev/null || true
+
+  # ===========================================================================
+  # MCP
+  # ===========================================================================
+
+  mcp:setup:
+    desc: Generate .mcp.json for Claude Code MCP server
+    cmds:
+      - |
+        ROOT="$(pwd)"
+        cat > .mcp.json <<MCPEOF
+        {
+          "mcpServers": {
+            "ic": {
+              "type": "stdio",
+              "command": "bash",
+              "args": [
+                "-c",
+                "set -a && source ${ROOT}/.env && set +a && cd ${ROOT}/src && exec python3 -m mcp_server 2>/dev/null"
+              ],
+              "env": {}
+            },
+            "konflux-docs": {
+              "type": "stdio",
+              "command": "uvx",
+              "args": [
+                "--from", "mcpdoc", "mcpdoc",
+                "--urls", "Konflux:https://konflux-ci.dev/docs/llms.txt",
+                "--transport", "stdio"
+              ]
+            }
+          }
+        }
+        MCPEOF
+      - echo "✓ .mcp.json created. Restart Claude Code to pick up MCP servers."
+    status:
+      - test -f .mcp.json
 
   # ===========================================================================
   # Demo

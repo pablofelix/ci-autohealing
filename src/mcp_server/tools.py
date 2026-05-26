@@ -114,10 +114,28 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
         application: Which version to query. Use list_applications() to discover versions.
     """
     triage = _build_repo().get_triage_summary(application)
+
+    dep_updates = {}
+    try:
+        from clients.konflux_client import KonfluxClient
+        kc = KonfluxClient(namespace=NAMESPACE)
+        for u in kc.get_dependency_updates(hours=48):
+            comp = u.get('component', '')
+            if comp and comp not in dep_updates:
+                dep_updates[comp] = '{} {} → {}'.format(
+                    u.get('package', ''), u.get('from_version', ''), u.get('to_version', ''))
+    except Exception:
+        pass
+
     build_failures = []
     for comp in triage.get('failing_components', []):
+        component_name = comp['component']
+        cause = None
+        if component_name in dep_updates:
+            cause = 'dependency_update: {}'.format(dep_updates[component_name])
+
         build_failures.append(FailureSummary(
-            component=comp['component'],
+            component=component_name,
             status=comp.get('status', 'Failed'),
             error_type=comp.get('error_type'),
             first_seen=comp.get('first_detected_at', datetime.utcnow()),
@@ -126,6 +144,7 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
             has_logs=comp.get('has_logs', False),
             has_context=comp.get('has_context', False),
             has_analysis=comp.get('ai_analyzed', False),
+            possible_cause=cause,
         ))
 
     conforma_violations = []
@@ -566,6 +585,72 @@ def get_release_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]
 
 @mcp.tool()
 @async_tool
+def get_release_vulnerabilities(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get CVE vulnerability summary for the latest release/snapshot.
+
+    Queries SARIF scan results from the OCI registry for each component image,
+    aggregates by severity. Shows security posture of the release at a glance.
+
+    Args:
+        application: Which version to query
+    """
+    from clients.konflux_client import KonfluxClient
+    from clients.registry_client import RegistryClient
+
+    kc = KonfluxClient(namespace=NAMESPACE)
+    snapshots = kc.get_snapshots(app_filter=application, limit=1)
+    if not snapshots:
+        return {'application': application, 'error': 'No snapshots found'}
+
+    snapshot = snapshots[0]
+    snap_name = snapshot.get('metadata', {}).get('name', '')
+    components = snapshot.get('spec', {}).get('components', [])
+
+    rc = RegistryClient()
+    comp_results = []
+    totals = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    severity_map = {'error': 'critical', 'warning': 'high', 'note': 'medium'}
+
+    batch = rc.fetch_sarif_batch(components, timeout=60)
+
+    for name, results in batch.items():
+        if not results:
+            continue
+
+        counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        top_cves = []
+        for r in results:
+            sev = severity_map.get(r.get('level', ''), 'low')
+            counts[sev] += 1
+            if len(top_cves) < 5:
+                rule_id = r.get('ruleId', '')
+                if rule_id and rule_id not in top_cves:
+                    top_cves.append(rule_id)
+
+        for sev in totals:
+            totals[sev] += counts[sev]
+
+        comp_results.append({
+            'name': name,
+            **counts,
+            'total': sum(counts.values()),
+            'top_cves': top_cves,
+        })
+
+    comp_results.sort(key=lambda c: c.get('critical', 0) + c.get('high', 0), reverse=True)
+
+    return {
+        'application': application,
+        'snapshot': snap_name,
+        'components_scanned': len(comp_results),
+        'components_total': len(components),
+        **{'total_{}'.format(k): v for k, v in totals.items()},
+        'components': comp_results,
+    }
+
+
+@mcp.tool()
+@async_tool
 def get_test_configuration(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
     """Analyze IntegrationTestScenario configuration for an application.
 
@@ -628,14 +713,13 @@ def get_health_warnings(application: str = DEFAULT_APPLICATION) -> List[HealthWa
     monitor = HealthMonitor(get_pool())
     checks = monitor.run_checks()
     warnings = []
-    for check in checks:
-        for item in check.get('items', []):
-            warnings.append(HealthWarning(
-                type=check.get('check', 'unknown'),
-                component=item.get('component', ''),
-                message=item.get('message', str(item)),
-                severity=check.get('severity', 'warning'),
-            ))
+    for w in checks:
+        warnings.append(HealthWarning(
+            type=w.signal_type,
+            component=w.component_name,
+            message=w.message,
+            severity=w.severity,
+        ))
     return warnings
 
 

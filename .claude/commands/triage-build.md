@@ -82,9 +82,10 @@ First, check what analysis already exists:
 
 Run multiple `ic ai analyze` calls in parallel for different components to save time.
 
-**For failures that have AI analysis, query the full details:**
+**For failures that have AI analysis, query the details:**
+Call `mcp__ic__get_analysis(component=<component>)` to get the full AI analysis including category, confidence, root_cause, recommended_fix, and can_auto_fix. Or via CLI:
 ```bash
-./ic db query "SELECT component_name, failure_category, confidence_score, root_cause, recommended_fix, can_auto_fix FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.component_name = '<component>' ORDER BY a.created_at DESC LIMIT 1" 2>/dev/null
+./ic why <component-name> 2>/dev/null
 ```
 
 **For failures without logs:** Try to fetch them on-demand first:

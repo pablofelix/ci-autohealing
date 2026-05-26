@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Cron orchestrator — runs the collection pipeline.
 
 Replaces collect-comprehensive.sh. Each step runs as a subprocess so

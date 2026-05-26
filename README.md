@@ -193,15 +193,15 @@ ic jira create conforma odh-mlmd-grpc-server-v3-4 --execute   # POST to Jira
 Link an existing Jira key to a failure in the DB:
 
 ```bash
-ic jira link odh-mlmd-grpc-server-v3-4 PROJECT-12345
+ic jira link odh-mlmd-grpc-server-v3-4 MYPROJECT-12345
 ```
 
 View all linked tickets with live status:
 
 ```bash
 ic get jira
-ic get jira PROJECT-12345   # single ticket details
-ic describe jira PROJECT-12345
+ic get jira MYPROJECT-12345   # single ticket details
+ic describe jira MYPROJECT-12345
 ```
 
 ### Option 3: Slack message
@@ -210,11 +210,11 @@ Generates a polite mrkdwn message asking the component team for help. Includes t
 
 ```bash
 ic export 1 slack
-ic export 1 slack --jira PROJECT-12345    # include Jira link
+ic export 1 slack --jira MYPROJECT-12345    # include Jira link
 ic export 1 slack --clipboard              # copy instead of print
 
 # Conforma-specific
-ic export conforma odh-mlmd-grpc-server-v3-4 slack --jira PROJECT-99999
+ic export conforma odh-mlmd-grpc-server-v3-4 slack --jira MYPROJECT-99999
 ```
 
 Paste the output directly into the team's Slack channel. The message tags the correct team handle from the RHOAI component data YAML.
@@ -336,6 +336,7 @@ ic get pipelineruns [--limit N]            # recent PipelineRun failures
 ic get pipelinerun <name>                  # single PipelineRun details
 ic get apps                                # available application versions
 ic get failures [--limit N]                # raw failure list
+ic get vulnerabilities [--component X]     # CVE summary from SARIF scans
 ```
 
 ### Detail views
@@ -407,6 +408,16 @@ ic export <N|name> json
 ic export <N|name> <format> --clipboard
 ```
 
+### Releases
+
+```bash
+ic get releases                            # recent Release CRs
+ic release status                          # pipeline checklist (stage → prod)
+ic release readiness                       # go/no-go verdict with blockers
+ic get policy-gap                          # stage vs prod policy differences
+ic dashboard                               # operational metrics overview
+```
+
 ### Stats and history
 
 ```bash
@@ -427,6 +438,39 @@ ic config set-app acme-v2-1-ea-1          # switch APPLICATION_NAME
 ic get apps                                # available versions (alias: ic apps)
 ic db status                               # check DB connection
 ic db query "SELECT ..."                   # run custom SQL
+```
+
+---
+
+## Server mode
+
+The same data is available through three interfaces:
+
+```bash
+task serve            # REST API + MCP SSE on port 8000
+task serve:api        # REST API only
+task serve:mcp        # MCP stdio (for Claude Code)
+```
+
+- **CLI** (`./ic`) — daily triage, interactive fixes
+- **MCP server** — Claude Code accesses tools directly (32 tools)
+- **REST API** — OpenAPI docs at `/docs`, for dashboards and automation
+
+Generate the MCP config for Claude Code:
+
+```bash
+task mcp:setup        # creates .mcp.json
+```
+
+---
+
+## Demo
+
+Run the pre-recorded interactive demo (no database or cluster required):
+
+```bash
+./demo.sh             # interactive — press Enter to advance
+./demo.sh --auto      # auto-play with timed delays
 ```
 
 ---
@@ -498,10 +542,10 @@ KONFLUX_UI_BASE=                          # Konflux UI base URL
 | `src/repositories/` | All DB repository classes |
 | `src/collectors/` | Data collectors (build failures, conforma violations) |
 | `src/cron/` | Cron scripts (batch analysis, context enrichment) |
-| `src/tests/` | Test suite (176 tests) |
+| `src/tests/` | Test suite (221 tests) |
 | `prompts/*.md` | LLM system prompts (edit without code changes) |
 | `db/migrations/` | Schema migrations (001–010) |
-| `docs/adr/` | Architecture decision records |
+| `docs/ARCHITECTURE.md` | System architecture and data flow |
 | `docker-compose.yml` | Local dev: server + PostgreSQL |
 | `k8s/` | Kubernetes deployment manifests |
 | `.env` | Local secrets (not committed) |

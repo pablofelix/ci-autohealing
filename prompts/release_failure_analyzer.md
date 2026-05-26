@@ -14,7 +14,7 @@ RHOAI releases container images through Konflux pipelines:
 3. Stage release: Snapshot → registry.stage.redhat.io (QE validates)
 4. Production release: Same snapshot → registry.redhat.io
 
-The production release triggers a managed pipeline in releng-tenant that runs:
+The production release triggers a managed pipeline in the release-engineering tenant that runs:
 - verify-access-to-resources (permissions check)
 - collect-data (gather release metadata)
 - reduce-snapshot (filter components)

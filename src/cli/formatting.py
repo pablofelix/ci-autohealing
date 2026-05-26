@@ -46,6 +46,10 @@ def bold(text):
     return _c(BOLD, text)
 
 
+def dim(text):
+    return _c(DIM, text)
+
+
 def section_header(text):
     # type: (str) -> None
     print(_c(DIM, '━' * 40))

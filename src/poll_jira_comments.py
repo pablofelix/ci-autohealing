@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Poll active Jira tickets for new comments and generate AI draft replies.
 
 Run by cron every 20 minutes. For each active (is_resolved=FALSE) Jira ticket

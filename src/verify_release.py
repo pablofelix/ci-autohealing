@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Verify snapshot image availability in target registry via Pyxis.
 
 Fetches the Release CR and Snapshot from the cluster, then checks each

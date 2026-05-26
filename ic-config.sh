@@ -3,6 +3,7 @@
 # Sourced by ic; do not execute directly.
 # Override any value via .env or environment variables.
 
+: "${PYTHON:=python3}"
 : "${NAMESPACE:=}"
 : "${APPLICATION_NAME:=}"
 : "${KNOWN_APPLICATIONS:=}"
@@ -18,6 +19,7 @@ export PGPASSWORD
 
 : "${KUBEARCHIVE_URL:=}"
 : "${KONFLUX_UI_BASE:=}"
+: "${QUAY_ORG:=}"
 
 require_db() {
     docker exec "$DB_CONTAINER" pg_isready -q 2>/dev/null || {
@@ -27,19 +29,20 @@ require_db() {
     }
 }
 
-# Langfuse observability — inherited by python3.11 subprocesses (analyze_failures.py etc.)
+# Langfuse observability — inherited by Python subprocesses (analyze_failures.py etc.)
 : "${LANGFUSE_HOST:=http://localhost:3000}"
 export LANGFUSE_HOST LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY
 
 : "${COMPONENT_DATA_URL:=}"
-: "${COMPONENT_DATA_CACHE:=/tmp/rhoai-component-data.yaml}"
+: "${COMPONENT_DATA_CACHE:=/tmp/component-data.yaml}"
 : "${COMPONENT_DATA_TTL:=86400}"
 
 : "${GITLAB_API_BASE:=}"
 : "${GITLAB_POLICY_PATH:=}"
-GITLAB_POLICY_FILES=(
-    "${GITLAB_POLICY_PATH}%2Fregistry-acme-prod.yaml"
-    "${GITLAB_POLICY_PATH}%2Ffbc-acme-prod.yaml"
-    "${GITLAB_POLICY_PATH}%2Fregistry-acme-stage.yaml"
-    "${GITLAB_POLICY_PATH}%2Ffbc-acme-stage.yaml"
-)
+: "${GITLAB_POLICY_FILENAMES:=}"
+IFS=',' read -ra _policy_names <<< "$GITLAB_POLICY_FILENAMES"
+GITLAB_POLICY_FILES=()
+for _pf in "${_policy_names[@]}"; do
+    [[ -n "$_pf" ]] && GITLAB_POLICY_FILES+=("${GITLAB_POLICY_PATH}%2F${_pf}")
+done
+unset _policy_names _pf

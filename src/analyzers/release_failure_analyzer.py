@@ -183,11 +183,11 @@ class ReleaseFailureAnalyzer:
         # type: (str) -> str
         """Derive the GitHub branch name from application name.
 
-        acme-v2-0 -> acme-3.4
+        product-v3-4 -> product-3.4
         """
-        match = re.match(r'rhoai-v(\d+)-(\d+)', application)
+        match = re.match(r'(.+)-v(\d+)-(\d+)', application)
         if match:
-            return 'rhoai-{}.{}'.format(match.group(1), match.group(2))
+            return '{}-{}.{}'.format(match.group(1), match.group(2), match.group(3))
         return 'main'
 
     def _derive_rpa_filename(self, release_plan):
@@ -360,7 +360,7 @@ class ReleaseFailureAnalyzer:
                 ec_files = gl.list_directory(GITLAB_PROJECT, ec_base)
                 if ec_files:
                     for f in ec_files:
-                        if f['name'].endswith('.yaml') and 'rhoai' in f['name']:
+                        if f['name'].endswith('.yaml'):
                             content = gl.get_file_content(GITLAB_PROJECT, f['path'])
                             if content:
                                 ec_contents.append({

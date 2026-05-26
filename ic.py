@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """IC CLI entry point — loads .env then delegates to Click command tree."""
 
 import os

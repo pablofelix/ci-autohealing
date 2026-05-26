@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Verify resolution attempts: check if PRs merged and builds succeeded.
 
 Run after sync_component_status.py (which marks build_failures resolved when
@@ -10,8 +10,8 @@ If yes to both → was_successful = TRUE.
 If PR closed without merge → status = 'abandoned'.
 
 Usage:
-  python3.11 verify_fixes.py             # Check all pending
-  python3.11 verify_fixes.py --dry-run   # Print without writing
+  python3 verify_fixes.py             # Check all pending
+  python3 verify_fixes.py --dry-run   # Print without writing
 """
 
 import argparse

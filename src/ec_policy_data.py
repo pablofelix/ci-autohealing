@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Query EC policy data from the K8s API.
 
 Replaces the GitLab→YAML pipeline with direct K8s REST API calls.
@@ -163,11 +163,11 @@ def main():
     parser.add_argument('--days', type=int, default=30,
                         help='Days window for expiring action (default: 30)')
     parser.add_argument('--releng-namespace', default=None,
-                        help='Namespace for RPAs (default: RELENG_NAMESPACE env or releng-tenant)')
+                        help='Namespace for RPAs (default: RELENG_NAMESPACE env)')
     args = parser.parse_args()
 
-    namespace = os.environ.get('NAMESPACE', 'app-tenant')
-    releng_ns = args.releng_namespace or os.environ.get('RELENG_NAMESPACE', 'releng-tenant')
+    namespace = os.environ.get('NAMESPACE', '')
+    releng_ns = args.releng_namespace or os.environ.get('RELENG_NAMESPACE', '')
 
     try:
         client = KonfluxClient(namespace=namespace)

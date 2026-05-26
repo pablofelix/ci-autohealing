@@ -96,9 +96,10 @@ First, check what analysis already exists:
 
 Run multiple `ic ai analyze` calls in parallel for different components to save time.
 
-**For violations that have AI analysis, query the full details:**
+**For violations that have AI analysis, query the details:**
+Call `mcp__ic__get_analysis(component=<component>)` to get the full AI analysis including category, confidence, root_cause, recommended_fix, and can_auto_fix. Or via CLI:
 ```bash
-./ic db query "SELECT c.component_name, a.failure_category, a.confidence_score, a.root_cause, a.recommended_fix, a.can_auto_fix FROM ai_analysis a JOIN conforma_results c ON a.conforma_result_id = c.id WHERE c.component_name = '<component>' ORDER BY a.created_at DESC LIMIT 1" 2>/dev/null
+./ic why <component-name> 2>/dev/null
 ```
 
 ### Step 4: Synthesize the solution for each violation

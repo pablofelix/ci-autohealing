@@ -330,5 +330,197 @@ class TestExtractExceptions(unittest.TestCase):
         self.assertEqual(results, [])
 
 
+class TestExtractDependencyUpdate(unittest.TestCase):
+
+    def _extract(self, duc):
+        from clients.konflux_client import KonfluxClient
+        return KonfluxClient.extract_dependency_update(duc)
+
+    def test_basic_update(self):
+        duc = {
+            'metadata': {
+                'name': 'duc-123',
+                'creationTimestamp': '2025-05-25T10:00:00Z',
+                'labels': {'appstudio.openshift.io/component': 'vllm'},
+            },
+            'spec': {
+                'packageName': 'golang.org/x/net',
+                'currentVersion': 'v0.17.0',
+                'newVersion': 'v0.20.0',
+            },
+            'status': {
+                'pullRequestUrl': 'https://github.com/org/repo/pull/456',
+                'merged': True,
+            },
+        }
+        result = self._extract(duc)
+        self.assertEqual(result['component'], 'vllm')
+        self.assertEqual(result['package'], 'golang.org/x/net')
+        self.assertEqual(result['from_version'], 'v0.17.0')
+        self.assertEqual(result['to_version'], 'v0.20.0')
+        self.assertTrue(result['merged'])
+        self.assertIn('456', result['pr_url'])
+
+    def test_empty_duc(self):
+        result = self._extract({})
+        self.assertEqual(result['component'], '')
+        self.assertEqual(result['package'], '')
+        self.assertFalse(result['merged'])
+
+    def test_pending_update(self):
+        duc = {
+            'metadata': {'name': 'duc-456', 'labels': {}},
+            'spec': {'packageName': 'pip', 'currentVersion': '23.0', 'newVersion': '24.0'},
+            'status': {'merged': False},
+        }
+        result = self._extract(duc)
+        self.assertFalse(result['merged'])
+        self.assertEqual(result['package'], 'pip')
+
+
+class TestRegistryClientParseImageRef(unittest.TestCase):
+
+    def _parse(self, url):
+        from clients.registry_client import RegistryClient
+        return RegistryClient.parse_image_ref(url)
+
+    def test_tag_format(self):
+        registry, repo, tag = self._parse('quay.io/rh-osbs/vllm:v3.5')
+        self.assertEqual(registry, 'quay.io')
+        self.assertEqual(repo, 'rh-osbs/vllm')
+        self.assertEqual(tag, 'v3.5')
+
+    def test_digest_format(self):
+        registry, repo, digest = self._parse('quay.io/rh/image@sha256:abc123')
+        self.assertEqual(registry, 'quay.io')
+        self.assertEqual(repo, 'rh/image')
+        self.assertEqual(digest, 'sha256:abc123')
+
+    def test_with_https_prefix(self):
+        registry, repo, tag = self._parse('https://quay.io/org/image:latest')
+        self.assertEqual(registry, 'quay.io')
+        self.assertEqual(repo, 'org/image')
+        self.assertEqual(tag, 'latest')
+
+    def test_no_tag(self):
+        registry, repo, tag = self._parse('quay.io/org/image')
+        self.assertEqual(registry, 'quay.io')
+        self.assertEqual(repo, 'org/image')
+        self.assertEqual(tag, 'latest')
+
+
+class TestRegistryClientParseSarif(unittest.TestCase):
+
+    def _parse(self, data):
+        from clients.registry_client import RegistryClient
+        import json
+        return RegistryClient._parse_sarif(json.dumps(data).encode())
+
+    def test_basic_sarif(self):
+        sarif = {
+            'runs': [{
+                'tool': {'driver': {'rules': [
+                    {'id': 'CVE-2024-1234', 'properties': {
+                        'package': 'openssl', 'fixed_version': '3.0.14',
+                    }},
+                ]}},
+                'results': [{
+                    'ruleId': 'CVE-2024-1234',
+                    'level': 'error',
+                    'message': {'text': 'Critical vulnerability in openssl'},
+                }],
+            }],
+        }
+        results = self._parse(sarif)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['ruleId'], 'CVE-2024-1234')
+        self.assertEqual(results[0]['level'], 'error')
+        self.assertEqual(results[0]['package'], 'openssl')
+        self.assertEqual(results[0]['fix_version'], '3.0.14')
+
+    def test_multiple_results(self):
+        sarif = {
+            'runs': [{
+                'tool': {'driver': {'rules': []}},
+                'results': [
+                    {'ruleId': 'CVE-1', 'level': 'error', 'message': {'text': 'a'}},
+                    {'ruleId': 'CVE-2', 'level': 'warning', 'message': {'text': 'b'}},
+                    {'ruleId': 'CVE-3', 'level': 'note', 'message': {'text': 'c'}},
+                ],
+            }],
+        }
+        results = self._parse(sarif)
+        self.assertEqual(len(results), 3)
+
+    def test_empty_sarif(self):
+        results = self._parse({'runs': []})
+        self.assertEqual(results, [])
+
+    def test_invalid_json(self):
+        from clients.registry_client import RegistryClient
+        results = RegistryClient._parse_sarif(b'not json')
+        self.assertEqual(results, [])
+
+
+class TestRegistryClientFormatSarifSummary(unittest.TestCase):
+
+    def _format(self, results, max_chars=2000):
+        from clients.registry_client import RegistryClient
+        return RegistryClient.format_sarif_summary(results, max_chars)
+
+    def test_basic_formatting(self):
+        results = [
+            {'ruleId': 'CVE-1', 'level': 'error', 'message': 'crit vuln',
+             'package': 'openssl', 'fix_version': '3.0.14'},
+            {'ruleId': 'CVE-2', 'level': 'warning', 'message': 'high vuln',
+             'package': 'curl', 'fix_version': '8.5.0'},
+        ]
+        text = self._format(results)
+        self.assertIn('=== Structured Scan Results (SARIF) ===', text)
+        self.assertIn('Critical: 1', text)
+        self.assertIn('High: 1', text)
+        self.assertIn('CVE-1', text)
+        self.assertIn('openssl', text)
+        self.assertIn('fix: 3.0.14', text)
+
+    def test_empty_results(self):
+        text = self._format([])
+        self.assertEqual(text, '')
+
+    def test_truncation(self):
+        results = [
+            {'ruleId': 'CVE-{}'.format(i), 'level': 'warning', 'message': 'x' * 100,
+             'package': 'pkg', 'fix_version': ''}
+            for i in range(50)
+        ]
+        text = self._format(results, max_chars=500)
+        self.assertLessEqual(len(text), 520)
+
+
+class TestExtractLogsFromTarball(unittest.TestCase):
+
+    def test_valid_tarball(self):
+        import io
+        import tarfile
+        from clients.registry_client import RegistryClient
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+            content = b'--- LOGS FOR build-task ---\nbuilding...\n--- LOGS FOR test-task ---\ntesting...\n'
+            info = tarfile.TarInfo(name='all-logs.txt')
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        buf.seek(0)
+
+        result = RegistryClient._extract_logs_from_tarball(buf.read())
+        self.assertIn('LOGS FOR build-task', result)
+        self.assertIn('LOGS FOR test-task', result)
+
+    def test_invalid_data(self):
+        from clients.registry_client import RegistryClient
+        result = RegistryClient._extract_logs_from_tarball(b'not a tarball')
+        self.assertEqual(result, '')
+
+
 if __name__ == '__main__':
     unittest.main()

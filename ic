@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Delegate to Python CLI unless we're being called back from it
 if [ "${IC_PYTHON_FALLBACK:-}" != "1" ]; then
-    exec python3.11 "$SCRIPT_DIR/ic.py" "$@"
+    exec $PYTHON "$SCRIPT_DIR/ic.py" "$@"
 fi
 
 # Load configuration
@@ -64,12 +64,14 @@ sql_table() {
 }
 
 # Convert APPLICATION_NAME to conforma-reporter branch name
-# acme-v2-0 -> acme-3.4, acme-v2-0-ea-1 -> acme-3.4-ea.1
+# product-v3-4 -> product-3.4, product-v3-4-ea-1 -> product-3.4-ea.1
 app_to_reporter_branch() {
-    local version="${1#rhoai-v}"
+    local app="$1"
+    local product="${app%%-v*}"
+    local version="${app#*-v}"
     version=$(echo "$version" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/')
     version=$(echo "$version" | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
-    echo "rhoai-${version}"
+    echo "${product}-${version}"
 }
 
 # Convert scenario name to short label for display
@@ -281,7 +283,7 @@ fetch_gitlab_exceptions() {
 
     # Try K8s API first (faster, covers all 6 policies)
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action exceptions --name-filter ${APPLICATION_NAME%%-v*} 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[].value' | cut -d: -f1 | sort -u | tee "$cache_file"
         return
@@ -347,7 +349,7 @@ check_exception_status() {
 }
 
 # Extract EC policy name from a conforma scenario
-# conforma-registry-acme-prod-v3-4-single-component → registry-acme-prod
+# conforma-registry-product-prod-v3-4-single-component → registry-product-prod
 extract_policy_from_scenario() {
     local scenario="$1"
     local its_cache="/tmp/ic-its-cache/scenarios-${APPLICATION_NAME}"
@@ -367,7 +369,7 @@ refresh_its_cache() {
     local cache_file="${cache_dir}/scenarios-${APPLICATION_NAME}"
     mkdir -p "$cache_dir"
     local its_json
-    its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$APPLICATION_NAME" 2>/dev/null || true)
+    its_json=$(cd "$SCRIPT_DIR/src" && $PYTHON its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$APPLICATION_NAME" 2>/dev/null || true)
     [ -z "$its_json" ] && return 1
     echo "$its_json" | jq -r '.scenarios[] | select(.policy_ref != "") | "\(.name)|\(.policy_ref | split("/") | last)|\(if .is_disabled then "disabled" else "active" end)"' > "$cache_file" 2>/dev/null
 }
@@ -386,7 +388,7 @@ fetch_k8s_exceptions_full() {
     fi
 
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action exceptions --name-filter rhoai 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action exceptions --name-filter ${APPLICATION_NAME%%-v*} 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[] | "\(.value)|\(.source_policy)|\(.gitlab_link)|\(.reference // "")"' | tee "$cache_file"
         return
@@ -508,7 +510,7 @@ check_exception_status_v2() {
                     local other_match
                     other_match=$(exc_find_match "$other_exc" "$rule")
                     local op
-                    op=$(echo "$other_match" | cut -d'|' -f2 | sed 's/registry-rhoai-chart-/ch-/; s/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+                    op=$(echo "$other_match" | cut -d'|' -f2 | sed 's/registry-[a-z]*-chart-/ch-/; s/registry-[a-z]*-/reg-/; s/fbc-[a-z]*-/fbc-/; s/stage/stg/')
                     if [ -n "$op" ] && [ -z "$other_policies" ]; then
                         other_policies="$op"
                     fi
@@ -563,7 +565,7 @@ fetch_expiring_exceptions() {
 
     # Try K8s API first (faster, covers all 6 policies)
     local k8s_data
-    k8s_data=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action expiring --name-filter rhoai --days "$days_window" 2>/dev/null || true)
+    k8s_data=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action expiring --name-filter ${APPLICATION_NAME%%-v*} --days "$days_window" 2>/dev/null || true)
     if [ -n "$k8s_data" ] && echo "$k8s_data" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo "$k8s_data" | jq -r '.exceptions[] | "\(.days_left)|\(.effectiveUntil[:10])|\(.value)|\(.imageUrl // "")|\(.reference // "")|\(.source_policy)|\(.gitlab_link)"' | tee "$cache_file"
         return
@@ -837,6 +839,7 @@ usage() {
     echo -e "  ${CYAN}failures${NC}             Build failures (alias for pipelineruns)"
     echo -e "  ${CYAN}apps${NC}                 Available applications (versions)"
     echo -e "  ${CYAN}releases${NC}             Release CRs (push to stage/prod status)"
+    echo -e "  ${CYAN}vulnerabilities${NC}      CVE/SAST scan results from SARIF"
     echo ""
     echo -e "${BOLD}COMMANDS:${NC}"
     echo ""
@@ -870,6 +873,8 @@ usage() {
     echo "    ic get pr <name>                         Alias for pipelinerun"
     echo "    ic get apps                              List available RHOAI applications"
     echo "    ic get failures [--limit N]              List recent failures"
+    echo "    ic get vulnerabilities [--component X]   CVE/SAST scan summary from SARIF"
+    echo "    ic get cves                              Alias for vulnerabilities"
     echo ""
     echo -e "  ${CYAN}describe <resource> <name> [options]${NC}"
     echo "    ic describe component <name> [--log]     Full component details + logs"
@@ -983,7 +988,7 @@ usage() {
     echo ""
     echo -e "  ${CYAN}Version management:${NC}"
     echo "    ic get apps                              # List RHOAI versions"
-    echo "    ic config set-app rhoai-v3-3             # Switch to v3.3"
+    echo "    ic config set-app my-app-v3-3            # Switch to v3.3"
     echo "    ic get components                        # Now shows v3.3 data"
     echo ""
     echo -e "  ${CYAN}Triage workflow:${NC}"
@@ -1313,7 +1318,7 @@ cmd_get_apps() {
     section_header "Available RHOAI Applications"
     echo ""
 
-    local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "rhoai" | sort -V)
+    local apps=$(oc get applications -n "$NAMESPACE" -o custom-columns=NAME:.metadata.name --no-headers 2>/dev/null | grep "${APPLICATION_NAME%%-v*}" | sort -V)
 
     if [ -z "$apps" ]; then
         echo -e "${YELLOW}⚠ Cluster unreachable — showing applications from database${NC}"
@@ -1498,7 +1503,7 @@ cmd_describe_component() {
         # Quay image (derive from component naming convention)
         local quay_repo=$(echo "$repo_url" | sed 's|https://github.com/acme-org/||' | sed 's|\.git$||')
         if [ -n "$quay_repo" ]; then
-            echo -e "${BOLD}Quay:${NC}       ${CYAN}https://quay.io/repository/rhoai/${component}${NC}"
+            echo -e "${BOLD}Quay:${NC}       ${CYAN}https://quay.io/repository/${QUAY_ORG:-rhoai}/${component}${NC}"
         fi
         echo ""
 
@@ -1577,7 +1582,7 @@ cmd_describe_component() {
         # Build History from Tekton Results
         section_header "Build History (Tekton Results)"
         echo ""
-        local history=$(cd "$SCRIPT_DIR/src" && python3.11 get_build_history.py "$component" --limit 8 --type build 2>/dev/null)
+        local history=$(cd "$SCRIPT_DIR/src" && $PYTHON get_build_history.py "$component" --limit 8 --type build 2>/dev/null)
         if [ -n "$history" ]; then
             while IFS='|' read -r h_ts h_status h_commit h_failed_task h_image h_pr_name; do
                 h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
@@ -2153,7 +2158,7 @@ cmd_ai() {
             echo "  ic ai analyze 1                         # Analyze alert #1"
             echo "  ic ai analyze component acme-automl-v3-4 # Analyze specific component"
             echo "  ic ai analyze --all                     # Analyze all pending"
-            echo "  ic ai analyze release acme-v2-0-prod-1778657574"
+            echo "  ic ai analyze release my-app-v3-4-prod-1234567890"
             echo "  ic ai batch --estimate                  # Queue depth"
             echo "  ic ai batch --limit 20                  # Batch 20 failures"
             echo "  ic ai status                            # Show summary"
@@ -2170,11 +2175,11 @@ cmd_ai_enrich() {
     if [ -n "$component" ]; then
         echo -e "${CYAN}Enriching context for: $component${NC}"
         echo ""
-        python3.11 enrich_context.py --component "$component"
+        $PYTHON enrich_context.py --component "$component"
     else
         echo -e "${CYAN}Enriching all pending failures...${NC}"
         echo ""
-        python3.11 enrich_context.py
+        $PYTHON enrich_context.py
     fi
 }
 
@@ -2270,14 +2275,14 @@ cmd_ai_analyze() {
 
         # Analyze build failures
         echo -e "${BOLD}Build Failures:${NC}"
-        python3.11 analyze_failures.py
+        $PYTHON analyze_failures.py
         local build_result=$?
 
         echo ""
 
         # Analyze Conforma violations
         echo -e "${BOLD}Conforma Violations:${NC}"
-        python3.11 analyze_conforma.py
+        $PYTHON analyze_conforma.py
         local conforma_result=$?
 
         # Return success if either succeeded
@@ -2367,11 +2372,11 @@ cmd_ai_analyze() {
     if [ "$analysis_type" = "build" ]; then
         echo -e "${CYAN}Analyzing build failure: $component${NC}"
         echo ""
-        python3.11 analyze_failures.py --component "$component" $($force && echo "--force")
+        $PYTHON analyze_failures.py --component "$component" $($force && echo "--force")
     else
         echo -e "${CYAN}Analyzing Conforma violation: $component${NC}"
         echo ""
-        python3.11 analyze_conforma.py --component "$component" $($force && echo "--force")
+        $PYTHON analyze_conforma.py --component "$component" $($force && echo "--force")
     fi
 }
 
@@ -2383,7 +2388,7 @@ cmd_ai_analyze_release() {
         echo -e "${RED}Error: Missing release name${NC}"
         echo "Usage: ic ai analyze release <release-name> [--force]"
         echo ""
-        echo "Example: ic ai analyze release acme-v2-0-prod-1778657574"
+        echo "Example: ic ai analyze release my-app-v3-4-prod-1234567890"
         return 1
     fi
 
@@ -2406,7 +2411,7 @@ cmd_ai_analyze_release() {
     local log_file
     log_file=$(mktemp)
     local output
-    output=$(python3.11 analyze_release.py --release "$release_name" --namespace "$NAMESPACE" $force_flag 2>"$log_file")
+    output=$($PYTHON analyze_release.py --release "$release_name" --namespace "$NAMESPACE" $force_flag 2>"$log_file")
     local exit_code=$?
 
     # Show log progress lines to user
@@ -2425,7 +2430,7 @@ cmd_ai_analyze_release() {
 
     # Parse JSON output from Python
     local json_output
-    json_output=$(printf '%s\n' "$output" | python3.11 -c "
+    json_output=$(printf '%s\n' "$output" | $PYTHON -c "
 import sys, json
 data = json.load(sys.stdin)
 
@@ -2511,7 +2516,7 @@ cmd_ai_analyze_scenarios() {
                     echo ""
                     echo "Usage: ic ai analyze scenarios [--app <app-name>]"
                     echo "       ic ai analyze scenarios              # current app ($APPLICATION_NAME)"
-                    echo "       ic ai analyze scenarios --app acme-v2-0"
+                    echo "       ic ai analyze scenarios --app my-app-v3-4"
                     return 1
                 fi
                 app_arg="--app $1"; shift ;;
@@ -2541,7 +2546,7 @@ cmd_ai_analyze_scenarios() {
     local log_file
     log_file=$(mktemp)
     local output
-    output=$(python3.11 analyze_scenarios.py $app_arg $ns_arg 2>"$log_file")
+    output=$($PYTHON analyze_scenarios.py $app_arg $ns_arg 2>"$log_file")
     local exit_code=$?
 
     if [ -s "$log_file" ]; then
@@ -2558,7 +2563,7 @@ cmd_ai_analyze_scenarios() {
     rm -f "$log_file"
 
     local json_output
-    json_output=$(printf '%s\n' "$output" | python3.11 -c "
+    json_output=$(printf '%s\n' "$output" | $PYTHON -c "
 import sys, json
 data = json.load(sys.stdin)
 
@@ -2648,7 +2653,7 @@ cmd_ai_batch() {
     fi
 
     cd "$SCRIPT_DIR/src" || return 1
-    python3.11 analyze_batch.py $flags
+    $PYTHON analyze_batch.py $flags
 }
 
 cmd_ai_status() {
@@ -2913,7 +2918,7 @@ cmd_patterns() {
 
 cmd_patterns_learn() {
     echo -e "${BOLD}Discovering new patterns from repeated failures...${NC}"
-    python3.11 -c "
+    $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -2934,7 +2939,7 @@ else:
 
 cmd_patterns_stale() {
     echo -e "${BOLD}Stale patterns (unused 90+ days or low accuracy):${NC}"
-    python3.11 -c "
+    $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -2959,7 +2964,7 @@ cmd_patterns_shared() {
     echo ""
     if [ -n "$app_filter" ]; then
         echo -e "Patterns seen in ${CYAN}${app_filter}${NC} (with cross-app context):"
-        python3.11 -c "
+        $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -2981,7 +2986,7 @@ else:
 "
     else
         echo "Patterns appearing across multiple applications:"
-        python3.11 -c "
+        $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -3242,7 +3247,7 @@ cmd_health_overview() {
     section_header "Component Health"
     echo ""
 
-    python3.11 -c "
+    $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -3295,7 +3300,7 @@ cmd_health_warnings() {
     show_freeze_banner
     show_outage_banner
 
-    python3.11 -c "
+    $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -3402,7 +3407,7 @@ cmd_alerts_check() {
 
     # Check component health warnings
     local hw
-    hw=$(python3.11 -c "
+    hw=$($PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPT_DIR/src')
 from config import CollectorConfig
 from repositories.connection import DatabaseConnection
@@ -3930,7 +3935,7 @@ export_conforma_jira() {
     output+="\n"
     output+="*Useful Links:*\n"
     output+="* [Konflux PipelineRun|${konflux_url}]\n"
-    output+="* [Quay Repository|https://quay.io/repository/rhoai/${comp_name}]\n"
+    output+="* [Quay Repository|https://quay.io/repository/${QUAY_ORG:-rhoai}/${comp_name}]\n"
     if [ -n "$trace_url" ]; then
         output+="* [AI Analysis Trace|${trace_url}]\n"
     fi
@@ -4439,7 +4444,7 @@ display_alerts_conforma_failures() {
             local policy_name
             policy_name=$(extract_policy_from_scenario "$c_scenario")
             local policy_label
-            policy_label=$(echo "$policy_name" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+            policy_label=$(echo "$policy_name" | sed 's/registry-[a-z]*-/reg-/; s/fbc-[a-z]*-/fbc-/; s/stage/stg/')
 
             local exc_status="-"
             local exc_jira_ref=""
@@ -4566,11 +4571,13 @@ display_alerts_release_failures() {
         return
     fi
 
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
     local now_epoch
     now_epoch=$(date +%s)
 
-    # Filter to current app's releases, then find failed or stuck ones
+    # Filter to current app's releases. Group by release plan:
+    # - Skip plans that have any successful release (superseded failures)
+    # - Show only the latest failed/stuck release per plan (not all retries)
     local failed_releases
     failed_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" --argjson now "$now_epoch" '
         [.items[]
@@ -4585,11 +4592,17 @@ display_alerts_release_failures() {
              managed_reason: ([.status.conditions[]? | select(.type == "ManagedPipelineProcessed")] | .[0] | .reason // "Unknown"),
              age_hours: ((.metadata.creationTimestamp | sub("\\.[0-9]+"; "") | strptime("%Y-%m-%dT%H:%M:%S%Z") | mktime) as $ts | if $ts then ($now - $ts) / 3600 else 0 end)
            }
-         | select(
+        ]
+        | group_by(.plan)
+        | [.[]
+           | select(all(.released_status != "True"))
+           | sort_by(.created) | reverse | .[0]
+          ]
+        | [.[] | select(
              (.released_status == "False") or
              (.released_status == "Unknown" and .age_hours > 24)
-           )
-        ] | sort_by(.created) | reverse
+           )]
+        | sort_by(.created) | reverse
     ' 2>/dev/null)
 
     local release_count
@@ -4644,12 +4657,12 @@ display_alerts_exception_row() {
     local max_value_len="${8:-45}" max_comp_len="${9:-30}"
 
     local src_label="${source:-?}"
-    src_label=$(echo "$src_label" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+    src_label=$(echo "$src_label" | sed 's/registry-[a-z]*-/reg-/; s/fbc-[a-z]*-/fbc-/; s/stage/stg/')
 
     local comp_name=""
     if [ -n "$image_url" ]; then
         comp_name=$(echo "$image_url" | grep -oP '[^/]+$' | sed 's/:.*//; s/@.*//' 2>/dev/null || true)
-        local app_suffix="${APPLICATION_NAME#rhoai-}"
+        local app_suffix="${APPLICATION_NAME#*-v}"
         comp_name="${comp_name}-${app_suffix}"
     else
         comp_name="(global rule)"
@@ -5029,10 +5042,10 @@ cmd_get_exceptions() {
 }
 
 cmd_get_bindings() {
-    section_header "RPA → EC Policy Bindings (rhoai)"
+    section_header "RPA → EC Policy Bindings (${APPLICATION_NAME%%-v*})"
 
     local bindings_json
-    bindings_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action bindings --name-filter rhoai 2>/dev/null || true)
+    bindings_json=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action bindings --name-filter ${APPLICATION_NAME%%-v*} 2>/dev/null || true)
 
     if [ -z "$bindings_json" ] || ! echo "$bindings_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo -e "${RED}Error: Could not fetch RPA bindings (oc login required)${NC}"
@@ -5061,7 +5074,7 @@ cmd_get_bindings() {
     done
 
     echo ""
-    echo -e "${CYAN}Tip:${NC} Data from K8s API (namespace: releng-tenant)"
+    echo -e "${CYAN}Tip:${NC} Data from K8s API (namespace: ${RELENG_NAMESPACE:-not set})"
     echo ""
 }
 
@@ -5069,8 +5082,8 @@ cmd_get_policy_gap() {
     section_header "Stage → Prod EC Policy Gap"
 
     local gap_json
-    local name_filter="${APPLICATION_NAME#rhoai-}"
-    gap_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action policy-gap --name-filter "${name_filter}" --releng-namespace releng-tenant 2>/dev/null || true)
+    local name_filter="${APPLICATION_NAME#*-v}"
+    gap_json=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action policy-gap --name-filter "${name_filter}" --releng-namespace "${RELENG_NAMESPACE}" 2>/dev/null || true)
 
     if [ -z "$gap_json" ] || ! echo "$gap_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         echo -e "${RED}Error: Could not fetch policy gap (oc login required)${NC}"
@@ -5781,7 +5794,7 @@ cmd_conforma_report() {
             --*) shift ;;
             *)
                 # Treat positional args as version filters
-                # Accept: 3.4, 3.4-ea-1, v3-4, acme-v2-0, 3.5-ea.1, etc.
+                # Accept: 3.4, 3.4-ea-1, v3-4, product-v3-4, 3.5-ea.1, etc.
                 version_filters="${version_filters} $1"
                 shift
                 ;;
@@ -5813,15 +5826,15 @@ cmd_conforma_report() {
         local filtered=""
         for filter in $version_filters; do
             # Normalize filter to APPLICATION_NAME format
-            # Accept: 3.4, 3.4-ea-1, v3-4, acme-v2-0, 3.5-ea.1
+            # Accept: 3.4, 3.4-ea-1, v3-4, product-v3-4, 3.5-ea.1
             local normalized="$filter"
-            normalized="${normalized#rhoai-}"
+            normalized="${normalized#*-v}"
             normalized="${normalized#v}"
             # Convert dots to dashes for major.minor: 3.4 -> 3-4
             normalized=$(echo "$normalized" | sed 's/^\([0-9]\+\)\.\([0-9]\+\)/\1-\2/')
             # Convert -ea.N to -ea-N: -ea.1 -> -ea-1
             normalized=$(echo "$normalized" | sed 's/-ea\.\([0-9]\+\)/-ea-\1/')
-            normalized="rhoai-v${normalized}"
+            normalized="${APPLICATION_NAME%%-v*}-v${normalized}"
 
             # Find matching apps (substring match)
             local matches
@@ -5854,7 +5867,7 @@ cmd_conforma_report() {
     while IFS= read -r app; do
         [ -z "$app" ] && continue
 
-        local branch_label="${app#rhoai-v}"
+        local branch_label="${app#*-v}"
         branch_label=$(echo "$branch_label" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/' | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
 
         # Check if app has data in DB
@@ -6049,7 +6062,7 @@ cmd_conforma_report() {
                 local policy_name
                 policy_name=$(extract_policy_from_scenario "$c_scenario")
                 local policy_label
-                policy_label=$(echo "$policy_name" | sed 's/registry-rhoai-/reg-/; s/fbc-rhoai-/fbc-/; s/stage/stg/')
+                policy_label=$(echo "$policy_name" | sed 's/registry-[a-z]*-/reg-/; s/fbc-[a-z]*-/fbc-/; s/stage/stg/')
 
                 # Get exception status via K8s API-aware matching
                 local vsummary
@@ -6213,7 +6226,7 @@ cmd_report_build() {
         return
     fi
 
-    local known_versions="acme-v2-0 acme-v2-1-ea-1"
+    local known_versions="${KNOWN_APPLICATIONS:-}"
     local all_versions
     all_versions=$(echo -e "${apps}\n${known_versions}" | tr ' ' '\n' | sort -u | grep -v '^$')
 
@@ -6221,11 +6234,11 @@ cmd_report_build() {
         local filtered=""
         for filter in $version_filters; do
             local normalized="$filter"
-            normalized="${normalized#rhoai-}"
+            normalized="${normalized#*-v}"
             normalized="${normalized#v}"
             normalized=$(echo "$normalized" | sed 's/^\([0-9]\+\)\.\([0-9]\+\)/\1-\2/')
             normalized=$(echo "$normalized" | sed 's/-ea\.\([0-9]\+\)/-ea-\1/')
-            normalized="rhoai-v${normalized}"
+            normalized="${APPLICATION_NAME%%-v*}-v${normalized}"
             local matches
             matches=$(echo "$all_versions" | grep "$normalized" 2>/dev/null || true)
             [ -n "$matches" ] && filtered="${filtered}${matches}"$'\n'
@@ -6247,7 +6260,7 @@ cmd_report_build() {
     while IFS= read -r app; do
         [ -z "$app" ] && continue
 
-        local branch_label="${app#rhoai-v}"
+        local branch_label="${app#*-v}"
         branch_label=$(echo "$branch_label" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/' | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
 
         local has_data
@@ -6293,7 +6306,7 @@ cmd_report_build() {
         has_data=$(echo "$apps" | grep -c "^${app}$" 2>/dev/null || echo "0")
         [ "$has_data" -eq 0 ] && continue
 
-        local branch_label="${app#rhoai-v}"
+        local branch_label="${app#*-v}"
         branch_label=$(echo "$branch_label" | sed 's/^\([0-9]\+\)-\([0-9]\+\)/\1.\2/' | sed 's/-ea-\([0-9]\+\)/-ea.\1/')
 
         local comp_count
@@ -6448,7 +6461,7 @@ cmd_describe_conforma() {
     " 2>/dev/null | xargs 2>/dev/null || echo "")
     if [ -n "$container_image" ]; then
         echo -e "${BOLD}Image:${NC}       $container_image"
-        # Extract Quay repository URL (e.g., quay.io/acme/component@sha256:... -> quay.io/repository/rhoai/component)
+        # Extract Quay repository URL from image reference
         local quay_path=$(echo "$container_image" | sed -n 's|quay\.io/\([^@]*\)@.*|quay.io/repository/\1|p')
         [ -n "$quay_path" ] && echo -e "${BOLD}Quay:${NC}        ${CYAN}https://${quay_path}${NC}"
     fi
@@ -6524,7 +6537,7 @@ cmd_conforma_history() {
     echo ""
     subsection_header "Conforma Test History (Tekton Results):"
     echo ""
-    local conforma_hist=$(cd "$SCRIPT_DIR/src" && python3.11 get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
+    local conforma_hist=$(cd "$SCRIPT_DIR/src" && $PYTHON get_build_history.py "$component" --limit 8 --type conforma 2>/dev/null)
     if [ -n "$conforma_hist" ]; then
         while IFS='|' read -r h_ts h_status h_scenario h_pr_name; do
             h_ts=$(echo "$h_ts" | cut -c1-16 | tr 'T' ' ')
@@ -6544,22 +6557,22 @@ cmd_conforma_history() {
 # RELEASE COMMANDS
 # ============================================================================
 
-RELENG_NAMESPACE="${RELENG_NAMESPACE:-releng-tenant}"
+RELENG_NAMESPACE="${RELENG_NAMESPACE:-}"
 SMARTSHEET_API_TOKEN="${SMARTSHEET_API_TOKEN:-${SMARTSHEET_TOKEN:-}}"
 SMARTSHEET_GA_SHEET_ID="${SMARTSHEET_GA_SHEET_ID:-SMARTSHEET_SHEET_ID_REDACTED}"
 
 _release_app_to_shortname() {
     local app="${1:-$APPLICATION_NAME}"
-    local ver="${app#rhoai-v}"
+    local ver="${app#*-v}"
     ver="${ver//-/.}"
     local major minor rest
     IFS='.' read -r major minor rest <<< "$ver"
     if [[ "$rest" == ea.* ]] || [[ "$rest" == ea* ]]; then
         local ea_num="${rest#ea.}"
         ea_num="${ea_num#ea}"
-        echo "rhoai-${major}.${minor}.EA${ea_num}"
+        echo "${APPLICATION_NAME%%-v*}-${major}.${minor}.EA${ea_num}"
     else
-        echo "rhoai-${major}.${minor}"
+        echo "${APPLICATION_NAME%%-v*}-${major}.${minor}"
     fi
 }
 
@@ -6576,7 +6589,7 @@ _release_fetch_smartsheet_dates() {
     [ -z "$sheet_data" ] && return 1
 
     local dates
-    dates=$(echo "$sheet_data" | python3.11 -c "
+    dates=$(echo "$sheet_data" | $PYTHON -c "
 import json, sys, re
 data = json.load(sys.stdin)
 shortname = '${shortname}'
@@ -6593,7 +6606,7 @@ for row in data.get('rows', []):
             if v: all_shortnames.add(v)
 # Parse version for ordering
 def parse_ver(sn):
-    m = re.match(r'rhoai-(\d+)\.(\d+)(?:\.EA(\d+))?', sn)
+    m = re.match(r'[a-z]+-(\d+)\.(\d+)(?:\.EA(\d+))?', sn)
     if not m: return (0, 0, 999)
     ea = int(m.group(3)) if m.group(3) else 999
     return (int(m.group(1)), int(m.group(2)), ea)
@@ -6753,9 +6766,9 @@ _release_type_label() {
 _release_discover_steps() {
     local app="$APPLICATION_NAME"
     local plans
-    local version_suffix="${app#rhoai-}"
+    local version_suffix="${app#*-}"
     plans=$(oc get releaseplans -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name' --no-headers 2>/dev/null \
-        | grep "^rhoai-.*${version_suffix}" | sort)
+        | grep "^${APPLICATION_NAME%%-v*}-.*${version_suffix}" | sort)
     if [[ "$version_suffix" != *-ea-* ]]; then
         plans=$(echo "$plans" | grep -v '\-ea-')
     fi
@@ -6815,11 +6828,11 @@ _release_name_prefix() {
         fbc-addon)
             local ocp_ver
             ocp_ver=$(oc get releaseplans -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name' --no-headers 2>/dev/null \
-                | grep "addon.*${app#rhoai-}.*fbc-${target}" | grep -oP 'ocp-\K\d+' | head -1)
-            echo "rhoai-fbc-addon-ocp-${ocp_ver:-419}-${target}" ;;
+                | grep "addon.*${app#*-v}.*fbc-${target}" | grep -oP 'ocp-\K\d+' | head -1)
+            echo "${APPLICATION_NAME%%-v*}-fbc-addon-ocp-${ocp_ver:-419}-${target}" ;;
         fbc-*)
             local ver="${type#fbc-}"
-            echo "acme-fbc-fragment-ocp-${ver}-${target}" ;;
+            echo "${APPLICATION_NAME%%-v*}-fbc-fragment-ocp-${ver}-${target}" ;;
     esac
 }
 
@@ -7182,7 +7195,7 @@ cmd_get_releases() {
         return
     fi
 
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
     local filtered
     filtered=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
         [.items[] | select(.spec.releasePlan | contains($ver))]
@@ -7497,7 +7510,7 @@ cmd_release_status() {
         return 1
     fi
 
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
     local all_releases
     all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
         [.items[] | select(.spec.releasePlan | contains($ver))]
@@ -7797,14 +7810,14 @@ cmd_release_status() {
     if [ "$stage_done" -eq "$stage_total" ] && [ "$prod_done" -eq "$prod_total" ] && \
        klist -s 2>/dev/null; then
         local advisory_output
-        advisory_output=$(cd "$SCRIPT_DIR/src" && python3.11 advisory_status.py --target prod --page-size 5 2>/dev/null)
+        advisory_output=$(cd "$SCRIPT_DIR/src" && $PYTHON advisory_status.py --target prod --page-size 5 2>/dev/null)
         if [ -n "$advisory_output" ]; then
             local adv_count
-            adv_count=$(printf '%s\n' "$advisory_output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',0))" 2>/dev/null)
+            adv_count=$(printf '%s\n' "$advisory_output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',0))" 2>/dev/null)
             if [ "${adv_count:-0}" -gt 0 ]; then
                 echo ""
                 echo -e "  ${BOLD}Advisories:${NC}"
-                printf '%s\n' "$advisory_output" | python3.11 -c "
+                printf '%s\n' "$advisory_output" | $PYTHON -c "
 import sys, json
 d = json.load(sys.stdin)
 for adv in d.get('advisories', [])[:5]:
@@ -7837,7 +7850,7 @@ cmd_release_diff() {
 
     local releases_json
     releases_json=$(oc get releases.appstudio.redhat.com -n "$NAMESPACE" -o json 2>/dev/null)
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
 
     _release_diff_snapshot() {
         local ep="$1"
@@ -7961,7 +7974,7 @@ cmd_release_verify() {
     local name="${1:-}"
     if [ -z "$name" ]; then
         echo -e "${RED}Usage: ic release verify <release-name>${NC}"
-        echo -e "${CYAN}Example: ic release verify acme-v2-0-prod-1778657574${NC}"
+        echo -e "${CYAN}Example: ic release verify my-app-v3-4-prod-1234567890${NC}"
         return 1
     fi
 
@@ -7969,7 +7982,7 @@ cmd_release_verify() {
     _release_require_kinit || return 1
 
     local output
-    output=$(cd "$SCRIPT_DIR/src" && python3.11 verify_release.py --release "$name" --namespace "$NAMESPACE" 2>/dev/null)
+    output=$(cd "$SCRIPT_DIR/src" && $PYTHON verify_release.py --release "$name" --namespace "$NAMESPACE" 2>/dev/null)
 
     if [ -z "$output" ]; then
         echo -e "${RED}Error: Pyxis verification failed.${NC}"
@@ -7977,21 +7990,21 @@ cmd_release_verify() {
     fi
 
     local status_check
-    status_check=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','ok'))" 2>/dev/null)
+    status_check=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','ok'))" 2>/dev/null)
     if [ "$status_check" = "error" ]; then
         local err_msg
-        err_msg=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null)
+        err_msg=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','unknown'))" 2>/dev/null)
         echo -e "${RED}Error: ${err_msg}${NC}"
         return 1
     fi
 
     local target snapshot total found missing errors
-    target=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['target'])" 2>/dev/null)
-    snapshot=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['snapshot'])" 2>/dev/null)
-    total=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['total'])" 2>/dev/null)
-    found=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['found'])" 2>/dev/null)
-    missing=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['missing'])" 2>/dev/null)
-    errors=$(printf '%s\n' "$output" | python3.11 -c "import sys,json; d=json.load(sys.stdin); print(d['errors'])" 2>/dev/null)
+    target=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['target'])" 2>/dev/null)
+    snapshot=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['snapshot'])" 2>/dev/null)
+    total=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['total'])" 2>/dev/null)
+    found=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['found'])" 2>/dev/null)
+    missing=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['missing'])" 2>/dev/null)
+    errors=$(printf '%s\n' "$output" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['errors'])" 2>/dev/null)
 
     local target_label target_registry
     if [ "$target" = "prod" ]; then
@@ -8016,7 +8029,7 @@ cmd_release_verify() {
 
     if [ "${missing:-0}" -gt 0 ] || [ "${errors:-0}" -gt 0 ]; then
         echo -e "${BOLD}Missing/Error images:${NC}"
-        printf '%s\n' "$output" | python3.11 -c "
+        printf '%s\n' "$output" | $PYTHON -c "
 import sys, json
 d = json.load(sys.stdin)
 for img in d.get('images', []):
@@ -8055,7 +8068,7 @@ cmd_release_readiness() {
         return 1
     fi
 
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
     local all_releases
     all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
         [.items[] | select(.spec.releasePlan | contains($ver))]
@@ -8329,9 +8342,9 @@ cmd_release_readiness() {
     fi
 
     # ── Section 4: Expiring Exceptions ──
-    local name_filter="${APPLICATION_NAME#rhoai-}"
+    local name_filter="${APPLICATION_NAME#*-v}"
     local expiring_json
-    expiring_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action expiring --name-filter "$name_filter" --days 45 2>/dev/null || true)
+    expiring_json=$(cd "$SCRIPT_DIR/src" && $PYTHON ec_policy_data.py --action expiring --name-filter "$name_filter" --days 45 2>/dev/null || true)
 
     if [ -n "$expiring_json" ] && echo "$expiring_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
         local exp_count
@@ -8521,7 +8534,7 @@ cmd_release_history() {
         return 1
     fi
 
-    local app_version="${APPLICATION_NAME#rhoai-}"
+    local app_version="${APPLICATION_NAME#*-v}"
     local all_releases
     all_releases=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
         [.items[] | select(.spec.releasePlan | contains($ver))]
@@ -8774,11 +8787,11 @@ cmd_scenarios() {
 
     local its_json
     if $show_all; then
-        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action "$action" --namespace "$NAMESPACE" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && $PYTHON its_scenario_data.py --action "$action" --namespace "$NAMESPACE" 2>/dev/null || true)
     elif [ "$action" = "gaps" ]; then
-        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action gaps --namespace "$NAMESPACE" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && $PYTHON its_scenario_data.py --action gaps --namespace "$NAMESPACE" 2>/dev/null || true)
     else
-        its_json=$(cd "$SCRIPT_DIR/src" && python3.11 its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$app_filter" 2>/dev/null || true)
+        its_json=$(cd "$SCRIPT_DIR/src" && $PYTHON its_scenario_data.py --action list --namespace "$NAMESPACE" --app-filter "$app_filter" 2>/dev/null || true)
     fi
 
     if [ -z "$its_json" ] || [ "$(echo "$its_json" | jq -r '.source // empty' 2>/dev/null)" = "error" ]; then
@@ -9011,7 +9024,7 @@ cmd_jira_inbox() {
         local jira_key comment_id
         jira_key=$(echo "$target" | cut -d'|' -f1 | xargs)
         comment_id=$(echo "$target" | cut -d'|' -f2 | xargs)
-        python3.11 "$SCRIPT_DIR/src/jira_refine.py" "$jira_key" "$comment_id"
+        $PYTHON "$SCRIPT_DIR/src/jira_refine.py" "$jira_key" "$comment_id"
         return
     fi
 
@@ -9334,7 +9347,7 @@ cmd_fix() {
         echo ""
         local jira_summary="Conforma violation: ${component} — ${error_type:-unknown} scenario (${failed_step:-0} violations)"
         export_jira "$component" "$export_type" | \
-            python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+            $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                 --mode jira \
                 --component "$component" \
                 --summary "$jira_summary"
@@ -9347,7 +9360,7 @@ cmd_fix() {
             read -r pr_choice
             if [ "$pr_choice" = "y" ] || [ "$pr_choice" = "Y" ]; then
                 echo ""
-                python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+                $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                     --mode pr \
                     --component "$component" \
                     --conforma-id "$failure_id" \
@@ -9358,7 +9371,7 @@ cmd_fix() {
                     printf "Push this PR to GitHub? [y/N]: "
                     read -r push_choice
                     if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
-                        python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+                        $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                             --mode pr \
                             --component "$component" \
                             --conforma-id "$failure_id" \
@@ -9393,7 +9406,7 @@ cmd_fix() {
         case "$choice" in
             1)
                 echo ""
-                python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+                $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                     --mode pr \
                     --component "$component" \
                     --failure-id "$failure_id" \
@@ -9404,7 +9417,7 @@ cmd_fix() {
                     printf "Create this PR on GitHub? [y/N]: "
                     read -r push_choice
                     if [ "$push_choice" = "y" ] || [ "$push_choice" = "Y" ]; then
-                        python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+                        $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                             --mode pr \
                             --component "$component" \
                             --failure-id "$failure_id" \
@@ -9417,7 +9430,7 @@ cmd_fix() {
                 echo ""
                 local jira_summary="Build failure: ${component} — ${error_type:-unknown} in ${failed_step:-unknown}"
                 export_jira "$component" "$export_type" | \
-                    python3.11 "$SCRIPT_DIR/src/fixers/fix_generator.py" \
+                    $PYTHON "$SCRIPT_DIR/src/fixers/fix_generator.py" \
                         --mode jira \
                         --component "$component" \
                         --summary "$jira_summary"
@@ -9836,6 +9849,10 @@ case "${1:-}" in
                     shift 2
                     cmd_get_releases "$@"
                 fi
+                ;;
+            vulnerabilities|cves|vuln)
+                shift 2
+                $PYTHON "$SCRIPT_DIR/src/cli/main.py" get vulnerabilities "$@"
                 ;;
             *) usage ;;
         esac

@@ -333,6 +333,11 @@ class BuildFailureAnalyzer:
             return None
 
         if not full_logs:
+            full_logs = self._fetch_oci_logs(failure)
+            if full_logs:
+                logger.info("Fetched logs from OCI artifact for %s", pr_name)
+
+        if not full_logs:
             return None
 
         logger.info("Re-fetched %d chars (was %d in DB)",
@@ -357,6 +362,78 @@ class BuildFailureAnalyzer:
                 return section
 
         return full_logs
+
+    def _fetch_oci_logs(self, failure):
+        # type: (dict,) -> Optional[str]
+        """Fetch logs from OCI registry artifact as fallback when Tekton Results fails."""
+        pr_name = failure.get('pipelinerun_name')
+        component = failure.get('component_name')
+        if not pr_name or not component:
+            return None
+
+        try:
+            from clients.kubernetes import KubernetesClient
+            kc = KubernetesClient(namespace=self.config.k8s.namespace)
+            meta = kc.get_component_metadata(component)
+            if not meta or not meta.get('container_image'):
+                return None
+
+            from clients.registry_client import RegistryClient
+            registry, repository, _ = RegistryClient.parse_image_ref(meta['container_image'])
+            rc = RegistryClient()
+
+            logs = rc.fetch_log_artifact(registry, repository, pr_name)
+            if not logs:
+                return None
+
+            failed_task = failure.get('failed_task_name', '')
+            if failed_task:
+                for marker in ('--- LOGS FOR', '===== TaskRun:'):
+                    pattern = r'(?:{}[^\n]*{}[^\n]*\n)(.*?)(?=\n{}|\Z)'.format(
+                        re.escape(marker), re.escape(failed_task), re.escape(marker))
+                    match = re.search(pattern, logs, re.DOTALL)
+                    if match:
+                        return match.group(1).strip()
+
+            return logs
+        except Exception as e:
+            logger.debug("OCI log fetch failed for %s: %s", pr_name, e)
+            return None
+
+    def _fetch_sarif_for_failure(self, failure):
+        # type: (dict,) -> str
+        """Fetch SARIF scan results if this is a scan-related failure."""
+        error_msg = (failure.get('error_message') or '').lower()
+        failed_task = (failure.get('failed_task_name') or '').lower()
+        is_scan = any(kw in error_msg or kw in failed_task
+                      for kw in ('clair', 'sast', 'scan', 'vulnerability'))
+        if not is_scan:
+            return ''
+
+        component = failure.get('component_name')
+        if not component:
+            return ''
+
+        try:
+            from clients.kubernetes import KubernetesClient
+            kc = KubernetesClient(namespace=self.config.k8s.namespace)
+            meta = kc.get_component_metadata(component)
+            if not meta or not meta.get('container_image'):
+                return ''
+
+            from clients.registry_client import RegistryClient
+            image = meta['container_image']
+            registry, repository, tag_or_digest = RegistryClient.parse_image_ref(image)
+
+            rc = RegistryClient()
+            if not tag_or_digest.startswith('sha256:'):
+                return ''
+
+            results = rc.fetch_sarif_results(registry, repository, tag_or_digest)
+            return RegistryClient.format_sarif_summary(results)
+        except Exception as e:
+            logger.debug("SARIF fetch failed for %s: %s", component, e)
+            return ''
 
     def _fetch_failed_taskrun_logs(self, failure):
         # type: (dict,) -> Optional[str]
@@ -431,8 +508,13 @@ class BuildFailureAnalyzer:
                         logger.info("Fetched TaskRun logs for '%s' (%s): %d chars",
                                     task, platform or 'no-platform', len(logs))
 
+            sarif_summary = self._fetch_sarif_for_failure(failure)
+
             if failed_logs:
                 header_parts = []
+                if sarif_summary:
+                    header_parts.append(sarif_summary)
+                    header_parts.append('')
                 if test_outputs:
                     header_parts.append('=== Structured Test Results (FAILURES) ===')
                     header_parts.extend(test_outputs)
@@ -548,6 +630,36 @@ class BuildFailureAnalyzer:
 
         return None
 
+    def _get_dependency_updates(self, failure):
+        # type: (dict,) -> str
+        """Fetch recent MintMaker dependency updates for correlation."""
+        component = failure.get('component_name')
+        if not component:
+            return ''
+        try:
+            from clients.konflux_client import KonfluxClient
+            kc = KonfluxClient(namespace=self.config.k8s.namespace)
+            updates = kc.get_dependency_updates(component_filter=component, hours=48)
+            if not updates:
+                return ''
+            lines = ['\n## Recent Dependency Updates (MintMaker)']
+            for u in updates[:10]:
+                merged = ' (merged)' if u.get('merged') else ' (pending)'
+                lines.append('- {}: {} {} → {}{}'.format(
+                    u.get('created', '')[:16],
+                    u.get('package', 'unknown'),
+                    u.get('from_version', '?'),
+                    u.get('to_version', '?'),
+                    merged,
+                ))
+                if u.get('pr_url'):
+                    lines.append('  PR: {}'.format(u['pr_url']))
+            lines.append('')
+            return '\n'.join(lines)
+        except Exception as e:
+            logger.debug("Dependency update fetch failed: %s", e)
+            return ''
+
     def build_analysis_prompt(self, failure):
         # type: (Dict[str, Any],) -> Tuple[str, str]
         """Construct system + user prompts from failure data.
@@ -572,6 +684,8 @@ class BuildFailureAnalyzer:
         # Known-pattern context from previous occurrences (top 3 patterns)
         pattern_section = self.pattern_service.get_matches_for_prompt(failure)
 
+        dep_updates_section = self._get_dependency_updates(failure)
+
         user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
 
 ## Component
@@ -588,7 +702,7 @@ class BuildFailureAnalyzer:
 - Failed Step: {failed_step}
 - Error Type: {error_type}
 - Error Message: {error_message}
-{commit_context}{pattern_section}
+{commit_context}{pattern_section}{dep_updates}
 ## Build Logs
 ```
 {logs}
@@ -600,6 +714,7 @@ Use the record_analysis tool. Remember:
 - Cite the source for every claim (file name, line number, log section)
 - Set confidence based on evidence quality: high evidence = high confidence
 - If confidence is below 0.6, suggest contacting {commit_author} for clarification
+- If Recent Dependency Updates are listed, check if the failure correlates with a recent package bump
 
 CRITICAL FORMATTING RULES:
 1. root_cause field:
@@ -636,6 +751,7 @@ CRITICAL FORMATTING RULES:
             error_message=failure.get('error_message', 'unknown'),
             commit_context=commit_context_section,
             pattern_section=pattern_section,
+            dep_updates=dep_updates_section,
             logs=logs
         )
 

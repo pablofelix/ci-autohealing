@@ -1,11 +1,11 @@
-#!/usr/bin/env python3.11
+#!/usr/bin/env python3
 """Interactive Jira reply refinement with session-level meta-learning.
 
 Called by `ic jira inbox refine <N>` after ic resolves the index to
 (jira_key, comment_id).
 
 Usage:
-    python3.11 jira_refine.py <jira_key> <comment_id>
+    python3 jira_refine.py <jira_key> <comment_id>
 
 Flow:
   1. Load current draft from DB + original comment from Jira API

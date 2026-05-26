@@ -153,9 +153,10 @@ def get_apps():
             group='appstudio.redhat.com', version='v1alpha1',
             namespace=cfg.NAMESPACE, plural='applications',
         )
+        app_prefix = cfg.APPLICATION_NAME.rsplit('-v', 1)[0] if cfg.APPLICATION_NAME else ''
         apps = sorted(
             [item['metadata']['name'] for item in result.get('items', [])
-             if 'rhoai' in item['metadata']['name']],
+             if app_prefix and app_prefix in item['metadata']['name']],
         )
     except Exception:
         print(yellow('Warning: Cluster unreachable — showing applications from database'))
@@ -220,6 +221,120 @@ def get_fixes(show_all, component):
     if show_all:
         args.append('--all')
     _bash_fallback(args)
+
+
+@get.command('vulnerabilities')
+@click.option('--component', help='Filter to a single component')
+@click.option('--severity', type=click.Choice(['critical', 'high']),
+              help='Show only this severity and above')
+def get_vulnerabilities(component, severity):
+    """CVE vulnerability summary from SARIF scans."""
+    from cli.formatting import bold, cyan, dim, red, section_header, yellow
+    section_header('Vulnerability Summary — {}'.format(cfg.APPLICATION_NAME))
+    print()
+    try:
+        from clients.konflux_client import KonfluxClient
+        from clients.registry_client import RegistryClient
+        kc = KonfluxClient(namespace=cfg.NAMESPACE)
+        snapshots = kc.get_snapshots(app_filter=cfg.APPLICATION_NAME, limit=1)
+        if not snapshots:
+            print(yellow('No snapshots found for {}'.format(cfg.APPLICATION_NAME)))
+            return
+        snap = snapshots[0]
+        snap_name = snap.get('metadata', {}).get('name', 'unknown')
+        components = snap.get('spec', {}).get('components', [])
+        print('Snapshot: {}'.format(cyan(snap_name)))
+        print('Components: {}'.format(len(components)))
+        print()
+
+        rc = RegistryClient()
+        totals = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        rows = []
+        severity_map = {'error': 'critical', 'warning': 'high', 'note': 'medium'}
+
+        if component:
+            components = [c for c in components if component in c.get('name', '')]
+        batch = rc.fetch_sarif_batch(components, timeout=60)
+
+        for name, results in batch.items():
+            if not results:
+                continue
+
+            counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+            top_cves = []
+            for r in results:
+                sev = severity_map.get(r.get('level', ''), 'low')
+                counts[sev] += 1
+                if len(top_cves) < 5:
+                    rule_id = r.get('ruleId', '')
+                    if rule_id and rule_id not in top_cves:
+                        top_cves.append(rule_id)
+
+            for sev in totals:
+                totals[sev] += counts[sev]
+            rows.append({'name': name, 'counts': counts, 'total': sum(counts.values()),
+                         'top_cves': top_cves})
+
+        if severity:
+            min_levels = {'critical': ['critical'], 'high': ['critical', 'high']}
+            levels = min_levels[severity]
+            rows = [r for r in rows if any(r['counts'].get(lv, 0) > 0 for lv in levels)]
+
+        rows.sort(key=lambda r: r['counts']['critical'] * 1000 + r['counts']['high'], reverse=True)
+
+        if not rows:
+            print(yellow('No vulnerabilities found.'))
+            return
+
+        fmt = '  {:<50s} {:>5s} {:>5s} {:>5s} {:>5s} {:>6s}'
+        print(fmt.format('COMPONENT', 'CRIT', 'HIGH', 'MED', 'LOW', 'TOTAL'))
+        print('  ' + '-' * 80)
+        for r in rows:
+            c = r['counts']
+            crit_str = str(c['critical']) if c['critical'] else '.'
+            high_str = str(c['high']) if c['high'] else '.'
+            med_str = str(c['medium']) if c['medium'] else '.'
+            low_str = str(c['low']) if c['low'] else '.'
+            crit_str = red(crit_str) if c['critical'] > 0 else crit_str
+            high_str = yellow(high_str) if c['high'] > 0 else high_str
+            print(fmt.format(r['name'][:50], crit_str, high_str, med_str, low_str, str(r['total'])))
+
+        print()
+        print(bold('Totals:') + ' {} critical, {} high, {} medium, {} low'.format(
+            red(str(totals['critical'])) if totals['critical'] else '0',
+            yellow(str(totals['high'])) if totals['high'] else '0',
+            totals['medium'], totals['low']))
+
+        all_cves = []
+        for r in rows:
+            for cve in r['top_cves']:
+                if cve not in [c[0] for c in all_cves]:
+                    sev = 'critical' if r['counts']['critical'] > 0 else 'high'
+                    all_cves.append((cve, sev, r['name']))
+        if all_cves:
+            print()
+            print(bold('Top findings:'))
+            for cve, sev, comp_name in all_cves[:10]:
+                sev_str = red(sev) if sev == 'critical' else yellow(sev)
+                print('  {} ({}) — {}'.format(cve, sev_str, comp_name))
+        print()
+        print(dim('Note: Severity is mapped from SARIF levels (error/warning/note). Includes SAST'))
+        print(dim('findings (ShellCheck, Snyk Code) — not only CVEs. Filter with --severity critical.'))
+    except ImportError:
+        print(red('Error: Required clients not available (registry_client, konflux_client)'))
+        raise SystemExit(1)
+    except Exception as e:
+        print(red('Error: {}'.format(e)))
+        raise SystemExit(1)
+
+
+@get.command('cves', hidden=True)
+@click.option('--component', help='Filter to a single component')
+@click.option('--severity', type=click.Choice(['critical', 'high']))
+@click.pass_context
+def get_cves(ctx, component, severity):
+    """Alias for vulnerabilities."""
+    ctx.invoke(get_vulnerabilities, component=component, severity=severity)
 
 
 # --- describe group ---

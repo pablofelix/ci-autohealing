@@ -185,7 +185,7 @@ class ConformaAnalyzer:
 ```
 {summary}
 ```
-{pattern_section}{exclusion_section}
+{pattern_section}{exclusion_section}{sarif_section}
 Use the record_conforma_analysis tool. Remember:
 - Match against the 14 known patterns (hermetic build, unpinned task, package source, etc.)
 - Explain WHICH policy is violated and WHY
@@ -208,6 +208,7 @@ Use the record_conforma_analysis tool. Remember:
             summary=summary,
             pattern_section=pattern_section,
             exclusion_section=self._get_policy_exclusions(violation),
+            sarif_section=self._get_sarif_context(violation),
         )
 
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
@@ -275,6 +276,41 @@ Use the record_conforma_analysis tool. Remember:
             return '\n'.join(lines) + '\n'
         except Exception as e:
             logger.warning("Cannot fetch EC policy exclusions: %s", e)
+            return ''
+
+    def _get_sarif_context(self, violation):
+        # type: (Dict[str, Any],) -> str
+        """Fetch SARIF scan results if violation is scan-related."""
+        summary = (violation.get('violation_summary') or '').lower()
+        is_scan = any(kw in summary for kw in ('cve', 'vulnerability', 'clair', 'scan'))
+        if not is_scan:
+            return ''
+
+        component = violation.get('component_name')
+        if not component:
+            return ''
+
+        try:
+            from clients.kubernetes import KubernetesClient
+            kc = KubernetesClient(namespace=self.config.k8s.namespace)
+            meta = kc.get_component_metadata(component)
+            if not meta or not meta.get('container_image'):
+                return ''
+
+            from clients.registry_client import RegistryClient
+            image = meta['container_image']
+            registry, repository, tag_or_digest = RegistryClient.parse_image_ref(image)
+            if not tag_or_digest.startswith('sha256:'):
+                return ''
+
+            rc = RegistryClient()
+            results = rc.fetch_sarif_results(registry, repository, tag_or_digest)
+            sarif_text = RegistryClient.format_sarif_summary(results)
+            if sarif_text:
+                return '\n' + sarif_text + '\n'
+            return ''
+        except Exception as e:
+            logger.debug("SARIF fetch for conforma failed: %s", e)
             return ''
 
     def parse_analysis_response(self, llm_response):
