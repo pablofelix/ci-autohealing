@@ -63,7 +63,7 @@ class KubernetesClient(PipelineRunSource):
 
     def get_component_metadata(self, component_name, namespace=None):
         # type: (str, Optional[str]) -> Optional[Dict[str, str]]
-        """Fetch component repository URL and branch from cluster."""
+        """Fetch component repository URL, branch, and promotion status from cluster."""
         ns = namespace or self.namespace
         try:
             _ensure_k8s_config()
@@ -72,9 +72,15 @@ class KubernetesClient(PipelineRunSource):
                 group='appstudio.redhat.com', version='v1alpha1',
                 namespace=ns, plural='components', name=component_name,
             )
+            spec = data.get('spec', {})
+            status = data.get('status', {})
             return {
-                'repository_url': data.get('spec', {}).get('source', {}).get('git', {}).get('url', ''),
-                'branch': data.get('spec', {}).get('source', {}).get('git', {}).get('revision', ''),
+                'repository_url': spec.get('source', {}).get('git', {}).get('url', ''),
+                'branch': spec.get('source', {}).get('git', {}).get('revision', ''),
+                'last_promoted_image': status.get('lastPromotedImage', ''),
+                'last_built_commit': status.get('lastBuiltCommit', ''),
+                'container_image': spec.get('containerImage', ''),
+                'nudges': spec.get('build-nudges-ref', []),
             }
         except Exception:
             return None

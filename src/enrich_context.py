@@ -23,6 +23,7 @@ from config import CollectorConfig
 from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
 from enrichment.sources.dependency_context import DependencyContextSource
 from enrichment.sources.related_failures import RelatedFailuresSource
+from enrichment.sources.build_history import BuildHistorySource
 from logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -55,9 +56,13 @@ def main():
         # Register context sources
         orchestrator.register_source(DependencyContextSource(config))
         orchestrator.register_source(RelatedFailuresSource(config))
+        orchestrator.register_source(BuildHistorySource(config))
 
         # Run batch enrichment
-        result = orchestrator.enrich_batch(limit=args.limit)
+        result = orchestrator.enrich_batch(
+            limit=args.limit,
+            component_filter=args.component,
+        )
 
         # Log results
         logger.info("Enrichment batch complete:")

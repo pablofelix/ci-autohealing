@@ -180,6 +180,78 @@ class KonfluxClient:
             'contexts': context_names,
         }
 
+    def get_snapshots(self, app_filter=None, limit=5):
+        # type: (Optional[str], int) -> List[Dict[str, Any]]
+        params = {}
+        if app_filter:
+            params['labelSelector'] = 'appstudio.openshift.io/application={}'.format(app_filter)
+        data = self._get('snapshots', params=params)
+        if not data:
+            return []
+        items = data.get('items', [])
+        items.sort(key=lambda s: s.get('metadata', {}).get('creationTimestamp', ''), reverse=True)
+        return items[:limit]
+
+    @staticmethod
+    def extract_snapshot_status(snapshot):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
+        meta = snapshot.get('metadata', {})
+        spec = snapshot.get('spec', {})
+        conditions = snapshot.get('status', {}).get('conditions', [])
+        components = spec.get('components', [])
+        test_results = {}
+        for cond in conditions:
+            ctype = cond.get('type', '')
+            if ctype.startswith('AppStudioTestSucceeded') or 'Test' in ctype:
+                test_results[cond.get('reason', ctype)] = {
+                    'status': cond.get('status', 'Unknown'),
+                    'message': cond.get('message', '')[:300],
+                }
+        return {
+            'name': meta.get('name', ''),
+            'application': spec.get('application', ''),
+            'created': meta.get('creationTimestamp', ''),
+            'component_count': len(components),
+            'components': [c.get('name', '') for c in components],
+            'test_results': test_results,
+        }
+
+    def get_releases(self, app_filter=None, limit=5):
+        # type: (Optional[str], int) -> List[Dict[str, Any]]
+        params = {}
+        if app_filter:
+            params['labelSelector'] = 'appstudio.openshift.io/application={}'.format(app_filter)
+        data = self._get('releases', params=params)
+        if not data:
+            return []
+        items = data.get('items', [])
+        items.sort(key=lambda r: r.get('metadata', {}).get('creationTimestamp', ''), reverse=True)
+        return items[:limit]
+
+    @staticmethod
+    def extract_release_status(release):
+        # type: (Dict[str, Any]) -> Dict[str, Any]
+        meta = release.get('metadata', {})
+        spec = release.get('spec', {})
+        status = release.get('status', {})
+        conditions = status.get('conditions', [])
+        last_cond = conditions[-1] if conditions else {}
+        processing = status.get('managedProcessing', {})
+        return {
+            'name': meta.get('name', ''),
+            'snapshot': spec.get('snapshot', ''),
+            'release_plan': spec.get('releasePlan', ''),
+            'created': meta.get('creationTimestamp', ''),
+            'phase': last_cond.get('type', 'Unknown'),
+            'status': last_cond.get('status', 'Unknown'),
+            'message': last_cond.get('message', '')[:300],
+            'pipeline_run': processing.get('pipelineRun', ''),
+            'start_time': processing.get('startTime', ''),
+            'completion_time': processing.get('completionTime', ''),
+            'automated': status.get('automated', False),
+            'post_validation_failed': status.get('validation', {}).get('failedPostValidation', False),
+        }
+
     @staticmethod
     def extract_rpa_bindings(rpas, policy_names=None):
         # type: (List[Dict[str, Any]], Optional[set]) -> List[Dict[str, str]]

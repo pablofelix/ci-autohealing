@@ -477,6 +477,74 @@ def get_health(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
 
 @mcp.tool()
 @async_tool
+def get_component_status(component: str) -> Dict[str, Any]:
+    """Get component promotion health: last build vs last promoted image, downstream nudges.
+
+    Args:
+        component: Component name
+    """
+    from clients.kubernetes import KubernetesClient
+    k8s = KubernetesClient(namespace=NAMESPACE)
+    metadata = k8s.get_component_metadata(component)
+    if not metadata:
+        return {'component': component, 'error': 'Component not found in cluster'}
+    return {
+        'component': component,
+        'repository': metadata.get('repository_url', ''),
+        'branch': metadata.get('branch', ''),
+        'last_promoted_image': metadata.get('last_promoted_image', ''),
+        'last_built_commit': metadata.get('last_built_commit', ''),
+        'container_image': metadata.get('container_image', ''),
+        'nudges_downstream': metadata.get('nudges', []),
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_snapshot_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get latest Snapshot CR status: component images and integration test results.
+
+    Snapshots are created after successful builds and tested by the Integration Service.
+    Missing components in a Snapshot = silent build failures. Failed conditions = integration test failures.
+
+    Args:
+        application: Which version to query
+    """
+    from clients.konflux_client import KonfluxClient
+    kc = KonfluxClient(namespace=NAMESPACE)
+    snapshots = kc.get_snapshots(app_filter=application, limit=5)
+    if not snapshots:
+        return {'application': application, 'snapshots': [], 'error': 'No snapshots found'}
+    results = []
+    for snap in snapshots:
+        results.append(kc.extract_snapshot_status(snap))
+    return {'application': application, 'snapshot_count': len(results), 'snapshots': results}
+
+
+@mcp.tool()
+@async_tool
+def get_release_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get recent Release CR status: release pipeline progress, timing, and validation.
+
+    Tracks the full release lifecycle — which Snapshot is being released, pipeline status,
+    and post-validation results. Detects stuck or failed releases.
+
+    Args:
+        application: Which version to query
+    """
+    from clients.konflux_client import KonfluxClient
+    kc = KonfluxClient(namespace=NAMESPACE)
+    releases = kc.get_releases(app_filter=application, limit=5)
+    if not releases:
+        return {'application': application, 'releases': [], 'error': 'No releases found'}
+    results = []
+    for rel in releases:
+        results.append(kc.extract_release_status(rel))
+    return {'application': application, 'release_count': len(results), 'releases': results}
+
+
+@mcp.tool()
+@async_tool
 def get_health_warnings(application: str = DEFAULT_APPLICATION) -> List[HealthWarning]:
     """Get proactive warnings (trending issues, degradation signals).
 
@@ -706,6 +774,8 @@ def get_release_readiness(
     else:
         verdict = "READY"
 
+    schedule = get_release_schedule.__wrapped__(application)
+
     return {
         'application': application,
         'verdict': verdict,
@@ -714,7 +784,47 @@ def get_release_readiness(
         'freeze': freeze,
         'blockers': blockers,
         'risks': risks,
+        'schedule': schedule,
     }
+
+
+@mcp.tool()
+@async_tool
+def get_release_schedule(
+    application: str = DEFAULT_APPLICATION,
+) -> Optional[Dict[str, Any]]:
+    """Get release milestone dates from Smartsheet cache.
+
+    Returns all milestone dates: planning freeze, feature freeze, code freeze,
+    initial RC, release window, release date, and next release version.
+
+    Args:
+        application: Which version to query
+    """
+    db = _db_connection()
+    with db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT planning_freeze, feature_freeze, code_freeze, initial_rc, "
+            "release_window_start, release_date, next_release, updated_at "
+            "FROM release_schedule WHERE application = %s",
+            (application,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        from datetime import date as date_type
+        today = date_type.today()
+        fields = ['planning_freeze', 'feature_freeze', 'code_freeze',
+                  'initial_rc', 'release_window_start', 'release_date']
+        result = {'application': application}
+        for i, f in enumerate(fields):
+            result[f] = str(row[i]) if row[i] else None
+            if row[i] and hasattr(row[i], 'year'):
+                result[f'{f}_days'] = (row[i] - today).days
+        result['next_release'] = row[6] if row[6] else None
+        result['updated_at'] = str(row[7]) if row[7] else None
+        return result
 
 
 # ---------------------------------------------------------------------------

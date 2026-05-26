@@ -343,6 +343,7 @@ class AIAnalysisRepository:
                        bf.error_type, bf.failed_task_name, bf.failed_step_name,
                        bf.build_logs, bf.commit_sha, bf.commit_message, bf.commit_author,
                        bf.repository, bf.branch, bf.commit_context, bf.repository_url,
+                       bf.enriched_context, bf.application,
                        ep.typical_fix    AS pattern_typical_fix,
                        ep.doc_context    AS pattern_doc_context,
                        ep.pattern_name   AS pattern_name,
@@ -383,10 +384,12 @@ class AIAnalysisRepository:
                     'branch': row[12],
                     'commit_context': row[13],
                     'repository_url': row[14],
-                    'pattern_typical_fix': row[15],
-                    'pattern_doc_context': row[16],
-                    'pattern_name': row[17],
-                    'pattern_id': row[18],
+                    'enriched_context': row[15],
+                    'application': row[16],
+                    'pattern_typical_fix': row[17],
+                    'pattern_doc_context': row[18],
+                    'pattern_name': row[19],
+                    'pattern_id': row[20],
                 })
 
             return results

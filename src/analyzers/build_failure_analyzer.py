@@ -7,7 +7,9 @@ Follows the collector pattern: thin orchestration delegating to clients
 (LLMProvider) and repositories.
 """
 
+import json
 import os
+import re
 import time
 
 from logger import setup_logger
@@ -85,23 +87,16 @@ class BuildFailureAnalyzer:
     """Analyzes build failures using an LLM provider."""
 
     def __init__(self, config, db=None, build_repo=None,
-                 ai_repo=None, llm=None, langfuse=None, pattern_service=None):
+                 ai_repo=None, llm=None, langfuse=None, pattern_service=None,
+                 github_client=None):
         # type: (CollectorConfig, ...) -> None
-        """Initialize analyzer with dependency injection.
-
-        Args:
-            config: CollectorConfig with LLM settings
-            db: Database connection (created if None)
-            build_repo: BuildFailureRepository (created if None)
-            ai_repo: AIAnalysisRepository (created if None)
-            llm: LLMProvider (created from config if None)
-            langfuse: LangfuseTracker (created if None)
-            pattern_service: PatternMatchingService (created if None)
-        """
         if db is None:
             db = DatabaseConnection(config.db)
 
         self.config = config
+        self.db = db
+        self._github_client = github_client
+        self._cheap_llm = None
         self.build_repo = build_repo or BuildFailureRepository(db)
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
         self.pattern_repo = ErrorPatternRepository(db)
@@ -147,6 +142,403 @@ class BuildFailureAnalyzer:
             force=force
         )
 
+    def _ensure_context(self, failure):
+        # type: (dict,) -> None
+        """Fetch missing commit context from GitHub if DB data is incomplete.
+
+        Checks commit_context for completeness (commit diff, tekton configs).
+        If incomplete and we have repository_url + commit_sha, fetches live
+        from GitHub and updates both the in-memory dict and the DB.
+        """
+        commit_ctx = failure.get('commit_context')
+
+        if isinstance(commit_ctx, str):
+            try:
+                commit_ctx = json.loads(commit_ctx)
+            except (json.JSONDecodeError, TypeError):
+                commit_ctx = None
+
+        has_commit = commit_ctx and commit_ctx.get('commit') is not None
+
+        if has_commit:
+            return
+
+        repo_url = failure.get('repository_url')
+        sha = failure.get('commit_sha')
+        branch = failure.get('branch')
+
+        if not repo_url or not sha:
+            return
+
+        if self._github_client is None:
+            token = getattr(self.config, 'github_token', None) or os.environ.get('GITHUB_TOKEN')
+            if not token:
+                logger.warning("No GitHub token — cannot live-fetch context for %s", sha[:8])
+                return
+            from clients.github_client import GitHubClient
+            self._github_client = GitHubClient(token)
+
+        logger.info("Live-fetching context from GitHub for %s@%s", repo_url, sha[:8])
+        ctx = self._github_client.get_commit_context(repo_url, sha, branch)
+
+        if not ctx:
+            return
+
+        failure['commit_context'] = ctx
+
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE build_failures SET commit_context = %s WHERE id = %s",
+                    (json.dumps(ctx), failure['id'])
+                )
+            logger.info("Stored live-fetched context in DB for failure %s", failure['id'])
+        except Exception as e:
+            logger.warning("Failed to store context in DB: %s", e)
+
+    def _ensure_enrichment(self, failure):
+        # type: (dict,) -> None
+        """Run enrichment if not yet done for this failure."""
+        if failure.get('enriched_context'):
+            return
+
+        try:
+            from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
+            from enrichment.sources.dependency_context import DependencyContextSource
+            from enrichment.sources.related_failures import RelatedFailuresSource
+            from enrichment.sources.build_history import BuildHistorySource
+
+            orchestrator = EnrichmentOrchestrator(self.config, self.db)
+            orchestrator.register_source(DependencyContextSource(self.config))
+            orchestrator.register_source(RelatedFailuresSource(self.config, self.db))
+            orchestrator.register_source(BuildHistorySource(self.config, self._github_client))
+
+            logger.info("Auto-enriching context for %s", failure.get('component_name'))
+            result = orchestrator.enrich_failure(failure)
+
+            if result.success:
+                logger.info("Enrichment succeeded: %d/%d sources",
+                            result.sources_succeeded, result.sources_attempted)
+                with self.db.connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT enriched_context FROM build_failures WHERE id = %s",
+                        (failure['id'],)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        failure['enriched_context'] = row[0]
+            else:
+                logger.info("Enrichment found no additional context for %s",
+                            failure.get('component_name'))
+        except Exception as e:
+            logger.warning("Auto-enrichment failed: %s", e)
+
+    def _ensure_logs(self, failure):
+        # type: (dict,) -> None
+        """Process logs so the analyzer sees the actual error, not noise.
+
+        Four escalating steps:
+        1. Structural parsing: extract only the failed step section
+        2. Live re-fetch from Tekton Results if logs are truncated
+        3. Error keyword filtering: keep only error lines + context
+        4. AI extraction via Haiku if still too large
+        """
+        logs = failure.get('build_logs') or ''
+        failed_task = failure.get('failed_task_name') or ''
+
+        # Step 0: Fetch per-TaskRun logs when we'd benefit from more specific data:
+        # - no logs, task-specific failure, truncated, or missing platform info
+        error_msg = failure.get('error_message') or ''
+        is_task_specific_failure = any(t in error_msg.lower() for t in
+                                       ('fips-check', 'init-task', 'sast-', 'clair-'))
+        is_truncated_build = len(logs) >= 199000
+        already_has_platform = '=== Per-platform build status ===' in logs
+        if not logs or is_task_specific_failure or is_truncated_build or not already_has_platform:
+            taskrun_logs = self._fetch_failed_taskrun_logs(failure)
+            if taskrun_logs:
+                logs = taskrun_logs
+
+        if not logs:
+            return
+
+        original_len = len(logs)
+
+        # Step 1: Extract only the failed step section
+        if failed_task:
+            section = self._extract_failed_section(logs, failed_task)
+            if section and len(section) > 100:
+                logger.info("Extracted failed step section '%s': %d -> %d chars",
+                            failed_task, len(logs), len(section))
+                logs = section
+
+        # Step 2: Re-fetch if truncated
+        is_truncated = original_len >= 199000
+        section_looks_cut = logs.rstrip() != '' and not logs.rstrip().endswith('\n')
+
+        if is_truncated and section_looks_cut:
+            refetched = self._refetch_logs(failure, failed_task)
+            if refetched:
+                logs = refetched
+
+        # Step 3: Error keyword filtering
+        MAX_LOG_CHARS = 100000
+        if len(logs) > MAX_LOG_CHARS:
+            filtered = self._filter_error_lines(logs)
+            if filtered and len(filtered) >= 200:
+                logger.info("Keyword filtering: %d -> %d chars", len(logs), len(filtered))
+                logs = filtered
+
+        # Step 4: AI extraction if still too large
+        if len(logs) > MAX_LOG_CHARS:
+            extracted = self._ai_extract_error(logs, failure)
+            if extracted:
+                logs = extracted
+            else:
+                head_size = 5000
+                tail_size = MAX_LOG_CHARS - head_size
+                omitted = len(logs) - MAX_LOG_CHARS
+                logs = (logs[:head_size]
+                        + '\n\n... ({} chars omitted) ...\n\n'.format(omitted)
+                        + logs[-tail_size:])
+
+        failure['build_logs'] = logs
+
+    def _extract_failed_section(self, logs, task_name):
+        # type: (str, str) -> Optional[str]
+        """Extract log section for the failed TaskRun using markers."""
+        pattern = r'(===== TaskRun: [^/]*{task}[^/]* /.*?(?=\n=====|$))'.format(
+            task=re.escape(task_name))
+        matches = re.findall(pattern, logs, re.DOTALL)
+        if matches:
+            return '\n'.join(matches)
+        return None
+
+    def _refetch_logs(self, failure, failed_task=''):
+        # type: (dict, str) -> Optional[str]
+        """Re-fetch logs from Tekton Results with a higher size limit."""
+        pr_name = failure.get('pipelinerun_name')
+        if not pr_name:
+            return None
+
+        try:
+            from clients.tekton_results import TektonResultsClient
+            ns = self.config.k8s.namespace
+            tr = TektonResultsClient(namespace=ns)
+            logger.info("Re-fetching logs from Tekton Results for %s (500KB limit)", pr_name)
+            full_logs = tr.get_pipelinerun_logs(pr_name, max_log_size=500000, failed_only=True)
+        except Exception as e:
+            logger.warning("Failed to re-fetch logs: %s", e)
+            return None
+
+        if not full_logs:
+            return None
+
+        logger.info("Re-fetched %d chars (was %d in DB)",
+                     len(full_logs), len(failure.get('build_logs', '')))
+
+        # Update DB with fuller logs
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE build_failures SET build_logs = %s WHERE id = %s",
+                    (full_logs, failure['id'])
+                )
+            logger.info("Updated DB with re-fetched logs for failure %s", failure['id'])
+        except Exception as e:
+            logger.warning("Failed to update logs in DB: %s", e)
+
+        # Extract the failed step section from the fuller logs
+        if failed_task:
+            section = self._extract_failed_section(full_logs, failed_task)
+            if section and len(section) > 100:
+                return section
+
+        return full_logs
+
+    def _fetch_failed_taskrun_logs(self, failure):
+        # type: (dict,) -> Optional[str]
+        """Fetch logs for the specific failed TaskRun via Tekton Results.
+
+        For multi-arch builds, also adds a per-platform status summary so
+        the analyzer knows which architectures passed and which failed.
+        """
+        pr_name = failure.get('pipelinerun_name')
+        if not pr_name:
+            return None
+        try:
+            from clients.tekton_results import TektonResultsClient
+            ns = self.config.k8s.namespace
+            tr = TektonResultsClient(namespace=ns)
+
+            taskruns = tr.query_taskrun_records(pr_name)
+
+            failed_logs = None
+            platform_summary = []
+            test_outputs = []
+
+            for td, record_name in taskruns:
+                task = td.get('metadata', {}).get('labels', {}).get(
+                    'tekton.dev/pipelineTask', '')
+                conditions = td.get('status', {}).get('conditions', [])
+                if not conditions:
+                    continue
+                last_cond = conditions[-1]
+                succeeded = last_cond.get('status') == 'True'
+
+                params = td.get('spec', {}).get('params', [])
+                platform = ''
+                for p in params:
+                    if p.get('name') == 'PLATFORM':
+                        platform = p.get('value', '')
+
+                if platform:
+                    status_str = 'PASSED' if succeeded else 'FAILED'
+                    platform_summary.append('{}: {} ({})'.format(
+                        platform, status_str, task))
+
+                for res in td.get('status', {}).get('results', []):
+                    name = res.get('name', '')
+                    if name in ('TEST_OUTPUT', 'SCAN_OUTPUT', 'IMAGES_PROCESSED'):
+                        try:
+                            data = json.loads(res.get('value', '{}'))
+                            result = data.get('result', '')
+                            note = data.get('note', '')
+                            if result and result != 'SUCCESS':
+                                test_outputs.append('{}{}: {} — {}'.format(
+                                    task,
+                                    ' [{}]'.format(platform) if platform else '',
+                                    result, note[:500]))
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                if not succeeded and not failed_logs:
+                    logs = tr.get_taskrun_logs(record_name)
+                    if not logs:
+                        msg = last_cond.get('message', '')
+                        reason = last_cond.get('reason', '')
+                        if msg:
+                            logs = '{}: {}'.format(reason, msg)
+                    if logs:
+                        failed_logs = logs
+                        logger.info("Fetched TaskRun logs for '%s' (%s): %d chars",
+                                    task, platform or 'no-platform', len(logs))
+
+            if failed_logs:
+                header_parts = []
+                if test_outputs:
+                    header_parts.append('=== Structured Test Results ===')
+                    header_parts.extend(test_outputs)
+                    header_parts.append('')
+                if platform_summary:
+                    header_parts.append('=== Per-platform build status ===')
+                    header_parts.extend(sorted(platform_summary))
+                    header_parts.append('')
+                if header_parts:
+                    header_parts.append('=== Failed TaskRun logs ===')
+                    failed_logs = '\n'.join(header_parts) + '\n' + failed_logs
+
+                failure['build_logs'] = failed_logs
+                with self.db.connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE build_failures SET build_logs = %s WHERE id = %s",
+                        (failed_logs, failure['id'])
+                    )
+                return failed_logs
+        except Exception as e:
+            logger.warning("Failed to fetch TaskRun logs: %s", e)
+        return None
+
+    _ERROR_KEYWORDS = re.compile(
+        r'error[:\s]|fatal|failed|failure|exit code|exit \d|traceback|exception|cannot\s|'
+        r'warning[:\s]|warn[:\s]|deprecated|'
+        r'denied|timeout|killed|oom|no such|not found|permission denied|command not found|'
+        r'segmentation fault|segfault|sigsegv|sigkill|sigterm|signal \d|abort|core dump|'
+        r'panic|refused|rejected|conflict|broken|missing|undefined|unresolved|'
+        r'out of memory|no space|disk full|quota exceeded|import error|module.*not found|'
+        r'skipping step because',
+        re.IGNORECASE
+    )
+
+    def _filter_error_lines(self, logs, context_lines=20):
+        # type: (str, int) -> Optional[str]
+        """Keep only lines matching error keywords plus surrounding context."""
+        lines = logs.split('\n')
+        total = len(lines)
+        keep = set()
+
+        # Always keep first 10 and last 30 lines
+        for i in range(min(10, total)):
+            keep.add(i)
+        for i in range(max(0, total - 30), total):
+            keep.add(i)
+
+        # Mark error lines + context
+        for i, line in enumerate(lines):
+            if self._ERROR_KEYWORDS.search(line):
+                for j in range(max(0, i - context_lines), min(total, i + context_lines + 1)):
+                    keep.add(j)
+
+        if len(keep) >= total * 0.8:
+            return None
+
+        # Build filtered output with gap markers
+        result = []
+        prev_kept = -1
+        for i in sorted(keep):
+            if prev_kept >= 0 and i > prev_kept + 1:
+                skipped = i - prev_kept - 1
+                result.append('... ({} lines filtered) ...'.format(skipped))
+            result.append(lines[i])
+            prev_kept = i
+
+        return '\n'.join(result)
+
+    def _ai_extract_error(self, logs, failure):
+        # type: (str, dict) -> Optional[str]
+        """Use a cheap LLM (Haiku) to extract error-relevant log lines."""
+        if self._cheap_llm is None:
+            try:
+                from clients.llm_provider import create_llm_provider
+                self._cheap_llm = create_llm_provider(self.config.llm)
+            except Exception as e:
+                logger.warning("Cannot create LLM for log extraction: %s", e)
+                return None
+
+        prompt = (
+            "Extract ONLY the error-relevant portion from these build logs. "
+            "Include 20 lines of context before and after each error. "
+            "Return ONLY the extracted log lines with no commentary or explanation.\n\n"
+            "Component: {component}\n"
+            "Failed step: {step}\n"
+            "Error message: {error}\n\n"
+            "BUILD LOGS:\n{logs}"
+        ).format(
+            component=failure.get('component_name', ''),
+            step=failure.get('failed_step_name', ''),
+            error=failure.get('error_message', ''),
+            logs=logs[:200000],
+        )
+
+        try:
+            logger.info("AI log extraction via Haiku (%d chars input)", len(logs))
+            response = self._cheap_llm.create_message(
+                system="You extract error-relevant sections from CI build logs. Return only log lines.",
+                user_content=prompt,
+                max_tokens=8192,
+            )
+            extracted = response.content_text.strip()
+            if extracted and len(extracted) > 100:
+                logger.info("AI extraction: %d -> %d chars", len(logs), len(extracted))
+                return extracted
+        except Exception as e:
+            logger.warning("AI log extraction failed: %s", e)
+
+        return None
+
     def build_analysis_prompt(self, failure):
         # type: (Dict[str, Any],) -> Tuple[str, str]
         """Construct system + user prompts from failure data.
@@ -161,8 +553,6 @@ class BuildFailureAnalyzer:
             Tuple of (system_prompt, user_prompt)
         """
         logs = failure.get('build_logs', '') or ''
-        if len(logs) > 50000:
-            logs = logs[-50000:]
 
         # Build commit context section (includes enriched_context if available)
         commit_context_section = self._format_commit_context(
@@ -245,8 +635,6 @@ CRITICAL FORMATTING RULES:
     def _format_commit_context(self, commit_context, enriched_context=None):
         # type: (Optional[Dict[str, Any]], Optional[Dict[str, Any]]) -> str
         """Format commit context and enriched context into prompt text."""
-        import json
-
         if not commit_context:
             return "\n## Commit Context\n(Not available — commit diff not fetched yet)\n"
 
@@ -455,6 +843,10 @@ CRITICAL FORMATTING RULES:
         Raises:
             Exception: If LLM call or parsing fails
         """
+        self._ensure_context(failure)
+        self._ensure_enrichment(failure)
+        self._ensure_logs(failure)
+
         system_prompt, user_prompt = self.build_analysis_prompt(failure)
 
         # Create Langfuse trace

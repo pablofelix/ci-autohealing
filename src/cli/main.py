@@ -109,6 +109,12 @@ def get_bindings():
     _bash_fallback(['get', 'bindings'])
 
 
+@get.command('policy-gap')
+def get_policy_gap():
+    """Stage vs prod EC policy gap (release risk)."""
+    _bash_fallback(['get', 'policy-gap'])
+
+
 @get.command('pipelineruns')
 @click.option('--limit', type=int, help='Limit results')
 def get_pipelineruns(limit):

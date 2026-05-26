@@ -261,11 +261,12 @@ class EnrichmentOrchestrator:
                 duration_seconds=duration
             )
 
-    def enrich_batch(self, limit: int = 20) -> Dict[str, Any]:
+    def enrich_batch(self, limit: int = 20, component_filter: str = None) -> Dict[str, Any]:
         """Process a batch of pending enrichments.
 
         Args:
             limit: Maximum failures to process
+            component_filter: If set, only enrich this component
 
         Returns:
             Stats dict:
@@ -287,7 +288,8 @@ class EnrichmentOrchestrator:
         # Get pending enrichments
         pending = self.enrichment_repo.get_pending_enrichments(
             self.config.k8s.application_name,
-            limit=limit
+            limit=limit,
+            component_filter=component_filter,
         )
 
         if not pending:

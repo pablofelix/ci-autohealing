@@ -4,7 +4,7 @@
 # Depends on: sql() and sql_table() from ic, $APPLICATION_NAME from ic-config.sh
 
 sql_count_failing_builds() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
@@ -19,7 +19,7 @@ sql_count_failing_builds() {
 }
 
 sql_count_working_builds() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
@@ -33,7 +33,7 @@ sql_count_working_builds() {
 }
 
 sql_count_unresolved_conforma() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         SELECT COUNT(DISTINCT component_name) FROM conforma_results
         WHERE application = '$app' AND is_resolved = FALSE;
@@ -43,7 +43,7 @@ sql_count_unresolved_conforma() {
 sql_resolve_build_number() {
     local target="$1"
     local retriggered_json="${2:-[]}"
-    local app="${3:-$APPLICATION_NAME}"
+    local app="${3:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
@@ -71,7 +71,7 @@ sql_resolve_build_number() {
 
 sql_resolve_conforma_number() {
     local offset="$1"
-    local app="${2:-$APPLICATION_NAME}"
+    local app="${2:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         WITH latest_conforma AS (
             SELECT DISTINCT ON (component_name)
@@ -89,7 +89,7 @@ sql_resolve_conforma_number() {
 }
 
 sql_get_retriggered_json() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "SELECT COALESCE(retriggered_components::text, '[]')
          FROM sync_status WHERE application = '$app';" 2>/dev/null
 }
@@ -97,7 +97,7 @@ sql_get_retriggered_json() {
 # -- Release readiness / history queries --
 
 sql_failing_builds_with_health() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         WITH latest_builds AS (
             SELECT DISTINCT ON (component_name)
@@ -118,7 +118,8 @@ sql_failing_builds_with_health() {
 }
 
 sql_recently_resolved_builds() {
-    local app="${1:-$APPLICATION_NAME}" days="${2:-7}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    local days="${2:-7}"
     [[ "$days" =~ ^[0-9]+$ ]] || days=7
     sql "
         SELECT component_name,
@@ -133,7 +134,8 @@ sql_recently_resolved_builds() {
 }
 
 sql_builds_resolved_between() {
-    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    local from_date="$2" to_date="$3"
     sql "
         SELECT component_name,
                TO_CHAR(resolved_at, 'Mon DD') as resolved_date,
@@ -147,7 +149,7 @@ sql_builds_resolved_between() {
 }
 
 sql_conforma_blocking() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         SELECT DISTINCT ON (component_name)
             component_name, violations_count, scenario
@@ -160,7 +162,8 @@ sql_conforma_blocking() {
 }
 
 sql_conforma_resolved_between() {
-    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    local from_date="$2" to_date="$3"
     sql "
         SELECT DISTINCT component_name, TO_CHAR(resolved_at, 'Mon DD')
         FROM conforma_results
@@ -173,7 +176,8 @@ sql_conforma_resolved_between() {
 }
 
 sql_conforma_appeared_between() {
-    local app="${1:-$APPLICATION_NAME}" from_date="$2" to_date="$3"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    local from_date="$2" to_date="$3"
     sql "
         SELECT DISTINCT ON (component_name)
             component_name, TO_CHAR(first_detected_at, 'Mon DD'), violations_count
@@ -231,7 +235,7 @@ sql_list_freezes() {
 # -- JIRA linked issues query --
 
 sql_linked_jira_keys() {
-    local app="${1:-$APPLICATION_NAME}"
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
     sql "
         SELECT DISTINCT jira_key FROM (
             SELECT jira_key FROM build_failures
@@ -240,5 +244,55 @@ sql_linked_jira_keys() {
             SELECT jira_key FROM conforma_results
             WHERE application = '$app' AND is_resolved = FALSE AND jira_key IS NOT NULL AND jira_key != ''
         ) combined;
+    "
+}
+
+# -- Release schedule queries --
+
+sql_get_release_schedule() {
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    sql "
+        SELECT TO_CHAR(planning_freeze, 'YYYY-MM-DD'),
+               TO_CHAR(feature_freeze, 'YYYY-MM-DD'),
+               TO_CHAR(code_freeze, 'YYYY-MM-DD'),
+               TO_CHAR(initial_rc, 'YYYY-MM-DD'),
+               TO_CHAR(release_window_start, 'YYYY-MM-DD'),
+               TO_CHAR(release_date, 'YYYY-MM-DD'),
+               next_release,
+               TO_CHAR(updated_at, 'YYYY-MM-DD HH24:MI')
+        FROM release_schedule
+        WHERE application = '$app';
+    "
+}
+
+sql_upsert_release_schedule() {
+    local app="${1:-$APPLICATION_NAME}"; local app="${app//\'/\'\'}"
+    local planning_freeze="$2" feature_freeze="$3" code_freeze="$4"
+    local initial_rc="$5" release_window="$6" release_date="$7"
+    local next_release="$8" sheet_id="${9:-0}"
+    local nr_esc="${next_release//\'/\'\'}"
+    sql "
+        INSERT INTO release_schedule (application, planning_freeze, feature_freeze,
+            code_freeze, initial_rc, release_window_start, release_date,
+            next_release, sheet_id, updated_at)
+        VALUES ('$app',
+                $([ -n "$planning_freeze" ] && echo "'$planning_freeze'" || echo "NULL"),
+                $([ -n "$feature_freeze" ] && echo "'$feature_freeze'" || echo "NULL"),
+                $([ -n "$code_freeze" ] && echo "'$code_freeze'" || echo "NULL"),
+                $([ -n "$initial_rc" ] && echo "'$initial_rc'" || echo "NULL"),
+                $([ -n "$release_window" ] && echo "'$release_window'" || echo "NULL"),
+                $([ -n "$release_date" ] && echo "'$release_date'" || echo "NULL"),
+                $([ -n "$next_release" ] && echo "'$nr_esc'" || echo "NULL"),
+                $sheet_id, NOW())
+        ON CONFLICT (application) DO UPDATE SET
+            planning_freeze = EXCLUDED.planning_freeze,
+            feature_freeze = EXCLUDED.feature_freeze,
+            code_freeze = EXCLUDED.code_freeze,
+            initial_rc = EXCLUDED.initial_rc,
+            release_window_start = EXCLUDED.release_window_start,
+            release_date = EXCLUDED.release_date,
+            next_release = EXCLUDED.next_release,
+            sheet_id = EXCLUDED.sheet_id,
+            updated_at = NOW();
     "
 }

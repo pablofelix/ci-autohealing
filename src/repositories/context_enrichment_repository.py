@@ -21,38 +21,49 @@ class ContextEnrichmentRepository:
         """
         self.db = db
 
-    def get_pending_enrichments(self, application: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def get_pending_enrichments(self, application: str, limit: int = 20,
+                               component_filter: str = None) -> List[Dict[str, Any]]:
         """Get failures that need enrichment.
 
         Criteria:
         - Has commit_sha (so we can fetch context)
         - Does NOT have enriched_context yet
         - Is unresolved
-        - Not yet AI analyzed (enrich before analysis)
 
         Args:
             application: Application name (e.g., 'acme-v2-0')
             limit: Maximum number of failures to return
+            component_filter: If set, only return this component
 
         Returns:
             List of failure dicts ready for enrichment
         """
         with self.db.connection() as conn:
             cursor = conn.cursor()
+            where = [
+                "application = %s",
+                "commit_sha IS NOT NULL",
+                "repository_url IS NOT NULL",
+                "enriched_context IS NULL",
+                "is_resolved = FALSE",
+            ]
+            params = [application]
+
+            if component_filter:
+                where.append("component_name = %s")
+                params.append(component_filter)
+
+            params.append(limit)
+
             cursor.execute("""
                 SELECT id, component_name, pipelinerun_name,
                        commit_sha, repository_url, error_type, error_message,
                        commit_context, application
                 FROM build_failures
-                WHERE application = %s
-                  AND commit_sha IS NOT NULL
-                  AND repository_url IS NOT NULL
-                  AND enriched_context IS NULL
-                  AND ai_analyzed = FALSE
-                  AND is_resolved = FALSE
+                WHERE {}
                 ORDER BY first_detected_at DESC
                 LIMIT %s
-            """, (application, limit))
+            """.format(" AND ".join(where)), params)
 
             results = []
             for row in cursor.fetchall():

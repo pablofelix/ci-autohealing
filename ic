@@ -729,83 +729,92 @@ display_ai_analysis() {
 # Extract error context from logs
 extract_error_context() {
     local logs="$1"
-    local max_sections=3
-    local lines_per_section=40
+    local failed_step="${2:-}"
+    local context_lines=5
 
-    # Save logs to temp file for processing
     local tmp_file=$(mktemp)
+    local out_file=$(mktemp)
     echo "$logs" > "$tmp_file"
 
-    # Find TaskRun sections - these are the structure of our logs
-    local taskrun_starts=$(grep -n "^===== TaskRun:" "$tmp_file" | cut -d: -f1)
+    local total_lines=$(wc -l < "$tmp_file")
 
-    if [ -z "$taskrun_starts" ]; then
-        # No TaskRun structure - show beginning and end
-        echo -e "${YELLOW}━━━ Log excerpt (first and last sections) ━━━${NC}"
-        echo ""
-        echo -e "${CYAN}[Beginning]${NC}"
-        head -n 40 "$tmp_file"
-        echo ""
-        echo -e "${YELLOW}... (middle section omitted) ...${NC}"
-        echo ""
-        echo -e "${CYAN}[End]${NC}"
-        tail -n 40 "$tmp_file"
-        rm -f "$tmp_file"
-        return
+    # If we know the failed step, try to extract just that TaskRun section
+    if [ -n "$failed_step" ]; then
+        local section_file=$(mktemp)
+        # Extract the TaskRun section matching the failed step
+        awk -v step="$failed_step" '
+            /^===== TaskRun:/ { in_section = (index($0, step) > 0) }
+            in_section { print }
+        ' "$tmp_file" > "$section_file"
+
+        local section_size=$(wc -l < "$section_file")
+        if [ "$section_size" -gt 10 ]; then
+            echo -e "${YELLOW}━━━ Failed step: ${failed_step} (${section_size} lines from ${total_lines} total) ━━━${NC}"
+            echo ""
+            cat "$section_file" > "$tmp_file"
+            total_lines=$section_size
+        fi
+        rm -f "$section_file"
     fi
 
-    # Get last N TaskRun sections (most likely to contain errors)
-    local taskrun_array=($taskrun_starts)
-    local total_taskruns=${#taskrun_array[@]}
-    local start_idx=$((total_taskruns > max_sections ? total_taskruns - max_sections : 0))
+    # Match lines that look like real error output (timestamps, STEP markers, runtime messages)
+    # not bash source code (if/then/echo/exit stanzas from inlined scripts)
+    local error_pattern='\[.*\].*([Ee]rror|[Ff]ailed|[Ff]atal|[Ww]arning|denied|timeout|killed)|^(Error|ERROR|ERRO|FATAL|WARNING|WARN|Traceback|Exception|panic|STEP [0-9])|(segmentation fault|segfault|sigsegv|sigkill|sigterm|core dump|out of memory|oom|exit code [0-9]|exited with|subprocess exited|Skipping step because|cannot find|not found|permission denied|command not found|no space|disk full|quota exceeded|import error|module.*not found)'
 
-    echo -e "${YELLOW}━━━ Showing last ${max_sections} of ${total_taskruns} TaskRun section(s) ━━━${NC}"
-    echo ""
+    # Find lines matching error patterns
+    grep -niE "$error_pattern" "$tmp_file" | cut -d: -f1 | sort -un > "${out_file}.nums"
 
-    local shown=0
-    for ((i=start_idx; i<total_taskruns && shown<max_sections; i++)); do
-        shown=$((shown + 1))
-        local start_line=${taskrun_array[$i]}
-        local end_line
+    local match_count=$(wc -l < "${out_file}.nums")
 
-        # Calculate end: next TaskRun or end of file
-        if [ $((i + 1)) -lt $total_taskruns ]; then
-            end_line=$((${taskrun_array[$((i + 1))]} - 1))
-        else
-            end_line=$(wc -l < "$tmp_file")
-        fi
-
-        # Get TaskRun header
-        local header=$(sed -n "${start_line}p" "$tmp_file")
-
-        # Get section size
-        local section_lines=$((end_line - start_line + 1))
-
-        echo -e "${CYAN}━━━ Section #$shown: $(echo "$header" | sed 's/^===== //' | sed 's/ =====$//')${NC}"
-        echo -e "${CYAN}━━━ Lines: $section_lines${NC}"
+    if [ "$match_count" -gt 0 ] && [ "$total_lines" -gt 80 ]; then
+        echo -e "${YELLOW}━━━ Filtered: ${match_count} error/warning lines + context (from ${total_lines} lines) ━━━${NC}"
         echo ""
 
-        if [ $section_lines -le $lines_per_section ]; then
-            # Show entire section if small enough
-            sed -n "${start_line},${end_line}p" "$tmp_file" | sed 's/^/  /'
-        else
-            # For large sections, show mostly the end (where errors usually are)
-            local head_lines=5
-            local tail_lines=$((lines_per_section - head_lines - 2))
+        # Build ranges with context lines, merge overlapping
+        local prev_end=0
+        local first=true
+        while IFS= read -r line_num; do
+            local range_start=$((line_num - context_lines))
+            local range_end=$((line_num + context_lines))
+            [ $range_start -lt 1 ] && range_start=1
+            [ $range_end -gt $total_lines ] && range_end=$total_lines
 
-            echo -e "${YELLOW}  [First $head_lines lines]${NC}"
-            sed -n "${start_line},$((start_line + head_lines - 1))p" "$tmp_file" | sed 's/^/  /'
+            if [ $range_start -gt $((prev_end + 1)) ]; then
+                if [ "$first" != true ]; then
+                    local gap=$((range_start - prev_end - 1))
+                    echo -e "  ${YELLOW}... (${gap} lines filtered) ...${NC}"
+                fi
+            fi
+            first=false
+
+            if [ $range_start -gt $prev_end ]; then
+                sed -n "${range_start},${range_end}p" "$tmp_file" | sed 's/^/  /'
+                prev_end=$range_end
+            elif [ $range_end -gt $prev_end ]; then
+                sed -n "$((prev_end + 1)),${range_end}p" "$tmp_file" | sed 's/^/  /'
+                prev_end=$range_end
+            fi
+        done < "${out_file}.nums"
+
+        # Always show last 10 lines
+        if [ $prev_end -lt $((total_lines - 10)) ]; then
+            echo -e "  ${YELLOW}... ($((total_lines - prev_end - 10)) lines filtered) ...${NC}"
             echo ""
-            echo -e "${YELLOW}  ... ($((section_lines - head_lines - tail_lines)) lines omitted) ...${NC}"
-            echo ""
-            echo -e "${YELLOW}  [Last $tail_lines lines - most likely error location]${NC}"
-            sed -n "$((end_line - tail_lines + 1)),${end_line}p" "$tmp_file" | sed 's/^/  /'
+            echo -e "  ${CYAN}[Last 10 lines]${NC}"
+            tail -n 10 "$tmp_file" | sed 's/^/  /'
         fi
-        echo ""
+    else
+        # Few matches or short log — show last 60 lines
+        if [ "$total_lines" -gt 60 ]; then
+            echo -e "${YELLOW}━━━ Last 60 of ${total_lines} lines ━━━${NC}"
+            echo ""
+            tail -n 60 "$tmp_file" | sed 's/^/  /'
+        else
+            sed 's/^/  /' "$tmp_file"
+        fi
+    fi
 
-    done
-
-    rm -f "$tmp_file"
+    rm -f "$tmp_file" "$out_file" "${out_file}.nums"
 }
 
 # Show usage
@@ -841,6 +850,7 @@ usage() {
     echo "    ic get alerts --from <date> --to <date>  Changes between two dates"
     echo "    ic get exceptions                        Policy exceptions expiring/expired"
     echo "    ic get bindings                          RPA → EC policy mappings"
+    echo "    ic get policy-gap                        Stage vs prod EC policy gap (release risk)"
     echo "    ic get conforma [--current|--future|--all]  Conforma test failures"
     echo "                                             --current: Current policy (blocking, default)"
     echo "                                             --future: Future policy (informational)"
@@ -1512,8 +1522,8 @@ cmd_describe_component() {
                     if [ "$log_size" -lt 1000 ]; then
                         echo "$logs"
                     else
-                        # For long logs, extract context
-                        extract_error_context "$logs"
+                        # For long logs, extract context with error filtering
+                        extract_error_context "$logs" "$failed_step"
                     fi
 
                     if [ "$log_size" -gt 1000 ]; then
@@ -1548,7 +1558,7 @@ cmd_describe_component() {
                         elif [ "$log_size" -lt 1000 ]; then
                             echo "$logs"
                         else
-                            extract_error_context "$logs"
+                            extract_error_context "$logs" "$failed_step"
                             echo ""
                             echo -e "${CYAN}💡 Tip: Add --log flag to see the complete build log${NC}"
                         fi
@@ -2108,6 +2118,10 @@ cmd_ai() {
             shift
             cmd_ai_batch "$@"
             ;;
+        enrich)
+            shift
+            cmd_ai_enrich "$@"
+            ;;
         status)
             cmd_ai_status
             ;;
@@ -2121,11 +2135,12 @@ cmd_ai() {
         *)
             echo -e "${BOLD}IC AI - AI Analysis Commands${NC}"
             echo ""
-            echo "Usage: ic ai {analyze|batch|status|stats}"
+            echo "Usage: ic ai {analyze|enrich|batch|status|stats}"
             echo ""
             echo "Commands:"
             echo "  analyze <num|component>  Analyze a specific failure"
             echo "  analyze --all            Analyze all pending failures"
+            echo "  enrich [component]       Enrich failures with context"
             echo "  analyze release <name>   Analyze a failed release"
             echo "  analyze scenarios [app]  Analyze ITS scenario config"
             echo "  batch --estimate         Show queue depth (no API calls)"
@@ -2145,6 +2160,22 @@ cmd_ai() {
             return 1
             ;;
     esac
+}
+
+cmd_ai_enrich() {
+    local component="${1:-}"
+
+    cd "$SCRIPT_DIR/src" || return 1
+
+    if [ -n "$component" ]; then
+        echo -e "${CYAN}Enriching context for: $component${NC}"
+        echo ""
+        python3.11 enrich_context.py --component "$component"
+    else
+        echo -e "${CYAN}Enriching all pending failures...${NC}"
+        echo ""
+        python3.11 enrich_context.py
+    fi
 }
 
 cmd_ai_analyze() {
@@ -2336,11 +2367,11 @@ cmd_ai_analyze() {
     if [ "$analysis_type" = "build" ]; then
         echo -e "${CYAN}Analyzing build failure: $component${NC}"
         echo ""
-        python3.11 analyze_failures.py --component "$component"
+        python3.11 analyze_failures.py --component "$component" $($force && echo "--force")
     else
         echo -e "${CYAN}Analyzing Conforma violation: $component${NC}"
         echo ""
-        python3.11 analyze_conforma.py --component "$component"
+        python3.11 analyze_conforma.py --component "$component" $($force && echo "--force")
     fi
 }
 
@@ -5034,6 +5065,99 @@ cmd_get_bindings() {
     echo ""
 }
 
+cmd_get_policy_gap() {
+    section_header "Stage → Prod EC Policy Gap"
+
+    local gap_json
+    local name_filter="${APPLICATION_NAME#rhoai-}"
+    gap_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action policy-gap --name-filter "${name_filter}" --releng-namespace releng-tenant 2>/dev/null || true)
+
+    if [ -z "$gap_json" ] || ! echo "$gap_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        echo -e "${RED}Error: Could not fetch policy gap (oc login required)${NC}"
+        echo ""
+        return 1
+    fi
+
+    local steps_count
+    steps_count=$(echo "$gap_json" | jq '.steps | length')
+
+    if [ "$steps_count" = "0" ]; then
+        echo -e "  ${GREEN}✓ No policy differences found${NC}"
+        echo ""
+        return 0
+    fi
+
+    echo "$gap_json" | jq -r '.steps[] | @base64' | while read -r step_b64; do
+        local step_json
+        step_json=$(echo "$step_b64" | base64 -d)
+
+        local step_name stage_pol prod_pol stage_exc prod_exc common gap_count prod_only
+        step_name=$(echo "$step_json" | jq -r '.step')
+        stage_pol=$(echo "$step_json" | jq -r '.stage_policy')
+        prod_pol=$(echo "$step_json" | jq -r '.prod_policy')
+        stage_exc=$(echo "$step_json" | jq -r '.stage_exceptions')
+        prod_exc=$(echo "$step_json" | jq -r '.prod_exceptions')
+        common=$(echo "$step_json" | jq -r '.common')
+        gap_count=$(echo "$step_json" | jq -r '.stage_only_count')
+        prod_only=$(echo "$step_json" | jq -r '.prod_only_count')
+        local stage_temp prod_temp
+        stage_temp=$(echo "$step_json" | jq -r '.stage_temporary')
+        prod_temp=$(echo "$step_json" | jq -r '.prod_temporary')
+
+        local step_label
+        step_label=$(echo "$step_name" | sed 's/^./\U&/')
+
+        local gap_indicator="${GREEN}✓${NC}"
+        if [ "$gap_count" -gt 0 ]; then
+            gap_indicator="${RED}${gap_count} at risk${NC}"
+        fi
+
+        echo -e "  ${BOLD}${step_label}${NC}  ${gap_indicator}"
+        echo -e "    Stage policy: ${CYAN}${stage_pol}${NC} (${stage_exc} exceptions, ${stage_temp} temporary)"
+        echo -e "    Prod policy:  ${CYAN}${prod_pol}${NC} (${prod_exc} exceptions, ${prod_temp} temporary)"
+        echo -e "    Common: ${common}  |  Stage-only: ${gap_count}  |  Prod-only: ${prod_only}"
+
+        if [ "$gap_count" -gt 0 ]; then
+            echo ""
+            echo -e "    ${YELLOW}Rules excepted in stage but NOT in prod:${NC}"
+            echo "$step_json" | jq -r '.stage_only_rules[] | @base64' | while read -r rule_b64; do
+                local rule_json rule_name rule_ref rule_perm rule_days
+                rule_json=$(echo "$rule_b64" | base64 -d)
+                rule_name=$(echo "$rule_json" | jq -r '.rule')
+                rule_ref=$(echo "$rule_json" | jq -r '.reference')
+                rule_perm=$(echo "$rule_json" | jq -r '.permanent')
+                rule_days=$(echo "$rule_json" | jq -r '.days_left')
+
+                local status_tag
+                if [ "$rule_perm" = "true" ]; then
+                    status_tag="${CYAN}permanent${NC}"
+                elif [ "$rule_days" != "null" ]; then
+                    if [ "$rule_days" -le 7 ]; then
+                        status_tag="${RED}${rule_days}d left${NC}"
+                    elif [ "$rule_days" -le 30 ]; then
+                        status_tag="${YELLOW}${rule_days}d left${NC}"
+                    else
+                        status_tag="${GREEN}${rule_days}d left${NC}"
+                    fi
+                else
+                    status_tag="active"
+                fi
+
+                local rule_short="${rule_name:0:65}"
+                printf "      %-67s %s\n" "$rule_short" "$(echo -e "$status_tag")"
+                if [ -n "$rule_ref" ] && [ "$rule_ref" != "config.exclude (permanent)" ]; then
+                    echo -e "        ${DIM}${rule_ref}${NC}"
+                fi
+            done
+        fi
+        echo ""
+    done
+
+    echo -e "${CYAN}Tip:${NC} Stage-only rules = will fail in prod. Fix before promoting."
+    echo -e "${CYAN}     ${NC}Temporary rules with days left = also expire from stage."
+    echo ""
+}
+
 cmd_get_alerts_on_date() {
     local target_date="$1"
     local target_end="${target_date} 23:59:59"
@@ -6420,7 +6544,134 @@ cmd_conforma_history() {
 # RELEASE COMMANDS
 # ============================================================================
 
-RELENG_NAMESPACE="releng-tenant"
+RELENG_NAMESPACE="${RELENG_NAMESPACE:-releng-tenant}"
+SMARTSHEET_API_TOKEN="${SMARTSHEET_API_TOKEN:-${SMARTSHEET_TOKEN:-}}"
+SMARTSHEET_GA_SHEET_ID="${SMARTSHEET_GA_SHEET_ID:-SMARTSHEET_SHEET_ID_REDACTED}"
+
+_release_app_to_shortname() {
+    local app="${1:-$APPLICATION_NAME}"
+    local ver="${app#rhoai-v}"
+    ver="${ver//-/.}"
+    local major minor rest
+    IFS='.' read -r major minor rest <<< "$ver"
+    if [[ "$rest" == ea.* ]] || [[ "$rest" == ea* ]]; then
+        local ea_num="${rest#ea.}"
+        ea_num="${ea_num#ea}"
+        echo "rhoai-${major}.${minor}.EA${ea_num}"
+    else
+        echo "rhoai-${major}.${minor}"
+    fi
+}
+
+_release_fetch_smartsheet_dates() {
+    local app="${1:-$APPLICATION_NAME}"
+    [ -z "$SMARTSHEET_API_TOKEN" ] && return 1
+
+    local shortname
+    shortname=$(_release_app_to_shortname "$app")
+
+    local sheet_data
+    sheet_data=$(curl -s -H "Authorization: Bearer $SMARTSHEET_API_TOKEN" \
+        "https://api.smartsheet.com/2.0/sheets/${SMARTSHEET_GA_SHEET_ID}" 2>/dev/null)
+    [ -z "$sheet_data" ] && return 1
+
+    local dates
+    dates=$(echo "$sheet_data" | python3.11 -c "
+import json, sys, re
+data = json.load(sys.stdin)
+shortname = '${shortname}'
+cols = {c['id']: c['title'] for c in data.get('columns', [])}
+planning_freeze = feature_freeze = code_freeze = rc = release_window = ga = ''
+next_release = ''
+# Collect all shortnames to find the next release in sequence
+all_shortnames = set()
+for row in data.get('rows', []):
+    for cell in row.get('cells', []):
+        t = cols.get(cell.get('columnId',''), '')
+        if t == 'shortname':
+            v = cell.get('displayValue') or cell.get('value', '')
+            if v: all_shortnames.add(v)
+# Parse version for ordering
+def parse_ver(sn):
+    m = re.match(r'rhoai-(\d+)\.(\d+)(?:\.EA(\d+))?', sn)
+    if not m: return (0, 0, 999)
+    ea = int(m.group(3)) if m.group(3) else 999
+    return (int(m.group(1)), int(m.group(2)), ea)
+sorted_sns = sorted(all_shortnames, key=parse_ver)
+try:
+    idx = sorted_sns.index(shortname)
+    if idx + 1 < len(sorted_sns):
+        next_release = sorted_sns[idx + 1]
+except ValueError:
+    pass
+for row in data.get('rows', []):
+    vals = {}
+    for cell in row.get('cells', []):
+        t = cols.get(cell.get('columnId',''), '')
+        v = cell.get('displayValue') or cell.get('value', '')
+        if v: vals[t] = v
+    sn = vals.get('shortname', '')
+    name = vals.get('Task Name', '')
+    flags = vals.get('Flags', '')
+    if sn != shortname:
+        continue
+    start = vals.get('Start', '')[:10]
+    nl = name.lower()
+    if 'planning freeze' in nl:
+        planning_freeze = start
+    elif 'feature freeze' in nl:
+        feature_freeze = start
+    elif 'code freeze' in nl:
+        code_freeze = start
+    elif 'initial rc' in nl:
+        rc = start
+    elif 'release window' in nl:
+        release_window = start
+    elif 'GA' in flags and ('RELEASE' in name or 'RHOAI GA' in name):
+        ga = start
+print(f'{planning_freeze}|{feature_freeze}|{code_freeze}|{rc}|{release_window}|{ga}|{next_release}')
+" 2>/dev/null)
+    [ -z "$dates" ] && return 1
+
+    local planning_freeze feature_freeze code_freeze rc release_window ga next_release
+    IFS='|' read -r planning_freeze feature_freeze code_freeze rc release_window ga next_release <<< "$dates"
+
+    if [ -n "$code_freeze" ] || [ -n "$rc" ] || [ -n "$ga" ]; then
+        sql_upsert_release_schedule "$app" "$planning_freeze" "$feature_freeze" \
+            "$code_freeze" "$rc" "$release_window" "$ga" "$next_release" \
+            "$SMARTSHEET_GA_SHEET_ID" >/dev/null 2>&1
+        echo "${planning_freeze}|${feature_freeze}|${code_freeze}|${rc}|${release_window}|${ga}|${next_release}"
+    fi
+}
+
+_release_get_schedule() {
+    local app="${1:-$APPLICATION_NAME}"
+
+    local cached
+    cached=$(sql_get_release_schedule "$app" 2>/dev/null)
+    if [ -n "$cached" ]; then
+        local pf ff cf rc rw rd nr updated
+        IFS='|' read -r pf ff cf rc rw rd nr updated <<< "$cached"
+        pf=$(trim "$pf"); ff=$(trim "$ff"); cf=$(trim "$cf")
+        rc=$(trim "$rc"); rw=$(trim "$rw"); rd=$(trim "$rd")
+        nr=$(trim "$nr")
+        echo "${pf}|${ff}|${cf}|${rc}|${rw}|${rd}|${nr}"
+        return
+    fi
+
+    _release_fetch_smartsheet_dates "$app"
+}
+
+_release_days_until() {
+    local target_date="$1"
+    [ -z "$target_date" ] && return
+    local today_epoch target_epoch
+    today_epoch=$(date '+%s' 2>/dev/null)
+    target_epoch=$(date -d "$target_date" '+%s' 2>/dev/null)
+    [ -z "$target_epoch" ] && return
+    local diff=$(( (target_epoch - today_epoch) / 86400 ))
+    echo "$diff"
+}
 
 _release_require_kinit() {
     if klist -s 2>/dev/null; then
@@ -6782,20 +7033,22 @@ _release_epoch_pipeline_summary() {
         local type_label
         type_label=$(_release_type_label "$step_type")
 
-        local matching
-        matching=$(echo "$all_releases" | jq -c --arg prefix "$prefix" --arg epoch "$epoch" '
+        local all_for_step
+        all_for_step=$(echo "$all_releases" | jq -c --arg prefix "$prefix" '
             [.[] | select(.metadata.name | startswith($prefix + "-"))]
-            | [.[] | select(.metadata.name | capture("(?<ep>[0-9]{10})").ep >= $epoch)]
             | sort_by(.metadata.creationTimestamp)
         ' 2>/dev/null)
-        if [ -n "$matching" ] && [ "$matching" != "[]" ] && [ "$matching" != "null" ]; then
-            local best_ep
-            best_ep=$(echo "$matching" | jq -r '.[0].metadata.name' 2>/dev/null | grep -oP '\d{10}' | head -1)
-            if [ -n "$best_ep" ]; then
-                matching=$(echo "$matching" | jq -c --arg ep "$best_ep" '
-                    [.[] | select(.metadata.name | contains($ep))]
-                ' 2>/dev/null)
-            fi
+        [ -z "$all_for_step" ] || [ "$all_for_step" = "null" ] && all_for_step="[]"
+
+        # Find the latest epoch for this specific step, then get all releases for that epoch
+        local step_epoch
+        step_epoch=$(echo "$all_for_step" | jq -r '[.[].metadata.name] | map(capture("(?<ep>[0-9]{10})").ep) | sort | reverse | .[0] // empty' 2>/dev/null)
+
+        local matching="[]"
+        if [ -n "$step_epoch" ]; then
+            matching=$(echo "$all_for_step" | jq -c --arg ep "$step_epoch" '
+                [.[] | select(.metadata.name | contains($ep))]
+            ' 2>/dev/null)
         fi
         [ -z "$matching" ] || [ "$matching" = "null" ] && matching="[]"
 
@@ -6835,6 +7088,71 @@ _release_epoch_pipeline_summary() {
     done <<< "$steps"
 
     echo "${sd}|${st}|${sr}|${pd}|${pt}|${pr_r}|${blocker}|${blocker_msg}|${next_step}"
+}
+
+# Returns per-step pipeline status as multi-line output:
+# target|label|status|retries|fail_task
+_release_epoch_pipeline_steps() {
+    local all_releases="$1" epoch="$2" filter_target="${3:-}"
+
+    local steps
+    steps=$(_release_discover_steps)
+
+    while IFS='|' read -r step_target step_type; do
+        [ -z "$step_target" ] && continue
+        [ -n "$filter_target" ] && [ "$step_target" != "$filter_target" ] && continue
+
+        local prefix type_label
+        prefix=$(_release_name_prefix "$step_target" "$step_type")
+        type_label=$(_release_type_label "$step_type")
+
+        local all_for_step
+        all_for_step=$(echo "$all_releases" | jq -c --arg prefix "$prefix" '
+            [.[] | select(.metadata.name | startswith($prefix + "-"))]
+            | sort_by(.metadata.creationTimestamp)
+        ' 2>/dev/null)
+        [ -z "$all_for_step" ] || [ "$all_for_step" = "null" ] && all_for_step="[]"
+
+        local step_epoch
+        step_epoch=$(echo "$all_for_step" | jq -r '[.[].metadata.name] | map(capture("(?<ep>[0-9]{10})").ep) | sort | reverse | .[0] // empty' 2>/dev/null)
+
+        local matching="[]"
+        if [ -n "$step_epoch" ]; then
+            matching=$(echo "$all_for_step" | jq -c --arg ep "$step_epoch" '
+                [.[] | select(.metadata.name | contains($ep))]
+            ' 2>/dev/null)
+        fi
+        [ -z "$matching" ] || [ "$matching" = "null" ] && matching="[]"
+
+        local match_count
+        match_count=$(echo "$matching" | jq 'length' 2>/dev/null)
+
+        if [ "${match_count:-0}" -eq 0 ]; then
+            echo "${step_target}|${type_label}|not_started|0|"
+            continue
+        fi
+
+        local last_status
+        last_status=$(echo "$matching" | jq -r '
+            .[-1] | [.status.conditions[]? | select(.type == "Released")] | .[0] | .status // "Unknown"
+        ' 2>/dev/null)
+
+        local retries
+        retries=$(echo "$matching" | jq 'length - 1' 2>/dev/null)
+
+        if [ "$last_status" = "True" ]; then
+            echo "${step_target}|${type_label}|succeeded|${retries:-0}|"
+        elif [ "$last_status" = "False" ]; then
+            local fail_task
+            fail_task=$(echo "$matching" | jq -r '
+                .[-1] | [.status.conditions[]? | select(.type == "ManagedPipelineProcessed" and .status == "False")]
+                | .[0] | .message // empty
+            ' 2>/dev/null | grep -oP 'task \K[^ :]+' | head -1)
+            echo "${step_target}|${type_label}|failed|${retries:-0}|${fail_task}"
+        else
+            echo "${step_target}|${type_label}|running|${retries:-0}|"
+        fi
+    done <<< "$steps"
 }
 
 # GET RELEASES — list recent Release CRs grouped by epoch
@@ -7762,6 +8080,55 @@ cmd_release_readiness() {
     section_header "Release Readiness — ${APPLICATION_NAME}"
     echo ""
     echo -e "${BOLD}Epoch:${NC}    ${CYAN}${epoch}${NC}  (${date_label})"
+
+    # Schedule countdown from Smartsheet/DB cache
+    local sched_data
+    sched_data=$(_release_get_schedule "$APPLICATION_NAME" 2>/dev/null)
+    if [ -n "$sched_data" ]; then
+        local s_pf s_ff s_cf s_rc s_rw s_ga s_nr
+        IFS='|' read -r s_pf s_ff s_cf s_rc s_rw s_ga s_nr <<< "$sched_data"
+        s_pf=$(trim "$s_pf"); s_ff=$(trim "$s_ff"); s_cf=$(trim "$s_cf")
+        s_rc=$(trim "$s_rc"); s_rw=$(trim "$s_rw"); s_ga=$(trim "$s_ga")
+        s_nr=$(trim "$s_nr")
+
+        _sched_fmt() {
+            local label="$1" dt="$2"
+            [ -z "$dt" ] && return
+            local d; d=$(_release_days_until "$dt")
+            local fmt; fmt=$(date -d "$dt" '+%b %d' 2>/dev/null || echo "$dt")
+            if [ -n "$d" ] && [ "$d" -le 0 ]; then
+                echo "${label}: ${fmt} (passed)"
+            elif [ -n "$d" ]; then
+                echo "${label}: ${fmt} (${d}d)"
+            fi
+        }
+
+        local parts=()
+        local p
+        p=$(_sched_fmt "Release" "$s_ga") && [ -n "$p" ] && parts+=("$p")
+        p=$(_sched_fmt "Rel Window" "$s_rw") && [ -n "$p" ] && parts+=("$p")
+        p=$(_sched_fmt "RC" "$s_rc") && [ -n "$p" ] && parts+=("$p")
+        p=$(_sched_fmt "Code Freeze" "$s_cf") && [ -n "$p" ] && parts+=("$p")
+        p=$(_sched_fmt "Feature Freeze" "$s_ff") && [ -n "$p" ] && parts+=("$p")
+        p=$(_sched_fmt "Planning Freeze" "$s_pf") && [ -n "$p" ] && parts+=("$p")
+
+        if [ "${#parts[@]}" -gt 0 ]; then
+            local line1="${parts[0]}"
+            [ "${#parts[@]}" -ge 2 ] && line1="${line1}  │  ${parts[1]}"
+            [ "${#parts[@]}" -ge 3 ] && line1="${line1}  │  ${parts[2]}"
+            echo -e "${BOLD}Schedule:${NC} ${line1}"
+            if [ "${#parts[@]}" -ge 4 ]; then
+                local line2="          ${parts[3]}"
+                [ "${#parts[@]}" -ge 5 ] && line2="${line2}  │  ${parts[4]}"
+                [ "${#parts[@]}" -ge 6 ] && line2="${line2}  │  ${parts[5]}"
+                echo -e "          ${line2}"
+            fi
+        fi
+
+        if [ -n "$s_nr" ]; then
+            echo -e "${BOLD}Next:${NC}     ${s_nr}"
+        fi
+    fi
     echo ""
 
     show_freeze_banner
@@ -7772,6 +8139,9 @@ cmd_release_readiness() {
     summary=$(_release_epoch_pipeline_summary "$all_releases" "$epoch" "$filter_target")
     IFS='|' read -r sd st sr pd pt pr_r blocker blocker_msg next_step <<< "$summary"
 
+    local step_lines
+    step_lines=$(_release_epoch_pipeline_steps "$all_releases" "$epoch" "$filter_target")
+
     echo -e "── ${BOLD}Pipeline${NC} ────────────────────────────────────────────────────"
 
     if [ -z "$filter_target" ] || [ "$filter_target" = "stage" ]; then
@@ -7780,32 +8150,76 @@ cmd_release_readiness() {
         local stage_extra=""
         [ "${sr:-0}" -gt 0 ] && stage_extra="  (${sr} retries)"
         echo -e "  Stage: ${sd}/${st} ${stage_icon}${stage_extra}"
+        # Per-step detail for stage
+        local stage_done="" stage_pending=""
+        while IFS='|' read -r s_tgt s_label s_status s_retries s_fail; do
+            [ "$s_tgt" != "stage" ] && continue
+            if [ "$s_status" = "succeeded" ]; then
+                stage_done="${stage_done}${stage_done:+  }${GREEN}✓${NC} ${s_label}"
+            elif [ "$s_status" = "failed" ]; then
+                local fail_info=""
+                [ -n "$s_fail" ] && fail_info=" — failed at ${s_fail}"
+                stage_pending="${stage_pending}    ${RED}✗${NC} ${s_label}${fail_info}\n"
+            elif [ "$s_status" = "running" ]; then
+                stage_pending="${stage_pending}    ${YELLOW}◌${NC} ${s_label} (running)\n"
+            else
+                stage_pending="${stage_pending}    ${YELLOW}○${NC} ${s_label}\n"
+            fi
+        done <<< "$step_lines"
+        [ -n "$stage_done" ] && echo -e "    ${stage_done}"
+        [ -n "$stage_pending" ] && echo -en "$stage_pending"
     fi
 
     if [ -z "$filter_target" ] || [ "$filter_target" = "prod" ]; then
         local prod_icon="${YELLOW}○${NC}"
         [ "$pd" -eq "$pt" ] 2>/dev/null && prod_icon="${GREEN}✓${NC}"
-        [ -n "$blocker" ] && prod_icon="${RED}✗${NC}"
+        [ -n "$blocker" ] && [[ "$blocker" == prod* ]] && prod_icon="${RED}✗${NC}"
         local prod_extra=""
         [ "${pr_r:-0}" -gt 0 ] && prod_extra="  (${pr_r} retries)"
-        echo -e "  Prod:  ${pd}/${pt} ${prod_icon}${prod_extra}"
-    fi
-
-    if [ -n "$blocker" ]; then
-        local short_task
-        short_task=$(echo "$blocker_msg" | grep -oP 'task \K[^ :]+' | head -1)
-        [ -n "$short_task" ] && echo -e "  ${RED}✗ Blocker:${NC} ${blocker} failed at ${short_task}" \
-            || echo -e "  ${RED}✗ Blocker:${NC} ${blocker} failed"
-    elif [ -n "$next_step" ]; then
-        echo -e "  → Next: ${next_step}"
+        local prod_note=""
+        if [ "${pd:-0}" -eq 0 ] && [ "${sd:-0}" -lt "${st:-0}" ] 2>/dev/null; then
+            prod_note=" (waiting on stage)"
+        fi
+        echo -e "  Prod:  ${pd}/${pt} ${prod_icon}${prod_extra}${prod_note}"
+        # Per-step detail for prod (only when prod has activity or stage is done)
+        if [ "${pd:-0}" -gt 0 ] || [ "${sd:-0}" -eq "${st:-0}" ] 2>/dev/null; then
+            local prod_done="" prod_pending=""
+            while IFS='|' read -r s_tgt s_label s_status s_retries s_fail; do
+                [ "$s_tgt" != "prod" ] && continue
+                if [ "$s_status" = "succeeded" ]; then
+                    prod_done="${prod_done}${prod_done:+  }${GREEN}✓${NC} ${s_label}"
+                elif [ "$s_status" = "failed" ]; then
+                    local fail_info=""
+                    [ -n "$s_fail" ] && fail_info=" — failed at ${s_fail}"
+                    prod_pending="${prod_pending}    ${RED}✗${NC} ${s_label}${fail_info}\n"
+                elif [ "$s_status" = "running" ]; then
+                    prod_pending="${prod_pending}    ${YELLOW}◌${NC} ${s_label} (running)\n"
+                else
+                    prod_pending="${prod_pending}    ${YELLOW}○${NC} ${s_label}\n"
+                fi
+            done <<< "$step_lines"
+            [ -n "$prod_done" ] && echo -e "    ${prod_done}"
+            [ -n "$prod_pending" ] && echo -en "$prod_pending"
+        fi
     fi
     echo ""
 
     # ── Section 2: Build Health ──
     local blockers=() risks=()
+    local release_urgency=""
+    if [ -n "$sched_data" ]; then
+        local _ru_ga; _ru_ga=$(echo "$sched_data" | cut -d'|' -f6)
+        _ru_ga=$(trim "$_ru_ga")
+        if [ -n "$_ru_ga" ]; then
+            local ga_days=$(_release_days_until "$_ru_ga")
+            if [ -n "$ga_days" ] && [ "$ga_days" -gt 0 ]; then
+                release_urgency=" — ${YELLOW}${ga_days}d to release${NC}"
+            fi
+        fi
+    fi
 
     if [ "$db_ok" = true ]; then
-        echo -e "── ${BOLD}Build Health${NC} ────────────────────────────────────────────"
+        echo -e "── ${BOLD}Build Health${NC}${release_urgency} ────────────────────────────────────"
 
         local failing_data
         failing_data=$(sql_failing_builds_with_health "$APPLICATION_NAME" 2>/dev/null)
@@ -7846,7 +8260,7 @@ cmd_release_readiness() {
         echo ""
 
         # ── Section 3: Conforma Compliance ──
-        echo -e "── ${BOLD}Conforma Compliance${NC} ─────────────────────────────────────"
+        echo -e "── ${BOLD}Conforma Compliance${NC}${release_urgency} ─────────────────────────────"
 
         local conforma_data
         conforma_data=$(sql_conforma_blocking "$APPLICATION_NAME" 2>/dev/null)
@@ -7867,8 +8281,9 @@ cmd_release_readiness() {
 
                 local exc_status="-"
                 if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                    local cname_esc="${cname//\'/\'\'}" cscenario_esc="${cscenario//\'/\'\'}" app_esc="${APPLICATION_NAME//\'/\'\'}"
                     local vsummary
-                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname' AND scenario = '$cscenario' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname_esc' AND scenario = '$cscenario_esc' AND application = '$app_esc' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
                     exc_status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$cscenario" | cut -d'|' -f1)
                 fi
 
@@ -7882,13 +8297,14 @@ cmd_release_readiness() {
             # Count blocking (re-run without subshell for variable access)
             local _blocking=0 _excepted=0 _partial=0 _blocking_names=""
             while IFS='|' read -r cname cviol cscenario; do
-                cname=$(trim "$cname")
+                cname=$(trim "$cname"); cscenario=$(trim "$cscenario")
                 [ -z "$cname" ] && continue
                 local exc_status="-"
                 if [ -n "$exceptions" ] || [ -n "$k8s_exc_full" ]; then
+                    local cname_esc="${cname//\'/\'\'}" cscenario_esc="${cscenario//\'/\'\'}" app_esc="${APPLICATION_NAME//\'/\'\'}"
                     local vsummary
-                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname' AND scenario = '$cscenario' AND application = '$APPLICATION_NAME' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
-                    exc_status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$(trim "$cscenario")" | cut -d'|' -f1)
+                    vsummary=$(sql "SELECT violation_summary FROM conforma_results WHERE component_name = '$cname_esc' AND scenario = '$cscenario_esc' AND application = '$app_esc' AND is_resolved = FALSE ORDER BY last_updated_at DESC LIMIT 1;" 2>/dev/null)
+                    exc_status=$(check_exception_status_v2 "$vsummary" "$exceptions" "$k8s_exc_full" "$cscenario" | cut -d'|' -f1)
                 fi
                 case "$exc_status" in
                     YES|"YES (policy)") _excepted=$((_excepted + 1)) ;;
@@ -7912,7 +8328,62 @@ cmd_release_readiness() {
         echo ""
     fi
 
-    # ── Section 4: JIRA Linked Issues ──
+    # ── Section 4: Expiring Exceptions ──
+    local name_filter="${APPLICATION_NAME#rhoai-}"
+    local expiring_json
+    expiring_json=$(cd "$SCRIPT_DIR/src" && python3.11 ec_policy_data.py --action expiring --name-filter "$name_filter" --days 45 2>/dev/null || true)
+
+    if [ -n "$expiring_json" ] && echo "$expiring_json" | jq -e '.source == "k8s-api"' >/dev/null 2>&1; then
+        local exp_count
+        exp_count=$(echo "$expiring_json" | jq '[.exceptions[] | select(.days_left >= 0)] | length')
+
+        if [ "${exp_count:-0}" -gt 0 ]; then
+            echo -e "── ${BOLD}Expiring Exceptions${NC}${release_urgency} ─────────────────────────────"
+
+            local exp_summary
+            exp_summary=$(echo "$expiring_json" | jq -r '
+                [.exceptions[] | select(.days_left >= 0)] |
+                group_by(.days_left) |
+                map({
+                    days: .[0].days_left,
+                    count: length,
+                    rules: ([.[].value | split(":")[0] | split(".")[0:2] | join(".")] | unique | sort)
+                }) |
+                sort_by(.days) |
+                .[] | "\(.days)|\(.count)|\(.rules | join(", "))"
+            ')
+
+            while IFS='|' read -r exp_days exp_cnt exp_rules; do
+                [ -z "$exp_days" ] && continue
+                local urgency_icon="${GREEN}○${NC}"
+                if [ "$exp_days" -le 0 ]; then
+                    urgency_icon="${RED}✗${NC}"
+                elif [ "$exp_days" -le 7 ]; then
+                    urgency_icon="${RED}!${NC}"
+                elif [ "$exp_days" -le 14 ]; then
+                    urgency_icon="${YELLOW}△${NC}"
+                fi
+                printf "    %b %-6s %s exception(s): %s\n" "$urgency_icon" "${exp_days}d" "$exp_cnt" "$exp_rules"
+            done <<< "$exp_summary"
+
+            echo ""
+
+            local expired_count
+            expired_count=$(echo "$expiring_json" | jq '[.exceptions[] | select(.days_left < 0 and .days_left >= -7)] | length')
+            if [ "${expired_count:-0}" -gt 0 ]; then
+                echo -e "  ${RED}Warning:${NC} ${expired_count} exception(s) expired in the last 7 days"
+            fi
+
+            local urgent_count
+            urgent_count=$(echo "$expiring_json" | jq '[.exceptions[] | select(.days_left >= 0 and .days_left <= 14)] | length')
+            if [ "${urgent_count:-0}" -gt 0 ]; then
+                risks+=("${urgent_count} EC exception(s) expire within 14 days")
+            fi
+            echo ""
+        fi
+    fi
+
+    # ── Section 5: JIRA Linked Issues ──
     if [ "$db_ok" = true ] && [ -n "${JIRA_TOKEN:-}" ]; then
         local jira_keys
         jira_keys=$(sql_linked_jira_keys "$APPLICATION_NAME" 2>/dev/null)
@@ -7948,7 +8419,7 @@ cmd_release_readiness() {
         fi
     fi
 
-    # ── Section 5: Additional Risks ──
+    # ── Section 6: Additional Risks ──
     # Retry warnings
     local total_retries=$(( ${sr:-0} + ${pr_r:-0} ))
     if [ "$total_retries" -gt 2 ]; then
@@ -7974,7 +8445,7 @@ cmd_release_readiness() {
         risks+=("Active infrastructure incident: ${outage_name}")
     fi
 
-    # ── Section 6: Verdict ──
+    # ── Section 7: Verdict ──
     [ -n "$blocker" ] && blockers+=("Pipeline: ${blocker} failed")
 
     echo -e "── ${BOLD}Verdict${NC} ─────────────────────────────────────────────────────"
@@ -8008,8 +8479,22 @@ cmd_release_readiness() {
         fi
     fi
 
+    # Production outlook when prod hasn't completed
+    if [ "${pd:-0}" -lt "${pt:-0}" ] 2>/dev/null && [ "$db_ok" = true ]; then
+        local outlook_parts=()
+        [ "${fail_count:-0}" -gt 0 ] && outlook_parts+=("${fail_count} build failure(s)")
+        [ "${_blocking:-0}" -gt 0 ] && outlook_parts+=("${_blocking} conforma violation(s)")
+        if [ "${#outlook_parts[@]}" -gt 0 ]; then
+            local outlook_str
+            outlook_str=$(IFS='+'; echo "${outlook_parts[*]}" | sed 's/+/ + /g')
+            echo ""
+            echo -e "  ${BOLD}Production outlook:${NC} ${outlook_str} would also block prod"
+        fi
+    fi
+
     echo ""
     echo -e "${CYAN}Tip:${NC} Use 'ic release status' for detailed pipeline checklist"
+    echo -e "${CYAN}Tip:${NC} Use 'ic get policy-gap' for stage vs prod policy differences"
     echo -e "${CYAN}Tip:${NC} Use 'ic describe conforma <name>' for violation details"
     echo ""
 }
@@ -9320,6 +9805,9 @@ case "${1:-}" in
                 ;;
             bindings)
                 cmd_get_bindings
+                ;;
+            policy-gap|policygap|gap)
+                cmd_get_policy_gap
                 ;;
             conforma)
                 cmd_get_conforma "${3:-}"

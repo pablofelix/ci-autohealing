@@ -100,6 +100,7 @@ class ConformaAnalyzer:
             db = DatabaseConnection(config.db)
 
         self.config = config
+        self._konflux_client = None
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
         self.pattern_repo = ErrorPatternRepository(db)
 
@@ -184,12 +185,13 @@ class ConformaAnalyzer:
 ```
 {summary}
 ```
-{pattern_section}
+{pattern_section}{exclusion_section}
 Use the record_conforma_analysis tool. Remember:
 - Match against the 14 known patterns (hermetic build, unpinned task, package source, etc.)
 - Explain WHICH policy is violated and WHY
 - Provide both fix instructions AND exception request guidance
 - Be specific: reference exact rules, packages, files from the violation details
+- Check Active Policy Exclusions: if the violated rule is already excluded, note this and recommend monitoring the waiver expiry instead of fixing
 - Set confidence based on pattern match strength
 - If confidence is below 0.70, recommend contacting #konflux-users or @owatkins in Slack
 - Mark can_auto_fix=false unless it's a simple rebuild or zero-risk config change
@@ -205,6 +207,7 @@ Use the record_conforma_analysis tool. Remember:
             successes=violation.get('successes_count', 0),
             summary=summary,
             pattern_section=pattern_section,
+            exclusion_section=self._get_policy_exclusions(violation),
         )
 
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
@@ -223,6 +226,56 @@ Use the record_conforma_analysis tool. Remember:
         if doc:
             parts.append("### Relevant Documentation\n{}\n".format(doc[:2000]))
         return '\n'.join(parts)
+
+    def _get_policy_exclusions(self, violation):
+        # type: (Dict[str, Any],) -> str
+        """Fetch EC policy exclusions relevant to this violation's scenario."""
+        scenario = violation.get('scenario', '')
+        if not scenario:
+            return ''
+        try:
+            if self._konflux_client is None:
+                from clients.konflux_client import KonfluxClient
+                self._konflux_client = KonfluxClient(namespace=self.config.k8s.namespace)
+            kc = self._konflux_client
+            scenarios = kc.get_integration_test_scenarios(
+                self.config.k8s.namespace,
+                app_filter=self.config.k8s.application_name,
+            )
+            policy_name = None
+            for s in scenarios:
+                meta = kc.extract_its_metadata(s)
+                if meta['name'] == scenario and meta['policy_ref']:
+                    policy_name = meta['policy_ref']
+                    break
+            if not policy_name:
+                return ''
+
+            policy = kc.get_ec_policy(policy_name)
+            if not policy:
+                return ''
+
+            exclusions = kc.extract_exceptions(policy)
+            if not exclusions:
+                return ''
+
+            lines = ['\n## Active Policy Exclusions ({})'.format(policy_name)]
+            for exc in exclusions:
+                if exc['permanent']:
+                    lines.append('- PERMANENT: {} (config.exclude)'.format(exc['value']))
+                else:
+                    days = exc.get('days_left')
+                    days_str = '{} days left'.format(days) if days is not None else 'no expiry'
+                    lines.append('- VOLATILE: {} (until {}, {}, ref: {})'.format(
+                        exc['value'],
+                        exc.get('effectiveUntil', 'N/A'),
+                        days_str,
+                        exc.get('reference', 'none'),
+                    ))
+            return '\n'.join(lines) + '\n'
+        except Exception as e:
+            logger.warning("Cannot fetch EC policy exclusions: %s", e)
+            return ''
 
     def parse_analysis_response(self, llm_response):
         # type: (Any,) -> Dict[str, Any]

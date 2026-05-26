@@ -4,12 +4,19 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from repositories.connection import DatabaseConnection
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 from config import CollectorConfig
+
+
+class FreezeCreate(BaseModel):
+    start_date: str
+    end_date: str
+    reason: str = Field(..., min_length=1, max_length=500)
 
 router = APIRouter(tags=["releases"])
 
@@ -64,10 +71,10 @@ def get_active_freeze() -> Optional[Dict[str, Any]]:
 
 
 @router.post("/freezes")
-def add_freeze(start_date: str, end_date: str, reason: str) -> Dict[str, Any]:
+def add_freeze(body: FreezeCreate) -> Dict[str, Any]:
     try:
-        s = date.fromisoformat(start_date)
-        e = date.fromisoformat(end_date)
+        s = date.fromisoformat(body.start_date)
+        e = date.fromisoformat(body.end_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
     if e < s:
@@ -78,10 +85,10 @@ def add_freeze(start_date: str, end_date: str, reason: str) -> Dict[str, Any]:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO release_freezes (start_date, end_date, reason) VALUES (%s, %s, %s) RETURNING id",
-            (s, e, reason)
+            (s, e, body.reason)
         )
         fid = cursor.fetchone()[0]
-        return {'id': fid, 'start_date': str(s), 'end_date': str(e), 'reason': reason}
+        return {'id': fid, 'start_date': str(s), 'end_date': str(e), 'reason': body.reason}
 
 
 @router.delete("/freezes/{freeze_id}")
@@ -93,6 +100,32 @@ def remove_freeze(freeze_id: int) -> Dict[str, str]:
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"Freeze {freeze_id} not found")
         return {'status': 'deleted', 'id': str(freeze_id)}
+
+
+@router.get("/applications/{application}/schedule")
+def get_schedule(application: str) -> Optional[Dict[str, Any]]:
+    db = _db()
+    with db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT planning_freeze, feature_freeze, code_freeze, initial_rc, "
+            "release_window_start, release_date, next_release, updated_at "
+            "FROM release_schedule WHERE application = %s",
+            (application,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        fields = ['planning_freeze', 'feature_freeze', 'code_freeze',
+                  'initial_rc', 'release_window_start', 'release_date']
+        result = {'application': application}
+        for i, f in enumerate(fields):
+            result[f] = str(row[i]) if row[i] else None
+            if row[i] and hasattr(row[i], 'year'):
+                result[f'{f}_days'] = (row[i] - date.today()).days
+        result['next_release'] = row[6] if row[6] else None
+        result['updated_at'] = str(row[7]) if row[7] else None
+        return result
 
 
 @router.get("/applications/{application}/readiness")
@@ -125,6 +158,8 @@ def get_readiness(application: str) -> Dict[str, Any]:
     else:
         verdict = "READY"
 
+    schedule = get_schedule(application)
+
     return {
         'application': application,
         'verdict': verdict,
@@ -135,4 +170,5 @@ def get_readiness(application: str) -> Dict[str, Any]:
         'freeze': freeze,
         'blockers': blockers,
         'risks': risks,
+        'schedule': schedule,
     }
