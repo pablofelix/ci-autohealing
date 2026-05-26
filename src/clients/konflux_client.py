@@ -196,24 +196,43 @@ class KonfluxClient:
     def extract_snapshot_status(snapshot):
         # type: (Dict[str, Any]) -> Dict[str, Any]
         meta = snapshot.get('metadata', {})
+        labels = meta.get('labels', {})
         spec = snapshot.get('spec', {})
         conditions = snapshot.get('status', {}).get('conditions', [])
         components = spec.get('components', [])
+
+        event_type = labels.get('test.appstudio.openshift.io/type', 'push')
+        is_override = event_type == 'override'
+
         test_results = {}
+        warnings = []
+        latest_transition = ''
         for cond in conditions:
             ctype = cond.get('type', '')
             if ctype.startswith('AppStudioTestSucceeded') or 'Test' in ctype:
+                status = cond.get('status', 'Unknown')
+                message = cond.get('message', '')[:300]
                 test_results[cond.get('reason', ctype)] = {
-                    'status': cond.get('status', 'Unknown'),
-                    'message': cond.get('message', '')[:300],
+                    'status': status,
+                    'message': message,
                 }
+                if 'warning' in message.lower():
+                    warnings.append(cond.get('reason', ctype))
+            transition = cond.get('lastTransitionTime', '')
+            if transition > latest_transition:
+                latest_transition = transition
+
         return {
             'name': meta.get('name', ''),
             'application': spec.get('application', ''),
             'created': meta.get('creationTimestamp', ''),
+            'event_type': event_type,
+            'is_override': is_override,
             'component_count': len(components),
             'components': [c.get('name', '') for c in components],
             'test_results': test_results,
+            'warnings': warnings,
+            'latest_transition': latest_transition,
         }
 
     def get_releases(self, app_filter=None, limit=5):

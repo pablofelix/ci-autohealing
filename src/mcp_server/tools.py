@@ -516,9 +516,30 @@ def get_snapshot_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any
     if not snapshots:
         return {'application': application, 'snapshots': [], 'error': 'No snapshots found'}
     results = []
+    override_count = 0
+    warning_count = 0
+    event_types = {}
     for snap in snapshots:
-        results.append(kc.extract_snapshot_status(snap))
-    return {'application': application, 'snapshot_count': len(results), 'snapshots': results}
+        status = kc.extract_snapshot_status(snap)
+        if status.get('is_override'):
+            override_count += 1
+        warning_count += len(status.get('warnings', []))
+        et = status.get('event_type', 'push')
+        event_types[et] = event_types.get(et, 0) + 1
+        results.append(status)
+    summary = {'event_type_breakdown': event_types}
+    if override_count:
+        summary['override_snapshots'] = override_count
+        summary['override_note'] = 'Manual overrides detected — teams may be working around automation failures'
+    if warning_count:
+        summary['total_warnings'] = warning_count
+        summary['warning_note'] = 'Tests passing with warnings — potential degradation signal'
+    return {
+        'application': application,
+        'snapshot_count': len(results),
+        'snapshots': results,
+        **summary,
+    }
 
 
 @mcp.tool()
@@ -541,6 +562,57 @@ def get_release_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]
     for rel in releases:
         results.append(kc.extract_release_status(rel))
     return {'application': application, 'release_count': len(results), 'releases': results}
+
+
+@mcp.tool()
+@async_tool
+def get_test_configuration(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Analyze IntegrationTestScenario configuration for an application.
+
+    Detects: disabled tests, context misconfigurations, missing Conforma scenarios,
+    tests scoped to specific components, and coverage gaps.
+
+    Args:
+        application: Which version to query
+    """
+    from clients.konflux_client import KonfluxClient
+    kc = KonfluxClient(namespace=NAMESPACE)
+    scenarios = kc.get_integration_test_scenarios(NAMESPACE, app_filter=application)
+    if not scenarios:
+        return {'application': application, 'scenarios': [], 'error': 'No ITS found'}
+
+    results = []
+    issues = []
+    disabled_count = 0
+    conforma_count = 0
+    for s in scenarios:
+        meta = kc.extract_its_metadata(s)
+        results.append(meta)
+
+        if meta['is_disabled']:
+            disabled_count += 1
+            issues.append('DISABLED: {} — not running any tests'.format(meta['name']))
+        if meta['is_conforma']:
+            conforma_count += 1
+        if meta['is_future']:
+            issues.append('FUTURE: {} — will become active later'.format(meta['name']))
+
+        component_scoped = [c for c in meta['contexts'] if c.startswith('component_')]
+        if component_scoped:
+            issues.append('SCOPED: {} — only runs for {}'.format(
+                meta['name'], ', '.join(component_scoped)))
+
+    if conforma_count == 0:
+        issues.append('NO CONFORMA: no Enterprise Contract test scenario found')
+
+    return {
+        'application': application,
+        'total_scenarios': len(results),
+        'disabled': disabled_count,
+        'conforma_scenarios': conforma_count,
+        'issues': issues,
+        'scenarios': results,
+    }
 
 
 @mcp.tool()

@@ -51,6 +51,58 @@ class TestExtractSnapshotStatus(unittest.TestCase):
         self.assertIn('Passed', result['test_results'])
         self.assertEqual(result['test_results']['Passed']['status'], 'True')
 
+    def test_override_snapshot(self):
+        snap = {
+            'metadata': {
+                'name': 'snap-override',
+                'creationTimestamp': '2025-05-20T10:00:00Z',
+                'labels': {'test.appstudio.openshift.io/type': 'override'},
+            },
+            'spec': {'application': 'app', 'components': []},
+            'status': {'conditions': []},
+        }
+        result = self._extract(snap)
+        self.assertTrue(result['is_override'])
+        self.assertEqual(result['event_type'], 'override')
+
+    def test_push_event_type_default(self):
+        snap = {
+            'metadata': {'name': 's', 'creationTimestamp': '2025-05-20T10:00:00Z'},
+            'spec': {'components': []},
+            'status': {'conditions': []},
+        }
+        result = self._extract(snap)
+        self.assertEqual(result['event_type'], 'push')
+        self.assertFalse(result['is_override'])
+
+    def test_warning_detection(self):
+        snap = {
+            'metadata': {'name': 's'},
+            'spec': {'components': []},
+            'status': {'conditions': [{
+                'type': 'AppStudioTestSucceeded',
+                'status': 'True',
+                'reason': 'fips-check',
+                'message': 'Passed with WARNING: 2 binaries skipped',
+            }]},
+        }
+        result = self._extract(snap)
+        self.assertEqual(result['warnings'], ['fips-check'])
+
+    def test_latest_transition_time(self):
+        snap = {
+            'metadata': {'name': 's'},
+            'spec': {'components': []},
+            'status': {'conditions': [
+                {'type': 'AppStudioTestSucceeded', 'status': 'True',
+                 'reason': 'a', 'message': '', 'lastTransitionTime': '2025-05-20T10:00:00Z'},
+                {'type': 'Validated', 'status': 'True',
+                 'reason': 'b', 'message': '', 'lastTransitionTime': '2025-05-20T10:30:00Z'},
+            ]},
+        }
+        result = self._extract(snap)
+        self.assertEqual(result['latest_transition'], '2025-05-20T10:30:00Z')
+
     def test_empty_snapshot(self):
         result = self._extract({})
         self.assertEqual(result['name'], '')
@@ -132,6 +184,69 @@ class TestExtractReleaseStatus(unittest.TestCase):
         self.assertEqual(result['name'], '')
         self.assertEqual(result['snapshot'], '')
         self.assertFalse(result['post_validation_failed'])
+
+
+class TestExtractItsMetadata(unittest.TestCase):
+
+    def _extract(self, scenario):
+        from clients.konflux_client import KonfluxClient
+        return KonfluxClient.extract_its_metadata(scenario)
+
+    def test_disabled_scenario(self):
+        s = {
+            'metadata': {'name': 'test-disabled'},
+            'spec': {
+                'application': 'app',
+                'contexts': [{'name': 'disabled'}],
+                'params': [],
+                'resolverRef': {'params': []},
+            },
+        }
+        result = self._extract(s)
+        self.assertTrue(result['is_disabled'])
+
+    def test_component_scoped(self):
+        s = {
+            'metadata': {'name': 'test-comp'},
+            'spec': {
+                'application': 'app',
+                'contexts': [{'name': 'component_my-image'}, {'name': 'push'}],
+                'params': [],
+                'resolverRef': {'params': []},
+            },
+        }
+        result = self._extract(s)
+        self.assertIn('component_my-image', result['contexts'])
+        self.assertIn('push', result['contexts'])
+
+    def test_conforma_detection(self):
+        s = {
+            'metadata': {'name': 'my-conforma-test'},
+            'spec': {
+                'application': 'app',
+                'contexts': [],
+                'params': [{'name': 'POLICY_CONFIGURATION', 'value': 'ec-policy-prod'}],
+                'resolverRef': {'params': [
+                    {'name': 'pathInRepo', 'value': 'pipelines/enterprise-contract.yaml'},
+                ]},
+            },
+        }
+        result = self._extract(s)
+        self.assertTrue(result['is_conforma'])
+        self.assertEqual(result['policy_ref'], 'ec-policy-prod')
+
+    def test_future_scenario(self):
+        s = {
+            'metadata': {'name': 'test-future-validation'},
+            'spec': {
+                'application': 'app',
+                'contexts': [],
+                'params': [],
+                'resolverRef': {'params': []},
+            },
+        }
+        result = self._extract(s)
+        self.assertTrue(result['is_future'])
 
 
 class TestFilterErrorLines(unittest.TestCase):

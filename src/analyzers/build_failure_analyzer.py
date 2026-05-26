@@ -378,6 +378,7 @@ class BuildFailureAnalyzer:
             failed_logs = None
             platform_summary = []
             test_outputs = []
+            test_warnings = []
 
             for td, record_name in taskruns:
                 task = td.get('metadata', {}).get('labels', {}).get(
@@ -407,10 +408,14 @@ class BuildFailureAnalyzer:
                             result = data.get('result', '')
                             note = data.get('note', '')
                             if result and result != 'SUCCESS':
-                                test_outputs.append('{}{}: {} — {}'.format(
+                                entry = '{}{}: {} — {}'.format(
                                     task,
                                     ' [{}]'.format(platform) if platform else '',
-                                    result, note[:500]))
+                                    result, note[:500])
+                                if result == 'WARNING':
+                                    test_warnings.append(entry)
+                                else:
+                                    test_outputs.append(entry)
                         except (json.JSONDecodeError, TypeError):
                             pass
 
@@ -429,8 +434,12 @@ class BuildFailureAnalyzer:
             if failed_logs:
                 header_parts = []
                 if test_outputs:
-                    header_parts.append('=== Structured Test Results ===')
+                    header_parts.append('=== Structured Test Results (FAILURES) ===')
                     header_parts.extend(test_outputs)
+                    header_parts.append('')
+                if test_warnings:
+                    header_parts.append('=== Structured Test Results (WARNINGS) ===')
+                    header_parts.extend(test_warnings)
                     header_parts.append('')
                 if platform_summary:
                     header_parts.append('=== Per-platform build status ===')
