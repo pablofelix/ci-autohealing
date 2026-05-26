@@ -145,12 +145,7 @@ The project includes custom Claude Code slash commands for guided workflows. Ope
 | `/triage [component]` | Investigate a failure — auto-routes to build or Conforma |
 | `/triage-build <component>` | Deep-dive into build failure: logs, diffs, fix options |
 | `/triage-conforma <component>` | Policy violation analysis: rules, exceptions, remediation |
-| `/analyze <N or name>` | AI root cause analysis with evidence |
-| `/release` | Daily release workflow: readiness, blockers, fix, report |
-| `/status` | CI health briefing: trends, costs, pattern summary |
-| `/export <N> [format]` | Generate Jira ticket, Slack message, or Markdown |
 | `/demo` | Interactive guided tour of all ic features |
-| `/konflux` | Look up Konflux platform documentation |
 
 ---
 
