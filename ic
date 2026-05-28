@@ -4909,6 +4909,44 @@ cmd_get_alerts() {
     show_freeze_banner
     show_outage_banner
 
+    # Release schedule countdown
+    local sched_data
+    sched_data=$(_release_get_schedule "$APPLICATION_NAME" 2>/dev/null)
+    if [ -n "$sched_data" ]; then
+        local s_pf s_ff s_cf s_rc s_rw s_ga s_nr
+        IFS='|' read -r s_pf s_ff s_cf s_rc s_rw s_ga s_nr <<< "$sched_data"
+        s_pf=$(trim "$s_pf"); s_ff=$(trim "$s_ff"); s_cf=$(trim "$s_cf")
+        s_rc=$(trim "$s_rc"); s_rw=$(trim "$s_rw"); s_ga=$(trim "$s_ga")
+
+        _alert_sched_fmt() {
+            local label="$1" dt="$2"
+            [ -z "$dt" ] && return
+            local d; d=$(_release_days_until "$dt")
+            local fmt; fmt=$(date -d "$dt" '+%b %d' 2>/dev/null || echo "$dt")
+            if [ -n "$d" ] && [ "$d" -le 0 ]; then
+                echo -e "${RED}${label}: ${fmt} (passed)${NC}"
+            elif [ -n "$d" ] && [ "$d" -le 7 ]; then
+                echo -e "${YELLOW}${label}: ${fmt} (${d}d)${NC}"
+            elif [ -n "$d" ]; then
+                echo "${label}: ${fmt} (${d}d)"
+            fi
+        }
+
+        local parts=()
+        local p
+        p=$(_alert_sched_fmt "Code Freeze" "$s_cf") && [ -n "$p" ] && parts+=("$p")
+        p=$(_alert_sched_fmt "RC" "$s_rc") && [ -n "$p" ] && parts+=("$p")
+        p=$(_alert_sched_fmt "GA" "$s_ga") && [ -n "$p" ] && parts+=("$p")
+
+        if [ "${#parts[@]}" -gt 0 ]; then
+            local line="${parts[0]}"
+            [ "${#parts[@]}" -ge 2 ] && line="${line}  │  ${parts[1]}"
+            [ "${#parts[@]}" -ge 3 ] && line="${line}  │  ${parts[2]}"
+            echo -e "${BOLD}Release:${NC}  ${line}"
+            echo ""
+        fi
+    fi
+
     local build_count=$(sql_count_failing_builds)
     display_alerts_build_failures "$retriggered_json"
 
@@ -6559,7 +6597,7 @@ cmd_conforma_history() {
 
 RELENG_NAMESPACE="${RELENG_NAMESPACE:-}"
 SMARTSHEET_API_TOKEN="${SMARTSHEET_API_TOKEN:-${SMARTSHEET_TOKEN:-}}"
-SMARTSHEET_GA_SHEET_ID="${SMARTSHEET_GA_SHEET_ID:-SMARTSHEET_SHEET_ID_REDACTED}"
+SMARTSHEET_GA_SHEET_ID="${SMARTSHEET_GA_SHEET_ID:-}"
 
 _release_app_to_shortname() {
     local app="${1:-$APPLICATION_NAME}"
@@ -6579,6 +6617,7 @@ _release_app_to_shortname() {
 _release_fetch_smartsheet_dates() {
     local app="${1:-$APPLICATION_NAME}"
     [ -z "$SMARTSHEET_API_TOKEN" ] && return 1
+    [ -z "$SMARTSHEET_GA_SHEET_ID" ] && return 1
 
     local shortname
     shortname=$(_release_app_to_shortname "$app")
