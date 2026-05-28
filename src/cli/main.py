@@ -623,14 +623,20 @@ def _update_env_var(var_name, value):
                     lines.append(line)
     if not found:
         lines.append('{}={}\n'.format(var_name, value))
+    env_dir = os.path.dirname(env_file)
+    os.makedirs(env_dir, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(env_file), suffix='.tmp', text=True,
+        dir=env_dir, suffix='.tmp', text=True,
     )
     try:
         with os.fdopen(tmp_fd, 'w') as f:
             f.writelines(lines)
         os.replace(tmp_path, env_file)
     except Exception:
+        try:
+            os.close(tmp_fd)
+        except OSError:
+            pass
         os.unlink(tmp_path)
         raise
     os.environ[var_name] = value

@@ -9,7 +9,6 @@ import logging
 from datetime import datetime
 
 from tekton_parsers import (
-    classify_build_status,
     extract_error_from_logs,
     extract_pipelinerun_metadata,
 )
@@ -51,10 +50,10 @@ class BuildEventHandler:
         uid = metadata.get('uid', '')
         pr_name = metadata.get('name', '')
 
-        if uid in self._seen_uids:
-            return
         if len(self._seen_uids) >= self._MAX_SEEN_UIDS:
             self._seen_uids.clear()
+        if uid in self._seen_uids:
+            return
         self._seen_uids.add(uid)
 
         labels = metadata.get('labels', {})
@@ -63,13 +62,12 @@ class BuildEventHandler:
             return
 
         conditions = pr_data.get('status', {}).get('conditions', [])
-        reason = conditions[-1].get('reason', '') if conditions else ''
-        build_status = classify_build_status(reason)
+        cond = conditions[-1] if conditions else {}
+        cond_status = cond.get('status', '')
 
-        from models import BuildStatus
-        if build_status == BuildStatus.SUCCEEDED:
+        if cond_status == 'True':
             self._handle_success(pr_data, pr_name, uid, component, labels)
-        elif build_status == BuildStatus.FAILED:
+        elif cond_status == 'False':
             self._handle_failure(pr_data, pr_name, uid, component, labels)
 
     def _handle_success(self, pr_data, pr_name, uid, component, labels):

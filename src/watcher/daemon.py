@@ -238,6 +238,9 @@ class WatchDaemon:
 
     async def _reconciliation_loop(self):
         interval = self.watcher_config.reconcile_interval
+        logger.info("Running initial reconciliation to catch missed events...")
+        for app in self.watcher_config.applications:
+            await self._fallback_poll(app)
         while self._running:
             await asyncio.sleep(interval)
             if not self._running:
