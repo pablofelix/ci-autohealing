@@ -54,10 +54,14 @@ class UnifiedPipelineClient:
         for source in self.sources:
             logs = source.get_pipelinerun_logs(pr_name)
             if logs:
-                return logs[:max_size], type(source).__name__
+                if len(logs) > max_size:
+                    logs = logs[-max_size:]
+                return logs, type(source).__name__
         logs = self._get_logs_via_api(pr_name)
         if logs:
-            return logs[:max_size], 'k8s_pods'
+            if len(logs) > max_size:
+                logs = logs[-max_size:]
+            return logs, 'k8s_pods'
         return None, 'none'
 
     def get_taskruns_details(self, pr_name):

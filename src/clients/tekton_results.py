@@ -253,20 +253,25 @@ class TektonResultsClient:
         if not taskruns:
             return None
 
+        failed_trs = []
+        other_trs = []
+        for tr_data, record_name in taskruns:
+            conditions = tr_data.get('status', {}).get('conditions', [])
+            is_failed = conditions and conditions[-1].get('status') == 'False'
+            if is_failed:
+                failed_trs.append((tr_data, record_name))
+            elif not failed_only:
+                other_trs.append((tr_data, record_name))
+
         all_logs = []
         total_size = 0
 
-        for tr_data, record_name in taskruns:
-            if failed_only:
-                conditions = tr_data.get('status', {}).get('conditions', [])
-                if not conditions or conditions[-1].get('status') != 'False':
-                    continue
-
+        for tr_data, record_name in failed_trs + other_trs:
             task_name = tr_data.get('metadata', {}).get('labels', {}).get(
                 'tekton.dev/pipelineTask', 'unknown'
             )
             logs = self.get_taskrun_logs(record_name)
-            if not logs and failed_only:
+            if not logs and tr_data in [t for t, _ in failed_trs]:
                 condition_msg = tr_data.get('status', {}).get('conditions', [{}])[-1].get('message', '')
                 condition_reason = tr_data.get('status', {}).get('conditions', [{}])[-1].get('reason', '')
                 if condition_msg:

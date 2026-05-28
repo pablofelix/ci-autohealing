@@ -81,7 +81,9 @@ class PipelineRunSource(ABC):
                     all_logs.append("===== TaskRun: {} / Step: {} =====\n{}".format(tr_name, step, logs))
 
         combined = "\n\n".join(all_logs)
-        return combined[:max_log_size] if combined else None
+        if combined and len(combined) > max_log_size:
+            return combined[-max_log_size:]
+        return combined or None
 
     def get_pipelinerun_taskruns_details(self, pipelinerun_name, namespace=None):
         # type: (str, Optional[str]) -> List[Dict[str, Any]]
