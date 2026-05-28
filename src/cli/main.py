@@ -462,6 +462,180 @@ def config_set_app(app_name, force):
     print()
 
 
+# --- config watch subgroup ---
+
+@config.group('watch', invoke_without_command=True)
+@click.pass_context
+def config_watch(ctx):
+    """Manage watched applications and watcher toggles."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(config_watch_list)
+
+
+@config_watch.command('list')
+def config_watch_list():
+    """Show watched applications and watcher status."""
+    from cli.formatting import bold, cyan, green, red, dim
+    from config import ALL_WATCHERS
+
+    apps = os.environ.get('WATCH_APPLICATIONS', '').split()
+    if not apps:
+        fallback = os.environ.get('APPLICATION_NAME', '')
+        apps = [fallback] if fallback else []
+
+    disabled = set(os.environ.get('WATCH_DISABLE', '').split())
+
+    print()
+    print(bold('Watch Daemon Configuration'))
+    print()
+    print(bold('  Applications:'))
+    if apps:
+        for app in apps:
+            print('    {}'.format(cyan(app)))
+    else:
+        print('    {}'.format(dim('(none — set WATCH_APPLICATIONS or APPLICATION_NAME)')))
+
+    print()
+    print(bold('  Watchers:'))
+    print('    {:<16s} {:<10s} {}'.format('Name', 'Status', 'Type'))
+    print('    {}'.format('-' * 44))
+    for w in ALL_WATCHERS:
+        if w in disabled:
+            status = red('disabled')
+        else:
+            status = green('enabled')
+        if w == 'jira':
+            wtype = 'Jira API poll'
+        elif w == 'conforma':
+            wtype = 'K8s watch (not yet implemented)'
+        else:
+            wtype = 'K8s watch'
+        print('    {:<16s} {:<19s} {}'.format(w, status, dim(wtype)))
+
+    print()
+    print(dim('  Commands:'))
+    print(dim('    ic config watch add <app>       Add application'))
+    print(dim('    ic config watch remove <app>    Remove application'))
+    print(dim('    ic config watch enable <name>   Enable a watcher'))
+    print(dim('    ic config watch disable <name>  Disable a watcher'))
+    print()
+
+
+@config_watch.command('add')
+@click.argument('app_name')
+@click.option('--force', '-f', is_flag=True, help='Add even if not in DB')
+def config_watch_add(app_name, force):
+    """Add application to watch list."""
+    from cli.db import check_db, get_repo
+    from cli.formatting import cyan, green, red, yellow
+
+    if check_db() and not force:
+        from repositories.build_failure_repository import BuildFailureRepository
+        s = get_repo(BuildFailureRepository).get_overview_stats(app_name)
+        if s['total'] == 0:
+            print(red("Error: Application '{}' not found in database".format(app_name)))
+            print('  Use {} to add anyway.'.format(cyan('--force')))
+            raise SystemExit(1)
+
+    current = os.environ.get('WATCH_APPLICATIONS', '').split()
+    if app_name in current:
+        print(yellow('Already watching: ') + cyan(app_name))
+        return
+
+    current.append(app_name)
+    _update_env_var('WATCH_APPLICATIONS', ' '.join(current))
+    print(green('✓ Added to watch list: ') + cyan(app_name))
+
+
+@config_watch.command('remove')
+@click.argument('app_name')
+def config_watch_remove(app_name):
+    """Remove application from watch list."""
+    from cli.formatting import cyan, green, red
+
+    current = os.environ.get('WATCH_APPLICATIONS', '').split()
+    if app_name not in current:
+        print(red("Not in watch list: ") + cyan(app_name))
+        raise SystemExit(1)
+
+    current.remove(app_name)
+    _update_env_var('WATCH_APPLICATIONS', ' '.join(current))
+    print(green('✓ Removed from watch list: ') + cyan(app_name))
+
+
+@config_watch.command('enable')
+@click.argument('watcher_name')
+def config_watch_enable(watcher_name):
+    """Enable a watcher (builds, tests, conforma, jira, components)."""
+    from cli.formatting import cyan, green, red
+    from config import ALL_WATCHERS
+
+    if watcher_name not in ALL_WATCHERS:
+        print(red("Unknown watcher: ") + cyan(watcher_name))
+        print('  Available: {}'.format(', '.join(ALL_WATCHERS)))
+        raise SystemExit(1)
+
+    disabled = set(os.environ.get('WATCH_DISABLE', '').split())
+    if watcher_name not in disabled:
+        print(green('Already enabled: ') + cyan(watcher_name))
+        return
+
+    disabled.discard(watcher_name)
+    _update_env_var('WATCH_DISABLE', ' '.join(sorted(disabled)))
+    print(green('✓ Enabled watcher: ') + cyan(watcher_name))
+
+
+@config_watch.command('disable')
+@click.argument('watcher_name')
+def config_watch_disable(watcher_name):
+    """Disable a watcher (builds, tests, conforma, jira, components)."""
+    from cli.formatting import cyan, green, red, yellow
+    from config import ALL_WATCHERS
+
+    if watcher_name not in ALL_WATCHERS:
+        print(red("Unknown watcher: ") + cyan(watcher_name))
+        print('  Available: {}'.format(', '.join(ALL_WATCHERS)))
+        raise SystemExit(1)
+
+    disabled = set(os.environ.get('WATCH_DISABLE', '').split())
+    if watcher_name in disabled:
+        print(yellow('Already disabled: ') + cyan(watcher_name))
+        return
+
+    disabled.add(watcher_name)
+    _update_env_var('WATCH_DISABLE', ' '.join(sorted(disabled)))
+    print(green('✓ Disabled watcher: ') + cyan(watcher_name))
+
+
+def _update_env_var(var_name, value):
+    """Update a variable in .env file and current environment."""
+    import tempfile
+    env_file = os.path.join(str(cfg.PROJECT_DIR), '.env')
+    lines = []
+    found = False
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith('{}='.format(var_name)):
+                    lines.append('{}={}\n'.format(var_name, value))
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append('{}={}\n'.format(var_name, value))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(env_file), suffix='.tmp', text=True,
+    )
+    try:
+        with os.fdopen(tmp_fd, 'w') as f:
+            f.writelines(lines)
+        os.replace(tmp_path, env_file)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    os.environ[var_name] = value
+
+
 # --- stats group ---
 
 @cli.group(invoke_without_command=True)

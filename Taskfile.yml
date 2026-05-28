@@ -119,6 +119,12 @@ tasks:
     cmds:
       - python3 -m serve --mcp
 
+  watch:
+    desc: Start K8s watch daemon (event-driven monitoring)
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3 -m watcher
+
   # ===========================================================================
   # Kubernetes
   # ===========================================================================

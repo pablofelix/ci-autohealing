@@ -72,6 +72,45 @@ class BatchAnalysisConfig:
     schedule_cron: str = '0 * * * *'  # Hourly by default
 
 
+ALL_WATCHERS = ('builds', 'tests', 'conforma', 'jira', 'components')
+
+
+@dataclass(frozen=True)
+class WatcherConfig:
+    """Watch daemon configuration for event-driven CI monitoring."""
+
+    applications: tuple  # tuple[str, ...] — watched application names
+    disabled: frozenset = frozenset()  # watcher names that are off
+    auto_analyze: bool = True
+    reconcile_interval: int = 1800  # seconds between full-sync safety nets
+    jira_poll_interval: int = 600   # seconds between Jira comment polls
+    max_retries: int = 5            # consecutive watch failures before fallback to poll
+
+    def is_enabled(self, watcher_name: str) -> bool:
+        return watcher_name not in self.disabled
+
+    @classmethod
+    def from_env(cls) -> 'WatcherConfig':
+        apps_str = os.getenv('WATCH_APPLICATIONS', '').strip()
+        if apps_str:
+            apps = tuple(apps_str.split())
+        else:
+            app = os.getenv('APPLICATION_NAME', '')
+            apps = (app,) if app else ()
+
+        disable_str = os.getenv('WATCH_DISABLE', '').strip()
+        disabled = frozenset(disable_str.split()) if disable_str else frozenset()
+
+        return cls(
+            applications=apps,
+            disabled=disabled,
+            auto_analyze=os.getenv('WATCH_AUTO_ANALYZE', 'true').lower() == 'true',
+            reconcile_interval=int(os.getenv('WATCH_RECONCILE_INTERVAL', '1800')),
+            jira_poll_interval=int(os.getenv('WATCH_JIRA_POLL_INTERVAL', '600')),
+            max_retries=int(os.getenv('WATCH_MAX_RETRIES', '5')),
+        )
+
+
 @dataclass(frozen=True)
 class CollectorConfig:
     """Main collector configuration."""
@@ -85,6 +124,7 @@ class CollectorConfig:
     auto_fix_max_per_run: int = 3
     auto_fix_min_confidence: float = 0.95
     batch_analysis: Optional[BatchAnalysisConfig] = None
+    watcher: Optional[WatcherConfig] = None
 
     @classmethod
     def from_env(cls, env_path: Optional[Path] = None) -> 'CollectorConfig':
@@ -177,6 +217,8 @@ class CollectorConfig:
             schedule_cron=os.getenv('BATCH_ANALYSIS_SCHEDULE', '0 * * * *'),
         )
 
+        watcher_config = WatcherConfig.from_env()
+
         return cls(
             db=db_config,
             k8s=k8s_config,
@@ -187,4 +229,5 @@ class CollectorConfig:
             auto_fix_max_per_run=int(os.getenv('AUTO_FIX_MAX_PER_RUN', '3')),
             auto_fix_min_confidence=float(os.getenv('AUTO_FIX_MIN_CONFIDENCE', '0.95')),
             batch_analysis=batch_config,
+            watcher=watcher_config,
         )
