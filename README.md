@@ -8,7 +8,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 
 ## Key Features
 
-- **Continuous Monitoring** — Cron-driven pipeline scans every 20 minutes across multiple application versions, tracking build failures, Conforma (Enterprise Contract) policy violations, and release readiness.
+- **Continuous Monitoring** — Event-driven Kubernetes watch daemon for real-time CI monitoring, plus cron-driven pipeline scans every 20 minutes. Tracks build failures, Conforma (Enterprise Contract) policy violations, and release readiness across multiple application versions.
 - **AI Root Cause Analysis** — LLM-powered failure classification with confidence scoring, actionable fix recommendations, and automatic error pattern learning.
 - **Autonomous Fix PRs** — High-confidence failures get automatically fixed via GitHub PRs, with safety gates (confidence >= 0.95, no prior attempts, branch deduplication) and verification on the next cron cycle.
 - **CVE Scanning** — Parallel SARIF vulnerability scanning across all container images in a snapshot, surfacing critical and high CVEs before release.
@@ -41,17 +41,17 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
                   │  component_health · releases    │
                   └─────────────────────────────────┘
                                    ▲
-                  ┌────────────────┴────────────────┐
-                  │     Cron Pipeline (20 min)      │
-                  │  Collect → Sync → Analyze →     │
-                  │  Auto-fix → Verify → Enrich     │
-                  └─────────────────────────────────┘
-                                   ▲
-                  ┌────────────────┴────────────────┐
-                  │       Konflux Platform          │
-                  │  Tekton · KubeArchive · Quay ·  │
-                  │  GitHub · GitLab · Jira         │
-                  └─────────────────────────────────┘
+          ┌─────────────────────┐  ┌──────────────────────┐
+          │  Watch Daemon       │  │  Cron Pipeline       │
+          │  K8s event streams  │  │  Collect → Analyze   │
+          │  real-time detect   │  │  → Fix → Verify      │
+          └──────────┬──────────┘  └──────────┬───────────┘
+                     │                        │
+                  ┌──┴────────────────────────┴──┐
+                  │       Konflux Platform       │
+                  │  Tekton · KubeArchive · Quay │
+                  │  GitHub · GitLab · Jira      │
+                  └──────────────────────────────┘
 ```
 
 ---
@@ -101,25 +101,26 @@ Covers: alert dashboard, failure inspection, AI analysis, Conforma violations, J
 ### Triage
 
 ```bash
-ic get alerts                 # all current failures and violations
-ic 1                          # inspect failure #1 in detail
-ic why my-component-v3-4      # AI root cause summary
+ic get alerts                              # all current failures and violations
+ic describe failure my-component-v3-4      # inspect a build failure in detail
+ic describe conforma my-component-v3-4     # inspect a conforma violation
+ic why my-component-v3-4                   # AI root cause summary
 ```
 
 ### Fix
 
 ```bash
-ic fix 1                      # interactive: AI analysis → action menu
-ic fix 1 --execute            # push fix PR to GitHub
-ic get fixes                  # track all fix attempts
+ic fix my-component-v3-4                   # interactive: AI analysis → action menu
+ic fix my-component-v3-4 --execute         # push fix PR to GitHub
+ic get fixes                               # track all fix attempts
 ```
 
 ### Report
 
 ```bash
-ic export 1 jira              # generate Jira ticket
-ic export 1 slack             # generate Slack message
-ic conforma report            # Conforma standup table
+ic export my-component-v3-4 jira           # generate Jira ticket
+ic export my-component-v3-4 slack          # generate Slack message
+ic conforma report                         # Conforma standup table
 ```
 
 ---
@@ -150,6 +151,21 @@ The project includes custom Claude Code slash commands for guided workflows. Ope
 ---
 
 ## How It Works
+
+### Watch Daemon (Real-Time)
+
+The watch daemon uses Kubernetes watch streams to detect build failures and policy violations as they happen — no polling delay. It monitors PipelineRuns, test runs, and Component resources across multiple application versions simultaneously.
+
+```bash
+ic watch start                # start the watch daemon
+ic config watch list          # show watched applications and watcher status
+ic config watch add my-app    # add an application to the watch list
+ic config watch disable jira  # disable specific watchers (builds, tests, conforma, jira, components)
+```
+
+Features: per-application watch streams, automatic reconnection on 410 Gone errors, UID-based deduplication, optional AI auto-analysis on new failures, periodic reconciliation, and Jira comment polling.
+
+### Cron Pipeline (Batch)
 
 Every 20 minutes, the cron pipeline runs:
 
@@ -186,7 +202,7 @@ Enable only after manual validation of at least 5 fixes.
 ## Taskfile Commands
 
 ```bash
-task test              # run 223 tests
+task test              # run 278 tests
 task lint              # ruff linter
 task check             # lint + tests
 
@@ -291,6 +307,17 @@ ic release readiness                       # go/no-go verdict
 ic dashboard                               # operational metrics
 ```
 
+### Watch Daemon
+
+```bash
+ic watch start                             # start the event-driven watch daemon
+ic config watch list                       # show applications and watcher status
+ic config watch add <app>                  # add application to watch list
+ic config watch remove <app>               # remove application from watch list
+ic config watch enable <watcher>           # enable a watcher (builds, tests, conforma, jira, components)
+ic config watch disable <watcher>          # disable a watcher
+```
+
 ### Configuration
 
 ```bash
@@ -319,6 +346,9 @@ Copy `.env.example` to `.env`. The file is sourced by `ic` automatically.
 | `KUBEARCHIVE_URL` | For logs | KubeArchive API endpoint |
 | `KONFLUX_UI_BASE` | For links | Konflux UI base URL |
 | `QUAY_ORG` | For CVEs | Quay.io organization for container images |
+| `WATCH_APPLICATIONS` | For watch | Space-separated list of applications to watch |
+| `WATCH_AUTO_ANALYZE` | No | `true` to auto-analyze new failures from watch daemon |
+| `WATCH_DISABLE` | No | Space-separated list of watchers to disable |
 | `AUTONOMOUS_MODE` | No | `true` to enable autonomous fix PRs (default: `false`) |
 
 See `.env.example` for the full list with descriptions.
@@ -340,13 +370,14 @@ See `.env.example` for the full list with descriptions.
 │   ├── cli/                  # CLI implementation (Click)
 │   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
 │   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
+│   ├── watcher/              # K8s watch daemon (event-driven monitoring)
 │   ├── analyzers/            # LLM analyzers (build, conforma, release)
 │   ├── fixers/               # Fix generators (PR, Jira, verification)
 │   ├── collectors/           # Data collectors (failures, violations)
 │   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay)
 │   ├── repositories/         # Database repositories (SQL)
 │   ├── proactive/            # Health monitoring and CVE warnings
-│   ├── tests/                # Test suite (223 tests)
+│   ├── tests/                # Test suite (278 tests)
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)

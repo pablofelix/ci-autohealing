@@ -5,7 +5,7 @@
 CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and policy violations, uses LLMs to diagnose root causes, and autonomously generates fix PRs — all orchestrated through a CLI, MCP server, and REST API.
 
 **What it does:**
-- Monitors Tekton PipelineRun failures across multiple components
+- Monitors Tekton PipelineRun failures across multiple components via event-driven K8s watch streams and cron-based batch collection
 - Fetches comprehensive logs, commit diffs, Dockerfiles, and Tekton configs
 - Tracks Conforma (Enterprise Contract) policy violations
 - Uses AI to classify failures and recommend fixes
@@ -48,7 +48,11 @@ CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and poli
 └────────────────────────────┬─────────────────────────────────────┘
                              │
 ┌────────────────────────────▼─────────────────────────────────────┐
-│  Collectors (orchestration)                                      │
+│  Watch Daemon (event-driven)                                     │
+│  WatchDaemon · BuildEventHandler · ComponentEventHandler        │
+│  K8s watch streams, UID dedup, auto-reconnect, Jira polling     │
+├──────────────────────────────────────────────────────────────────┤
+│  Collectors (batch orchestration)                                │
 │  BuildFailureCollector · ConformaViolationCollector              │
 │  StatusSynchronizer · CommitContextCollector                     │
 └────────┬───────────────────────────────┬─────────────────────────┘
@@ -125,11 +129,28 @@ SQL operations on PostgreSQL tables. Parameterized queries, no business logic.
 - **ErrorPatternRepository** — `error_patterns` table
 - **SyncStatusRepository** — `sync_status` cache table
 
-### Layer 4: Collectors (Orchestration)
+### Layer 4a: Watch Daemon (Event-Driven)
+
+**Directory:** `watcher/`
+
+Real-time CI monitoring via Kubernetes watch streams. Detects build failures and policy violations as they happen, eliminating polling delay.
+
+- **WatchDaemon** — Orchestrates multiple watch streams per application, manages lifecycle and reconnection
+- **BuildEventHandler** — Processes PipelineRun events, detects terminal states (success/failure), UID-based deduplication, optional AI auto-analysis
+- **ComponentEventHandler** — Tracks Component resource changes (added/modified/deleted)
+
+**Key patterns:**
+- Watch streams reconnect automatically on 410 Gone errors (resource version expired)
+- Per-watcher enable/disable via `WatcherConfig.disabled` and `WATCH_DISABLE` env var
+- Available watchers: `builds`, `tests`, `conforma`, `jira`, `components`
+- Periodic reconciliation loop catches events missed during reconnection windows
+- Jira comment polling runs as a background task within the daemon
+
+### Layer 4b: Collectors (Batch Orchestration)
 
 **Directory:** `collectors/`
 
-High-level workflows that coordinate clients + repositories.
+High-level workflows that coordinate clients + repositories. Run via cron every 20 minutes.
 
 - **BuildFailureCollector** — Discover failing components, fetch logs, store in DB
 - **ConformaViolationCollector** — Collect policy violations and detailed reports
@@ -235,6 +256,21 @@ The `error_patterns` table accumulates institutional knowledge from repeated ana
 
 ## Data Flow
 
+### Watch Daemon (Real-Time)
+
+```
+WatchDaemon.start()
+├─ For each application:
+│   ├─ watch-build: K8s watch on PipelineRuns (type=build)
+│   │   └─ BuildEventHandler: terminal state → upsert_failure / record_success
+│   ├─ watch-test: K8s watch on PipelineRuns (type=test)
+│   │   └─ BuildEventHandler: same handler, different pipeline type
+│   └─ watch-components: K8s watch on Component resources
+│       └─ ComponentEventHandler: log additions/modifications/deletions
+├─ reconciliation: periodic full-scan to catch missed events
+└─ jira-poller: poll for new Jira comments, draft AI replies
+```
+
 ### Cron Pipeline (every 20 minutes)
 
 ```
@@ -267,7 +303,7 @@ poll_jira_comments.py        → Draft replies to Jira comments
 
 ## Testing
 
-**223 tests**, all passing. Run with `task test`.
+**278 tests**, all passing. Run with `task test`.
 
 - **Parser tests** — Pure function tests with mock Kubernetes JSON, no I/O
 - **Client tests** — Mock HTTP/API responses, verify retry and error handling

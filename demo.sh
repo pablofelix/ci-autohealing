@@ -93,7 +93,7 @@ OUTPUT_HELP=$(cat <<ENDOFOUTPUT
   ${BOLD}USAGE:${NC}
       ic get <resource> [name] [options]
       ic describe <resource> <name>
-      ic <number>                              Shortcut: describe Nth alert
+      ic <number>                              Shortcut: describe Nth alert from list
 
   ${BOLD}RESOURCES:${NC}
 
@@ -245,7 +245,7 @@ OUTPUT_DESCRIBE_1=$(cat <<ENDOFOUTPUT
 
   Status: ${RED}FAILING${NC} (latest build: Failed)
 
-  ${YELLOW}[!] Run: ic ai analyze 1${NC}
+  ${YELLOW}[!] Run: ic ai analyze acme-api-registry-sync-v3-5-ea-1${NC}
 ENDOFOUTPUT
 )
 
@@ -646,8 +646,8 @@ intro_alerts() {
     echo ""
     type_cmd "ic get alerts"
     show_output "$OUTPUT_ALERTS"
-    callout "Key insight: 9 alerts across 3 types. Numbers work across sections —"
-    narrate "'ic 3' drills into the 3rd alert whether it's a build or conforma failure."
+    callout "Key insight: 9 alerts across 3 types."
+    narrate "Drill into any alert: ${CYAN}ic describe failure <component>${NC} or ${CYAN}ic describe conforma <component>${NC}"
     advance 8
 }
 
@@ -667,13 +667,13 @@ build_group() {
 
 build_describe() {
     section_banner "▸ Builds" "Drilling Into a Failure"
-    narrate "Use the alert number to drill in. ic shows everything:"
+    narrate "Drill into a build failure by component name. ic shows everything:"
     narrate "metadata, error, build logs, build history from Tekton Results."
     echo ""
-    type_cmd "ic 1"
+    type_cmd "ic describe failure acme-api-registry-sync-v3-5-ea-1"
     show_output "$OUTPUT_DESCRIBE_1"
     narrate "The build history shows this started failing after commit ${CYAN}eca2830b${NC}."
-    narrate "It suggests running AI analysis: ${YELLOW}ic ai analyze 1${NC}"
+    narrate "It suggests running AI analysis: ${YELLOW}ic ai analyze acme-api-registry-sync-v3-5-ea-1${NC}"
     advance 7
 }
 
@@ -682,7 +682,7 @@ build_ai_analyze() {
     narrate "The AI engine reads build logs (200KB+), commit diffs, Dockerfiles,"
     narrate "and .tekton pipeline configs. It classifies the failure and suggests a fix."
     echo ""
-    type_cmd "ic ai analyze 1"
+    type_cmd "ic ai analyze acme-api-registry-sync-v3-5-ea-1"
     show_output "$OUTPUT_AI_ANALYZE"
     callout "78% confidence: cachi2 cache mismatch after a base image bump."
     narrate "The AI matched this against a known pattern seen 12 times before."
@@ -699,7 +699,7 @@ build_fix() {
     echo -e "    ${BOLD}[3]${NC} Send Slack alert   — notify the team with all details"
     echo -e "    ${BOLD}[4]${NC} Skip               — come back later"
     echo ""
-    type_cmd "ic fix 1"
+    type_cmd "ic fix acme-api-registry-sync-v3-5-ea-1"
     show_output "$OUTPUT_FIX"
     callout "One command: triage → Jira ticket → Slack notification."
     narrate "The ticket includes AI root cause, build logs, commit info, and links."
@@ -711,15 +711,15 @@ build_export() {
     section_banner "▸ Builds" "Export Formats"
     narrate "Need more control? ${CYAN}ic export${NC} generates content in multiple formats."
     echo ""
-    type_cmd "ic export 1 jira"
+    type_cmd "ic export acme-api-registry-sync-v3-5-ea-1 jira"
     show_output "$OUTPUT_EXPORT_JIRA"
     narrate "That's Jira markup — paste directly into a ticket description."
     advance 5
 
     callout "Same failure as a Slack message:"
-    type_cmd "ic export 1 slack"
+    type_cmd "ic export acme-api-registry-sync-v3-5-ea-1 slack"
     show_output "$OUTPUT_EXPORT_SLACK"
-    narrate "Also available: ${CYAN}ic export 1 markdown${NC} (GitHub) and ${CYAN}ic export 1 json${NC} (automation)."
+    narrate "Also available: ${CYAN}ic export <component> markdown${NC} (GitHub) and ${CYAN}ic export <component> json${NC} (automation)."
     advance 6
 }
 
@@ -838,13 +838,13 @@ wrapup() {
     echo -e "  ${BOLD}The triage loop:${NC}"
     echo ""
     echo -e "    ${RED}Alert${NC}  →  ${YELLOW}Analyze${NC}  →  ${GREEN}Fix${NC}"
-    echo -e "    ${DIM}ic get alerts${NC}   ${DIM}ic ai analyze 1${NC}   ${DIM}ic fix 1${NC}"
+    echo -e "    ${DIM}ic get alerts${NC}   ${DIM}ic ai analyze <component>${NC}   ${DIM}ic fix <component>${NC}"
     echo ""
     echo -e "    ${BOLD}1.${NC} See what's broken              ${DIM}(ic get alerts)${NC}"
     echo -e "    ${BOLD}2.${NC} Group by root cause             ${DIM}(ic get alerts --group)${NC}"
-    echo -e "    ${BOLD}3.${NC} Drill into a failure            ${DIM}(ic 1)${NC}"
-    echo -e "    ${BOLD}4.${NC} AI reads logs, finds the cause  ${DIM}(ic ai analyze 1)${NC}"
-    echo -e "    ${BOLD}5.${NC} Create PR / Jira / Slack        ${DIM}(ic fix 1)${NC}"
+    echo -e "    ${BOLD}3.${NC} Drill into a failure            ${DIM}(ic describe failure <component>)${NC}"
+    echo -e "    ${BOLD}4.${NC} AI reads logs, finds the cause  ${DIM}(ic ai analyze <component>)${NC}"
+    echo -e "    ${BOLD}5.${NC} Create PR / Jira / Slack        ${DIM}(ic fix <component>)${NC}"
     echo -e "    ${BOLD}6.${NC} Check release readiness          ${DIM}(ic release readiness)${NC}"
     echo ""
     advance 7
@@ -853,12 +853,12 @@ wrapup() {
     echo ""
     echo -e "  ${CYAN}ic get alerts${NC}                         Daily triage starting point"
     echo -e "  ${CYAN}ic get alerts --group${NC}                 Group by root cause"
-    echo -e "  ${CYAN}ic 1${NC}                                  Drill into alert #1"
-    echo -e "  ${CYAN}ic ai analyze 1${NC}                       AI root cause analysis"
+    echo -e "  ${CYAN}ic describe failure <component>${NC}       Drill into a build failure"
+    echo -e "  ${CYAN}ic describe conforma <component>${NC}      Conforma violation details"
+    echo -e "  ${CYAN}ic ai analyze <component>${NC}             AI root cause analysis"
     echo -e "  ${CYAN}ic ai status${NC}                          AI analysis overview"
-    echo -e "  ${CYAN}ic fix 1${NC}                              Interactive triage → action"
-    echo -e "  ${CYAN}ic export 1 jira|slack${NC}                Generate formatted content"
-    echo -e "  ${CYAN}ic describe conforma <name>${NC}           Violation details"
+    echo -e "  ${CYAN}ic fix <component>${NC}                    Interactive triage → action"
+    echo -e "  ${CYAN}ic export <component> jira|slack${NC}      Generate formatted content"
     echo -e "  ${CYAN}ic get policy-gap${NC}                     Stage vs prod risk"
     echo -e "  ${CYAN}ic release status${NC}                     Pipeline checklist"
     echo -e "  ${CYAN}ic release readiness${NC}                  Go/no-go decision"
