@@ -1624,7 +1624,7 @@ cmd_describe_pipelinerun() {
     local data=$(sql "
         SELECT component_name, pipelinerun_uid, status, repository_url, branch,
                CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
-               konflux_logs_url, build_logs
+               COALESCE(konflux_logs_url, konflux_url), build_logs
         FROM build_failures
         WHERE pipelinerun_name = '$pr_name'
         LIMIT 1;
