@@ -104,7 +104,6 @@ Covers: alert dashboard, failure inspection, AI analysis, Conforma violations, J
 ic get alerts                              # all current failures and violations
 ic describe failure my-component-v3-4      # inspect a build failure in detail
 ic describe conforma my-component-v3-4     # inspect a conforma violation
-ic why my-component-v3-4                   # AI root cause summary
 ```
 
 ### Fix
@@ -262,7 +261,6 @@ ic get fixes                               # PR fix attempts (last 30 days)
 ic ai analyze <N|name>                     # analyze one failure
 ic ai analyze --all                        # all pending
 ic ai status                               # pending / analyzed / skipped
-ic why <name>                              # AI root cause (quick view)
 ic patterns list                           # error pattern library
 ic patterns show <name>                    # pattern details
 ```
