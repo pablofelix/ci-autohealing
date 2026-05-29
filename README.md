@@ -13,6 +13,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 - **Autonomous Fix PRs** — High-confidence failures get automatically fixed via GitHub PRs, with safety gates (confidence >= 0.95, no prior attempts, branch deduplication) and verification on the next cron cycle.
 - **CVE Scanning** — Parallel SARIF vulnerability scanning across all container images in a snapshot, surfacing critical and high CVEs before release.
 - **Jira Integration** — Create tickets, monitor comments, draft AI replies, and track resolution — all from the CLI.
+- **Skill Registry** — Load, validate, and manage external skills from Git repos. Dual-mode storage (PostgreSQL in cluster, JSON file locally) with read-only MCP/API access for AI agents.
 - **MCP Server** — 40+ tools accessible by Claude Code, GitHub Copilot, or any MCP-compatible AI agent for interactive triage sessions.
 - **Pattern Learning** — An `error_patterns` table accumulates institutional knowledge from repeated analyses, improving diagnosis accuracy over time.
 - **Three Interfaces, One Data Layer** — CLI, MCP server, and REST API all share the same repositories and PostgreSQL database.
@@ -320,6 +321,24 @@ ic config watch enable <watcher>           # enable a watcher (builds, tests, co
 ic config watch disable <watcher>          # disable a watcher
 ```
 
+### Skills
+
+```bash
+ic skills list                             # list registered skills
+ic skills list --tag onboarding            # filter by tag
+ic skills add aiops-infra                  # add from known source
+ic skills add https://github.com/org/repo  # add from any Git URL
+ic skills add ./local/path                 # add from local directory
+ic skills remove <name>                    # remove a skill
+ic skills remove --source <name>           # remove entire source
+ic skills update [source]                  # git pull + re-scan
+ic skills info <name>                      # full skill details
+ic skills sources                          # registered + known sources
+ic skills tag add <skill> <tag>            # add tag to a skill
+ic skills tag remove <skill> <tag>         # remove tag from a skill
+ic skills tags                             # list all tags with counts
+```
+
 ### Configuration
 
 ```bash
@@ -370,6 +389,7 @@ See `.env.example` for the full list with descriptions.
 │
 ├── src/
 │   ├── cli/                  # CLI implementation (Click)
+│   ├── skills/               # Skill registry (models, loader, registry, known sources)
 │   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
 │   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
 │   ├── watcher/              # K8s watch daemon (event-driven monitoring)
@@ -383,7 +403,7 @@ See `.env.example` for the full list with descriptions.
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)
-├── db/migrations/            # PostgreSQL schema migrations (001–015)
+├── db/migrations/            # PostgreSQL schema migrations (001–016)
 ├── cron/                     # Cron scripts for automated collection
 ├── k8s/                      # Kubernetes deployment manifests
 ├── .claude/commands/         # Claude Code slash commands (/triage, /release, etc.)

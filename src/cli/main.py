@@ -1506,6 +1506,294 @@ def patterns_show(name):
     print()
 
 
+# --- skills group ---
+
+@cli.group(invoke_without_command=True)
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.pass_context
+def skills(ctx, output_json):
+    """Skill registry commands."""
+    ctx.ensure_object(dict)
+    ctx.obj['json'] = ctx.obj.get('json') or output_json
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(skills_list)
+
+
+@skills.command('list')
+@click.option('--tag', 'filter_tag', multiple=True, help='Filter by tag (repeatable, AND logic)')
+@click.option('--source', 'filter_source', help='Filter by source name')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def skills_list(ctx, filter_tag, filter_source, output_json):
+    """List registered skills."""
+    from skills.db_registry import get_registry
+    from cli.formatting import dim, section_header
+    registry = get_registry()
+    result = registry.list_skills(source=filter_source)
+    if filter_tag:
+        for tag in filter_tag:
+            result = [s for s in result if tag in s.tags]
+
+    if output_json or (ctx.obj or {}).get('json'):
+        print(json_mod.dumps([s.to_dict() for s in result], indent=2))
+        return
+
+    section_header('Registered Skills')
+    print()
+    if not result:
+        print('  No skills registered. Run: ic skills add <git-url-or-source>')
+        print()
+        return
+    name_w = max(len(s.name) for s in result)
+    src_w = max(len(s.source) for s in result)
+    for s in result:
+        tags_str = ', '.join(s.tags) if s.tags else dim('none')
+        print('  {:<{nw}}  {:<{sw}}  {:<8}  {}'.format(
+            s.name, s.source, s.status, tags_str, nw=name_w, sw=src_w))
+    print()
+    print('  {} skill(s) total'.format(len(result)))
+    print()
+
+
+@skills.command('add')
+@click.argument('source_name_or_url')
+def skills_add(source_name_or_url):
+    """Add skills from a git repo or known source."""
+    from skills.known_sources import resolve_source
+    from skills.loader import clone_source, discover_skills, use_local_source
+    from skills.db_registry import get_registry
+    from cli.formatting import bold, green
+
+    registry = get_registry()
+    expanded = os.path.expanduser(source_name_or_url)
+
+    if os.path.isdir(expanded):
+        local_path, commit = use_local_source(expanded)
+        name = os.path.basename(os.path.abspath(expanded))
+        url = 'file://{}'.format(os.path.abspath(expanded))
+    else:
+        name, url = resolve_source(source_name_or_url)
+        print('Cloning {}...'.format(url))
+        local_path, commit = clone_source(url, name)
+
+    registry.add_source(name, url, commit, local_path)
+
+    found = discover_skills(local_path)
+    if not found:
+        print('No SKILL.md files found in {}'.format(local_path))
+        registry.save()
+        return
+
+    for skill_dir, meta in found:
+        registry.add_skill(meta.name, name, skill_dir, meta)
+
+    registry.save()
+    print(green('Added {} skill(s) from {}'.format(len(found), bold(name))))
+    for _, meta in found:
+        print('  - {}: {}'.format(meta.name, meta.description[:60]))
+
+
+@skills.command('remove')
+@click.argument('name')
+@click.option('--source', is_flag=True, help='Remove an entire source and all its skills')
+def skills_remove(name, source):
+    """Remove a skill or source."""
+    from skills.db_registry import get_registry
+    from cli.formatting import green
+    registry = get_registry()
+
+    if source:
+        count = registry.remove_source(name)
+        registry.save()
+        print(green('Removed source "{}" and {} skill(s)'.format(name, count)))
+    else:
+        try:
+            skill = registry.get_skill(name)
+        except KeyError as e:
+            print(str(e).strip('"\''))
+            raise SystemExit(1)
+        if not skill:
+            print('Skill not found: {}'.format(name))
+            raise SystemExit(1)
+        registry.remove_skill(skill.qualified_name)
+        registry.save()
+        print(green('Removed skill: {}'.format(skill.qualified_name)))
+
+
+@skills.command('update')
+@click.argument('source_name', required=False)
+def skills_update(source_name):
+    """Update skills from source (git pull + re-scan)."""
+    from skills.loader import clone_source, discover_skills
+    from skills.db_registry import get_registry
+    from cli.formatting import bold, green
+    registry = get_registry()
+    if source_name:
+        if source_name not in registry.sources:
+            print('Source not found: {}'.format(source_name))
+            raise SystemExit(1)
+        sources = [registry.sources[source_name]]
+    else:
+        sources = list(registry.sources.values())
+    if not sources:
+        print('No sources registered.')
+        return
+    for src in sources:
+        print('Updating {}...'.format(bold(src.name)))
+        local_path, commit = clone_source(src.url, src.name)
+        found = discover_skills(local_path)
+        found_names = set()
+        for skill_dir, meta in found:
+            qname = '{}/{}'.format(src.name, meta.name)
+            found_names.add(qname)
+            existing = registry.get_skill(qname)
+            tags = existing.tags if existing else None
+            registry.add_skill(meta.name, src.name, skill_dir, meta, initial_tags=tags)
+        orphaned = [k for k, v in registry.skills.items()
+                    if v.source == src.name and k not in found_names]
+        for k in orphaned:
+            registry.remove_skill(k)
+        registry.update_source_commit(src.name, commit)
+        removed_msg = ' ({} removed)'.format(len(orphaned)) if orphaned else ''
+        print(green('  {} skill(s) from {} (commit {}){}').format(
+            len(found), src.name, commit, removed_msg))
+    registry.save()
+
+
+@skills.command('info')
+@click.argument('name')
+def skills_info(name):
+    """Show full details for a skill."""
+    from skills.db_registry import get_registry
+    from cli.formatting import bold, section_header
+    registry = get_registry()
+    try:
+        skill = registry.get_skill(name)
+    except KeyError as e:
+        print(str(e).strip('"\''))
+        raise SystemExit(1)
+    if not skill:
+        print('Skill not found: {}'.format(name))
+        raise SystemExit(1)
+    section_header('Skill: {}'.format(skill.qualified_name))
+    print()
+    print('  Name:          {}'.format(skill.name))
+    print('  Source:         {}'.format(skill.source))
+    print('  Status:        {}'.format(skill.status))
+    print('  Path:          {}'.format(skill.path))
+    print('  Tags:          {}'.format(', '.join(skill.tags) if skill.tags else '—'))
+    print()
+    print(bold('Metadata:'))
+    print('  Description:   {}'.format(skill.metadata.description[:100]))
+    print('  Allowed tools: {}'.format(skill.metadata.allowed_tools))
+    print('  User-invocable: {}'.format(skill.metadata.user_invocable))
+    if skill.metadata.ic_metadata:
+        ic = skill.metadata.ic_metadata
+        if ic.requires_tools:
+            print('  Requires tools: {}'.format(', '.join(ic.requires_tools)))
+        if ic.requires_env:
+            print('  Requires env:  {}'.format(', '.join(ic.requires_env)))
+    print()
+    source = registry.sources.get(skill.source)
+    if source:
+        print(bold('Source:'))
+        print('  URL:    {}'.format(source.url))
+        print('  Commit: {}'.format(source.commit))
+        print('  Added:  {}'.format(source.added_at[:10]))
+        print()
+
+
+@skills.command('sources')
+def skills_sources():
+    """List known and registered sources."""
+    from skills.known_sources import KNOWN_SOURCES
+    from skills.db_registry import get_registry
+    from cli.formatting import bold, dim, green, section_header
+    registry = get_registry()
+
+    section_header('Registered Sources')
+    print()
+    if registry.sources:
+        for src in registry.list_sources():
+            skill_count = len([s for s in registry.skills.values() if s.source == src.name])
+            print('  {:<20}  {} skill(s)  commit {}  {}'.format(
+                bold(src.name), skill_count, src.commit[:8], dim(src.url)))
+    else:
+        print('  None registered yet.')
+    print()
+
+    section_header('Known Sources (shortcuts)')
+    print()
+    for name, info in sorted(KNOWN_SOURCES.items()):
+        registered = green('✓') if name in registry.sources else dim('—')
+        print('  {} {:<20}  {}'.format(registered, name, info['description']))
+    print()
+    print("  Add with: ic skills add <name>   (e.g., ic skills add aiops-infra)")
+    print()
+
+
+@skills.group('tag')
+def skills_tag():
+    """Manage skill tags."""
+
+
+@skills_tag.command('add')
+@click.argument('skill_name')
+@click.argument('tag')
+def skills_tag_add(skill_name, tag):
+    """Add a tag to a skill."""
+    from skills.db_registry import get_registry
+    from cli.formatting import green
+    registry = get_registry()
+    try:
+        if registry.add_tag(skill_name, tag):
+            registry.save()
+            print(green('Added tag "{}" to {}'.format(tag, skill_name)))
+        else:
+            print('Skill not found: {}'.format(skill_name))
+            raise SystemExit(1)
+    except KeyError as e:
+        print(str(e).strip('"\''))
+        raise SystemExit(1)
+
+
+@skills_tag.command('remove')
+@click.argument('skill_name')
+@click.argument('tag')
+def skills_tag_remove(skill_name, tag):
+    """Remove a tag from a skill."""
+    from skills.db_registry import get_registry
+    from cli.formatting import green
+    registry = get_registry()
+    try:
+        if registry.remove_tag(skill_name, tag):
+            registry.save()
+            print(green('Removed tag "{}" from {}'.format(tag, skill_name)))
+        else:
+            print('Skill not found or tag not present: {}'.format(skill_name))
+            raise SystemExit(1)
+    except KeyError as e:
+        print(str(e).strip('"\''))
+        raise SystemExit(1)
+
+
+@skills.command('tags')
+def skills_tags_list():
+    """List all tags with usage counts."""
+    from skills.db_registry import get_registry
+    from cli.formatting import section_header
+    registry = get_registry()
+    tags = registry.list_tags()
+    section_header('Skill Tags')
+    print()
+    if not tags:
+        print('  No tags in use.')
+    else:
+        for tag, count in tags.items():
+            print('  {:<25}  {} skill(s)'.format(tag, count))
+    print()
+
+
 # --- components group ---
 
 @cli.group()

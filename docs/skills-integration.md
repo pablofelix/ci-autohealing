@@ -177,6 +177,8 @@ Recent PipelineRun failures.
 
 The MCP server exposes the same data as typed Pydantic models. AI agents (Claude Code, Copilot) see these as callable tools.
 
+### CI Monitoring Tools
+
 | MCP Tool | CLI Equivalent | Returns |
 |----------|---------------|---------|
 | `list_alerts` | `ic get alerts` | `AlertsSummary` |
@@ -194,6 +196,24 @@ The MCP server exposes the same data as typed Pydantic models. AI agents (Claude
 | `list_patterns` | `ic patterns list` | Error pattern library |
 | `get_dashboard` | `ic dashboard` | Operational metrics |
 
+### Skill Registry Tools (read-only)
+
+| MCP Tool | CLI Equivalent | Returns |
+|----------|---------------|---------|
+| `list_skills` | `ic skills list` | `List[SkillInfo]` |
+| `get_skill_info` | `ic skills info <name>` | `SkillInfo` |
+| `list_skill_sources` | `ic skills sources` | `List[SkillSourceInfo]` |
+
+Skills are loaded from external Git repos via `ic skills add` (CLI only). MCP and API provide read-only access — agents can discover and inspect available skills but cannot modify the registry.
+
+### REST API Endpoints
+
+| Endpoint | Method | Returns |
+|----------|--------|---------|
+| `/api/v1/skills` | GET | List skills (query params: `tag`, `source`) |
+| `/api/v1/skills/sources` | GET | List skill sources with skill counts |
+| `/api/v1/skills/{name}` | GET | Skill details by name or qualified name |
+
 ### Pydantic Models
 
 MCP tools return structured data matching these models (defined in `src/mcp_server/models.py`):
@@ -203,6 +223,8 @@ MCP tools return structured data matching these models (defined in `src/mcp_serv
 - **ConformaViolationDetails**: `component`, `scenario`, `violations_count`, `warnings_count`, `violation_details`
 - **AnalysisDetails**: `component`, `category`, `root_cause`, `recommended_fix`, `confidence_score`, `can_auto_fix`
 - **StatsResponse**: `build` (pending/analyzed/auto_fixable), `conforma` (same), `total_cost`
+- **SkillInfo**: `qualified_name`, `name`, `source`, `description`, `status`, `tags[]`, `category`, `user_invocable`
+- **SkillSourceInfo**: `name`, `url`, `commit`, `skill_count`
 
 ---
 

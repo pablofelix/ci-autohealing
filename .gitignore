@@ -69,6 +69,7 @@ docs/conforma-*.md
 docs/daily-build-workflow.md
 docs/design/ci-build-skill.md
 docs/design/ci-troubleshooter-agent.md
+docs/design/nightly-build-tracking.md
 docs/design/release-analyzer.md
 docs/devops-analysis.md
 docs/fix-error-extraction-*.md

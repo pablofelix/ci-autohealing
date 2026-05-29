@@ -11,6 +11,7 @@ from api.routes import (
     health,
     patterns,
     releases,
+    skills,
     violations,
 )
 
@@ -25,3 +26,4 @@ def mount_routes(app: FastAPI) -> None:
     app.include_router(fixes.router, prefix="/api/v1")
     app.include_router(exports.router, prefix="/api/v1")
     app.include_router(releases.router, prefix="/api/v1")
+    app.include_router(skills.router, prefix="/api/v1")

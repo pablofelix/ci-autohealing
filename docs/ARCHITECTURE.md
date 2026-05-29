@@ -128,6 +128,7 @@ SQL operations on PostgreSQL tables. Parameterized queries, no business logic.
 - **ComponentHealthRepository** — `component_health` table
 - **ErrorPatternRepository** — `error_patterns` table
 - **SyncStatusRepository** — `sync_status` cache table
+- **DatabaseSkillRegistry** — `skill_sources` + `skills` tables (dual-mode: PostgreSQL in cluster, JSON file locally)
 
 ### Layer 4a: Watch Daemon (Event-Driven)
 
@@ -205,14 +206,32 @@ Autonomous fix generation with safety gates.
 **MCP Server** (FastMCP, 40+ tools):
 - Transports: stdio (Claude Code) and SSE (remote agents)
 - Each tool accepts `application` parameter for multi-version queries
+- Includes skill registry tools: `list_skills`, `get_skill_info`, `list_skill_sources`
 - Run: `python -m serve --mcp`
 
 **REST API** (FastAPI):
 - OpenAPI docs at `/docs`
 - API key auth via `IC_API_KEY` env var
+- Skill endpoints: `GET /api/v1/skills`, `GET /api/v1/skills/sources`, `GET /api/v1/skills/{name}`
 - Run: `python -m serve --api`
 
 **Combined:** `python -m serve --api --mcp-sse` runs both in one process.
+
+### Skill Registry
+
+**Directory:** `skills/`
+
+External skill management — load, register, and query skills from Git repos.
+
+- **SkillRegistry** (`registry.py`) — JSON file-backed registry for local dev
+- **DatabaseSkillRegistry** (`db_registry.py`) — PostgreSQL-backed registry for cluster deployment
+- **`get_registry()`** factory — Returns DB registry if PostgreSQL is available, JSON file fallback otherwise
+- **Loader** (`loader.py`) — Clone repos, discover `SKILL.md` files, parse frontmatter
+- **Known Sources** (`known_sources.py`) — Shorthand catalog for well-known repos
+
+**Dual-mode storage:** In a cluster, skills are stored in PostgreSQL (`skill_sources` + `skills` tables with GIN-indexed tag arrays). Locally, they persist in `~/.ic/skills.json`. The CLI writes (git clone + DB insert), while MCP/API provide read-only access.
+
+**Tables:** `skill_sources` (name, url, commit), `skills` (qualified_name, source, tags[], metadata JSONB)
 
 ---
 
@@ -321,3 +340,4 @@ Core: `NAMESPACE`, `APPLICATION_NAME`
 Database: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
 AI: `LLM_PROVIDER`, `ANTHROPIC_API_KEY`
 Integrations: `GITHUB_TOKEN`, `JIRA_URL`, `JIRA_TOKEN`, `KUBEARCHIVE_URL`
+Skills: `IC_SKILLS_DIR` (optional, default `~/.ic`)

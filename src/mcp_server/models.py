@@ -124,3 +124,22 @@ class HealthWarning(BaseModel):
     component: str
     message: str
     severity: str
+
+
+class SkillInfo(BaseModel):
+    qualified_name: str = Field(..., description="source/name")
+    name: str
+    source: str
+    description: str
+    status: str
+    tags: List[str]
+    category: Optional[str] = None
+    allowed_tools: Optional[str] = None
+    user_invocable: bool = False
+
+
+class SkillSourceInfo(BaseModel):
+    name: str
+    url: str
+    commit: Optional[str] = None
+    skill_count: int = 0

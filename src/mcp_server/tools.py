@@ -21,6 +21,8 @@ from mcp_server.models import (
     DashboardResponse,
     FailureSummary,
     HealthWarning,
+    SkillInfo,
+    SkillSourceInfo,
     StatsResponse,
     TriageResponse,
 )
@@ -1154,6 +1156,94 @@ def export_slack(
         return text
 
     return f"No unresolved failures found for {component} in {application}"
+
+
+# ---------------------------------------------------------------------------
+# Skill registry tools (read-only)
+# ---------------------------------------------------------------------------
+
+def _skill_registry():
+    from skills.db_registry import get_registry
+    return get_registry()
+
+
+def _entry_to_info(entry) -> SkillInfo:
+    return SkillInfo(
+        qualified_name=entry.qualified_name,
+        name=entry.name,
+        source=entry.source,
+        description=entry.metadata.description,
+        status=entry.status,
+        tags=entry.tags,
+        category=entry.metadata.category or None,
+        allowed_tools=entry.metadata.allowed_tools,
+        user_invocable=entry.metadata.user_invocable,
+    )
+
+
+@mcp.tool()
+@async_tool
+def list_skills(
+    tag: Optional[str] = None,
+    source: Optional[str] = None,
+) -> List[SkillInfo]:
+    """List registered skills from the skill registry.
+
+    Skills are loaded from external Git repos (e.g., aiops-infra, ai-helpers)
+    and provide automated fixes, onboarding, and utility operations.
+
+    Args:
+        tag: Filter by tag (e.g., "onboarding", "conforma")
+        source: Filter by source repo name
+    """
+    registry = _skill_registry()
+    entries = registry.list_skills(tag=tag, source=source)
+    return [_entry_to_info(e) for e in entries]
+
+
+@mcp.tool()
+@async_tool
+def get_skill_info(name: str) -> Optional[SkillInfo]:
+    """Get detailed info about a registered skill.
+
+    Accepts either a short name (e.g., "fix-hermetic") or qualified name
+    (e.g., "aiops-infra/fix-hermetic"). Short names that match multiple
+    skills will raise an error listing the qualified names.
+
+    Args:
+        name: Skill name or qualified name (source/name)
+    """
+    registry = _skill_registry()
+    entry = registry.get_skill(name)
+    if not entry:
+        return None
+    return _entry_to_info(entry)
+
+
+@mcp.tool()
+@async_tool
+def list_skill_sources() -> List[SkillSourceInfo]:
+    """List registered skill sources (Git repos providing skills).
+
+    Shows which repos have been added and how many skills each provides.
+    """
+    registry = _skill_registry()
+    sources = registry.list_sources()
+    skills = registry.list_skills()
+
+    source_counts = {}
+    for s in skills:
+        source_counts[s.source] = source_counts.get(s.source, 0) + 1
+
+    return [
+        SkillSourceInfo(
+            name=src.name,
+            url=src.url,
+            commit=src.commit or None,
+            skill_count=source_counts.get(src.name, 0),
+        )
+        for src in sources
+    ]
 
 
 # ---------------------------------------------------------------------------
