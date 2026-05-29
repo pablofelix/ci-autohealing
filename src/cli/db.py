@@ -90,6 +90,17 @@ def sql_rows(query):
         return []
 
 
+def sql_dicts(query):
+    # type: (str) -> List[Dict[str, Any]]
+    """Run a query and return rows as a list of dicts (column names as keys)."""
+    try:
+        conn = _get_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query)
+            return [dict(row) for row in cur.fetchall()]
+    except Exception:
+        return []
+
 
 def sql_table(query):
     # type: (str) -> None

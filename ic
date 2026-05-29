@@ -63,6 +63,12 @@ sql_table() {
     docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "$1" 2>/dev/null | grep -v "Emulate Docker"
 }
 
+sql_json() {
+    _check_db || return 1
+    local full_query="SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (${1}) t"
+    docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "$full_query" 2>/dev/null
+}
+
 # Convert APPLICATION_NAME to conforma-reporter branch name
 # product-v3-4 -> product-3.4, product-v3-4-ea-1 -> product-3.4-ea.1
 app_to_reporter_branch() {
@@ -1040,8 +1046,26 @@ trigger_background_sync() {
 # GET commands
 cmd_get_components() {
     _check_db || return 1
-    local refresh=false
-    [[ "${1:-}" == "--refresh" || "${1:-}" == "-r" ]] && refresh=true
+    local refresh=false json_output=false
+    for arg in "$@"; do
+        case "$arg" in
+            --refresh|-r) refresh=true ;;
+            --json) json_output=true ;;
+        esac
+    done
+
+    if [ "$json_output" = true ]; then
+        sql_json "
+            SELECT component_name AS component, pipelinerun_name, status,
+                   error_type, first_detected_at AS first_seen,
+                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY first_detected_at DESC
+        "
+        return
+    fi
 
     section_header "Currently Failing Components"
     echo -e "${BOLD}Application: ${CYAN}${APPLICATION_NAME}${NC}"
@@ -1268,7 +1292,32 @@ cmd_get_component() {
 
 cmd_get_pipelineruns() {
     _check_db || return 1
-    local limit="${1:-20}"
+    local limit="20" json_output=false
+    for arg in "$@"; do
+        case "$arg" in
+            --json) json_output=true ;;
+            --limit) : ;; # handled below
+            *) [[ "$arg" =~ ^[0-9]+$ ]] && limit="$arg" ;;
+        esac
+    done
+    # Handle --limit N
+    local prev=""
+    for arg in "$@"; do
+        [ "$prev" = "--limit" ] && limit="$arg"
+        prev="$arg"
+    done
+
+    if [ "$json_output" = true ]; then
+        sql_json "
+            SELECT pipelinerun_name, component_name AS component, status,
+                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   first_detected_at AS detected
+            FROM build_failures
+            ORDER BY first_detected_at DESC
+            LIMIT $limit
+        "
+        return
+    fi
 
     section_header "Recent PipelineRun Failures"
     echo ""
@@ -1356,6 +1405,7 @@ cmd_get_apps() {
 cmd_describe_component() {
     local component="$1"
     local show_full_log=false
+    local json_output=false
 
     # Parse options
     shift
@@ -1363,6 +1413,9 @@ cmd_describe_component() {
         case "$1" in
             --log)
                 show_full_log=true
+                ;;
+            --json)
+                json_output=true
                 ;;
         esac
         shift
@@ -1376,8 +1429,30 @@ cmd_describe_component() {
 
     local total=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component';")
     if [ "$total" = "0" ]; then
-        echo -e "${RED}Error: Component not found: $component${NC}"
+        if [ "$json_output" = true ]; then
+            echo '{"error": "Component not found", "component": "'"$component"'"}'
+        else
+            echo -e "${RED}Error: Component not found: $component${NC}"
+        fi
         return 1
+    fi
+
+    if [ "$json_output" = true ]; then
+        sql_json "
+            SELECT component_name AS component, pipelinerun_name, status,
+                   repository_url, branch, failed_step_name AS failed_step,
+                   error_type, LEFT(error_message, 500) AS error_message,
+                   commit_sha, commit_author, LEFT(commit_message, 200) AS commit_message,
+                   first_detected_at AS first_seen, last_updated_at AS last_seen,
+                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis,
+                   jira_key, output_image
+            FROM build_failures
+            WHERE component_name = '$component'
+            ORDER BY first_detected_at DESC
+            LIMIT 1
+        "
+        return
     fi
 
     section_header "Component: $component"
@@ -4206,6 +4281,7 @@ cmd_get_conforma() {
     _check_db || return 1
     local refresh=false
     local filter_mode="current"  # current | future | all
+    local json_output=false
 
     local show_grouped=false
 
@@ -4217,9 +4293,30 @@ cmd_get_conforma() {
             --all) filter_mode="all"; shift ;;
             --current) filter_mode="current"; shift ;;
             --group|-g) show_grouped=true; shift ;;
+            --json) json_output=true; shift ;;
             *) shift ;;
         esac
     done
+
+    if [ "$json_output" = true ]; then
+        local fc=""
+        case "$filter_mode" in
+            current) fc="AND is_future = FALSE" ;;
+            future) fc="AND is_future = TRUE" ;;
+        esac
+        sql_json "
+            SELECT component_name AS component, scenario, status,
+                   violations_count, warnings_count, successes_count,
+                   first_detected_at AS first_seen, last_updated_at AS last_seen,
+                   repository_url,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis,
+                   jira_key
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE $fc
+            ORDER BY last_updated_at DESC
+        "
+        return
+    fi
 
     local header_suffix=""
     local filter_clause=""
@@ -4776,12 +4873,14 @@ cmd_get_alerts() {
     local to_date=""
     local show_all=false
     local show_grouped=false
+    local json_output=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --refresh|-r) refresh=true; shift ;;
             --all) show_all=true; shift ;;
             --group|-g) show_grouped=true; shift ;;
+            --json) json_output=true; shift ;;
             --date)
                 shift
                 target_date=$(date -d "${1:?--date requires a value}" '+%Y-%m-%d' 2>/dev/null)
@@ -4804,6 +4903,46 @@ cmd_get_alerts() {
             *) shift ;;
         esac
     done
+
+    if [ "$json_output" = true ]; then
+        local builds_json conforma_json
+        builds_json=$(sql_json "
+            SELECT component_name AS component, 'Failed' AS status,
+                   error_type, first_detected_at AS first_seen,
+                   last_updated_at AS last_seen,
+                   CASE WHEN build_logs IS NOT NULL AND build_logs != '' THEN true ELSE false END AS has_logs,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis
+            FROM build_failures
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY last_updated_at DESC
+        ")
+        conforma_json=$(sql_json "
+            SELECT component_name AS component, 'Conforma Violation' AS status,
+                   scenario AS error_type, first_detected_at AS first_seen,
+                   last_updated_at AS last_seen,
+                   CASE WHEN violation_details IS NOT NULL THEN true ELSE false END AS has_details,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis
+            FROM conforma_results
+            WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
+            ORDER BY last_updated_at DESC
+        ")
+        local total_builds total_conforma
+        total_builds=$(echo "$builds_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+        total_conforma=$(echo "$conforma_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+        python3 -c "
+import json, sys
+builds = json.loads(sys.argv[1]) if sys.argv[1] else []
+conforma = json.loads(sys.argv[2]) if sys.argv[2] else []
+result = {
+    'application': sys.argv[3],
+    'build_failures': builds,
+    'conforma_violations': conforma,
+    'total_count': len(builds) + len(conforma)
+}
+print(json.dumps(result, default=str, indent=2))
+" "$builds_json" "$conforma_json" "$APPLICATION_NAME"
+        return
+    fi
 
     if [ -n "$target_date" ]; then
         cmd_get_alerts_on_date "$target_date"
@@ -6421,10 +6560,11 @@ cmd_report_build() {
 
 # DESCRIBE CONFORMA - violation details for a component
 cmd_describe_conforma() {
-    local component="" history=false
+    local component="" history=false json_output=false
     for arg in "$@"; do
         case "$arg" in
             --history|-H) history=true ;;
+            --json) json_output=true ;;
             *) [ -z "$component" ] && component="$arg" ;;
         esac
     done
@@ -6433,6 +6573,25 @@ cmd_describe_conforma() {
         echo -e "${RED}Error: Component name required${NC}"
         echo "Usage: ic describe conforma <component> [--history]"
         return 1
+    fi
+
+    if [ "$json_output" = true ]; then
+        sql_json "
+            SELECT component_name AS component, scenario, pipelinerun_name, status,
+                   violations_count, warnings_count, successes_count,
+                   first_detected_at AS first_seen, last_updated_at AS last_seen,
+                   repository_url, commit_sha, snapshot_name,
+                   CASE WHEN violation_details IS NOT NULL THEN true ELSE false END AS has_details,
+                   CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis,
+                   jira_key
+            FROM conforma_results
+            WHERE component_name = '$component'
+              AND application = '$APPLICATION_NAME'
+              AND is_resolved = FALSE
+            ORDER BY first_detected_at DESC
+            LIMIT 1
+        "
+        return
     fi
 
     # Get metadata (without violation_summary to avoid pipe conflicts)

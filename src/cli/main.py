@@ -1,5 +1,6 @@
 """IC CLI entry point — Click-based command tree."""
 
+import json as json_mod
 import os
 import subprocess
 import sys
@@ -10,9 +11,12 @@ from cli import config as cfg
 
 
 @click.group(invoke_without_command=True)
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
 @click.pass_context
-def cli(ctx):
+def cli(ctx, output_json):
     """IC — kubectl-style interface for CI Auto-Healing."""
+    ctx.ensure_object(dict)
+    ctx.obj['json'] = output_json
     if ctx.invoked_subcommand is None:
         _bash_fallback(['help'])
 
@@ -26,33 +30,51 @@ def help_cmd():
 # --- get group ---
 
 @cli.group()
-def get():
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.pass_context
+def get(ctx, output_json):
     """List resources (components, alerts, conforma, ...)."""
+    ctx.ensure_object(dict)
+    ctx.obj['json'] = ctx.obj.get('json') or output_json
 
 
 @get.command('components')
 @click.option('-r', '--refresh', is_flag=True, help='Refresh from cluster')
-def get_components(refresh):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_components(ctx, refresh, output_json):
     """List currently failing components."""
     args = ['get', 'components']
     if refresh:
         args.append('--refresh')
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('component')
 @click.argument('name')
-def get_component(name):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_component(ctx, name, output_json):
     """Get component summary."""
+    is_json = output_json or ctx.obj.get('json')
     from cli.db import get_repo, require_db
-    from cli.formatting import bold, cyan, red
     from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
     summary = get_repo(BuildFailureRepository).get_component_summary(name)
     if not summary:
-        print(red('Error: Component not found: {}'.format(name)))
+        if is_json:
+            print(json_mod.dumps({"error": "Component not found", "component": name}))
+        else:
+            from cli.formatting import red
+            print(red('Error: Component not found: {}'.format(name)))
         raise SystemExit(1)
+    if is_json:
+        print(json_mod.dumps({"component": name, **summary}, default=str))
+        return
+    from cli.formatting import bold, cyan
     print(bold('Component: ') + cyan(name))
     print()
     print(bold('Summary:'))
@@ -71,7 +93,9 @@ def get_component(name):
 @click.option('--date', help='Alerts on specific date')
 @click.option('--from', 'from_date', help='Start date for range')
 @click.option('--to', 'to_date', help='End date for range')
-def get_alerts(group, show_all, date, from_date, to_date):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
     """Unified view: build failures + Conforma violations."""
     args = ['get', 'alerts']
     if group:
@@ -84,65 +108,95 @@ def get_alerts(group, show_all, date, from_date, to_date):
         args.extend(['--from', from_date])
     if to_date:
         args.extend(['--to', to_date])
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('conforma')
 @click.argument('filter', required=False, default='')
-def get_conforma(filter):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_conforma(ctx, filter, output_json):
     """Conforma test failures."""
     args = ['get', 'conforma']
     if filter:
         args.append(filter)
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('exceptions')
-def get_exceptions():
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_exceptions(ctx, output_json):
     """Policy exceptions expiring/expired."""
-    _bash_fallback(['get', 'exceptions'])
+    args = ['get', 'exceptions']
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @get.command('bindings')
-def get_bindings():
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_bindings(ctx, output_json):
     """RPA -> EC policy mappings."""
-    _bash_fallback(['get', 'bindings'])
+    args = ['get', 'bindings']
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @get.command('policy-gap')
-def get_policy_gap():
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_policy_gap(ctx, output_json):
     """Stage vs prod EC policy gap (release risk)."""
-    _bash_fallback(['get', 'policy-gap'])
+    args = ['get', 'policy-gap']
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @get.command('pipelineruns')
 @click.option('--limit', type=int, help='Limit results')
-def get_pipelineruns(limit):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_pipelineruns(ctx, limit, output_json):
     """List PipelineRun failures."""
     args = ['get', 'pipelineruns']
     if limit:
         args.extend(['--limit', str(limit)])
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('pipelinerun')
 @click.argument('name')
-def get_pipelinerun(name):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_pipelinerun(ctx, name, output_json):
     """Get PipelineRun details."""
-    _bash_fallback(['get', 'pipelinerun', name])
+    args = ['get', 'pipelinerun', name]
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @get.command('apps')
-def get_apps():
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_apps(ctx, output_json):
     """List available RHOAI applications."""
+    is_json = output_json or ctx.obj.get('json')
     from cli.db import get_repo, require_db
-    from cli.formatting import bold, cyan, green, section_header, yellow
     from repositories.build_failure_repository import BuildFailureRepository
     if not require_db():
         return
     build_repo = get_repo(BuildFailureRepository)
-    section_header('Available RHOAI Applications')
-    print()
     apps = []
     try:
         from openshift_auth import _ensure_k8s_config
@@ -159,14 +213,33 @@ def get_apps():
              if app_prefix and app_prefix in item['metadata']['name']],
         )
     except Exception:
-        print(yellow('Warning: Cluster unreachable — showing applications from database'))
-        print()
+        if not is_json:
+            from cli.formatting import yellow
+            print(yellow('Warning: Cluster unreachable — showing applications from database'))
+            print()
         apps = [a['application'] for a in build_repo.get_applications()]
     if not apps:
-        print(yellow('No applications found'))
+        if is_json:
+            print(json_mod.dumps({"applications": [], "current": cfg.APPLICATION_NAME}))
+        else:
+            from cli.formatting import yellow
+            print(yellow('No applications found'))
         return
     app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     current = cfg.APPLICATION_NAME
+    if is_json:
+        result = {
+            "applications": [
+                {"name": app, "records": app_counts.get(app, 0), "current": app == current}
+                for app in apps
+            ],
+            "current": current,
+        }
+        print(json_mod.dumps(result, default=str))
+        return
+    from cli.formatting import bold, cyan, green, section_header
+    section_header('Available RHOAI Applications')
+    print()
     for app in apps:
         db_count = app_counts.get(app, 0)
         if app == current:
@@ -184,8 +257,10 @@ def get_apps():
 @click.option('--stage', is_flag=True)
 @click.option('--prod', is_flag=True)
 @click.option('--limit', type=int)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.argument('name', required=False)
-def get_releases(stage, prod, limit, name):
+@click.pass_context
+def get_releases(ctx, stage, prod, limit, output_json, name):
     """List Release CRs."""
     if name:
         args = ['get', 'releases', name]
@@ -197,29 +272,39 @@ def get_releases(stage, prod, limit, name):
         args.append('--prod')
     if limit:
         args.extend(['--limit', str(limit)])
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('jira')
 @click.argument('component', required=False, default='')
-def get_jira(component):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_jira(ctx, component, output_json):
     """Show Jira ticket links."""
     args = ['get', 'jira']
     if component:
         args.append(component)
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @get.command('fixes')
 @click.option('--all', 'show_all', is_flag=True)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.argument('component', required=False, default='')
-def get_fixes(show_all, component):
+@click.pass_context
+def get_fixes(ctx, show_all, output_json, component):
     """List fix attempts."""
     args = ['get', 'fixes']
     if component:
         args.append(component)
     if show_all:
         args.append('--all')
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
@@ -227,24 +312,32 @@ def get_fixes(show_all, component):
 @click.option('--component', help='Filter to a single component')
 @click.option('--severity', type=click.Choice(['critical', 'high']),
               help='Show only this severity and above')
-def get_vulnerabilities(component, severity):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def get_vulnerabilities(ctx, component, severity, output_json):
     """CVE vulnerability summary from SARIF scans."""
-    from cli.formatting import bold, cyan, dim, red, section_header, yellow
-    section_header('Vulnerability Summary — {}'.format(cfg.APPLICATION_NAME))
-    print()
+    is_json = output_json or ctx.obj.get('json')
     try:
         from clients.konflux_client import KonfluxClient
         from clients.registry_client import RegistryClient
         kc = KonfluxClient(namespace=cfg.NAMESPACE)
         snapshots = kc.get_snapshots(app_filter=cfg.APPLICATION_NAME, limit=1)
         if not snapshots:
-            print(yellow('No snapshots found for {}'.format(cfg.APPLICATION_NAME)))
+            if is_json:
+                print(json_mod.dumps({"error": "No snapshots found", "application": cfg.APPLICATION_NAME}))
+            else:
+                from cli.formatting import yellow
+                print(yellow('No snapshots found for {}'.format(cfg.APPLICATION_NAME)))
             return
         snap = snapshots[0]
         snap_name = snap.get('metadata', {}).get('name', 'unknown')
         components = snap.get('spec', {}).get('components', [])
-        print('Snapshot: {}'.format(cyan(snap_name)))
-        print('Components: {}'.format(len(components)))
+        if not is_json:
+            from cli.formatting import section_header, cyan
+            section_header('Vulnerability Summary — {}'.format(cfg.APPLICATION_NAME))
+            print()
+            print('Snapshot: {}'.format(cyan(snap_name)))
+            print('Components: {}'.format(len(components)))
         print()
 
         rc = RegistryClient()
@@ -282,6 +375,21 @@ def get_vulnerabilities(component, severity):
 
         rows.sort(key=lambda r: r['counts']['critical'] * 1000 + r['counts']['high'], reverse=True)
 
+        if ctx.obj.get('json'):
+            result = {
+                "application": cfg.APPLICATION_NAME,
+                "snapshot": snap_name,
+                "totals": totals,
+                "components": [
+                    {"name": r['name'], **r['counts'], "total": r['total'],
+                     "top_findings": r['top_cves']}
+                    for r in rows
+                ],
+            }
+            print(json_mod.dumps(result, default=str))
+            return
+
+        from cli.formatting import bold, red, yellow, dim
         if not rows:
             print(yellow('No vulnerabilities found.'))
             return
@@ -321,10 +429,11 @@ def get_vulnerabilities(component, severity):
         print(dim('Note: Severity is mapped from SARIF levels (error/warning/note). Includes SAST'))
         print(dim('findings (ShellCheck, Snyk Code) — not only CVEs. Filter with --severity critical.'))
     except ImportError:
-        print(red('Error: Required clients not available (registry_client, konflux_client)'))
+        print('Error: Required clients not available (registry_client, konflux_client)',
+              file=sys.stderr)
         raise SystemExit(1)
     except Exception as e:
-        print(red('Error: {}'.format(e)))
+        print('Error: {}'.format(e), file=sys.stderr)
         raise SystemExit(1)
 
 
@@ -340,50 +449,77 @@ def get_cves(ctx, component, severity):
 # --- describe group ---
 
 @cli.group()
-def describe():
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.pass_context
+def describe(ctx, output_json):
     """Show detailed resource information."""
+    ctx.ensure_object(dict)
+    ctx.obj['json'] = ctx.obj.get('json') or output_json
 
 
 @describe.command('component')
 @click.argument('name')
 @click.option('--log', is_flag=True, help='Show complete logs')
-def describe_component(name, log):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def describe_component(ctx, name, log, output_json):
     """Full component details + logs."""
     args = ['describe', 'component', name]
     if log:
         args.append('--log')
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
 @describe.command('conforma')
 @click.argument('name')
-def describe_conforma(name):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def describe_conforma(ctx, name, output_json):
     """Conforma violation details."""
-    _bash_fallback(['describe', 'conforma', name])
+    args = ['describe', 'conforma', name]
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @describe.command('pipelinerun')
 @click.argument('name')
-def describe_pipelinerun(name):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def describe_pipelinerun(ctx, name, output_json):
     """Full PipelineRun details + logs."""
-    _bash_fallback(['describe', 'pipelinerun', name])
+    args = ['describe', 'pipelinerun', name]
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @describe.command('jira')
 @click.argument('key')
-def describe_jira(key):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def describe_jira(ctx, key, output_json):
     """Show Jira ticket details."""
-    _bash_fallback(['describe', 'jira', key])
+    args = ['describe', 'jira', key]
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
+    _bash_fallback(args)
 
 
 @describe.command('release')
 @click.argument('name')
 @click.option('--logs', is_flag=True)
-def describe_release(name, logs):
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def describe_release(ctx, name, logs, output_json):
     """Release CR details."""
     args = ['describe', 'release', name]
     if logs:
         args.append('--logs')
+    if output_json or ctx.obj.get('json'):
+        args.append('--json')
     _bash_fallback(args)
 
 
