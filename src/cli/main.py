@@ -1584,13 +1584,34 @@ def skills_add(source_name_or_url):
         registry.save()
         return
 
+    from skills.validator import SkillValidator
+    from cli.formatting import red, yellow
+    validator = SkillValidator()
+    added = []
+    blocked = []
+
     for skill_dir, meta in found:
+        result = validator.validate(skill_dir, meta)
+        if not result.passed:
+            blocked.append((meta.name, result))
+            continue
+        if result.warning_count > 0:
+            print(yellow('  {} warnings for {}'.format(result.warning_count, meta.name)))
         registry.add_skill(meta.name, name, skill_dir, meta)
+        added.append(meta)
 
     registry.save()
-    print(green('Added {} skill(s) from {}'.format(len(found), bold(name))))
-    for _, meta in found:
-        print('  - {}: {}'.format(meta.name, meta.description[:60]))
+
+    if added:
+        print(green('Added {} skill(s) from {}'.format(len(added), bold(name))))
+        for meta in added:
+            print('  - {}: {}'.format(meta.name, meta.description[:60]))
+
+    if blocked:
+        print(red('\nBlocked {} skill(s) with critical findings:'.format(len(blocked))))
+        for skill_name, result in blocked:
+            criticals = [f for f in result.findings if f.severity == 'critical']
+            print(red('  {} — {}'.format(skill_name, criticals[0].message)))
 
 
 @skills.command('remove')
@@ -1792,6 +1813,120 @@ def skills_tags_list():
         for tag, count in tags.items():
             print('  {:<25}  {} skill(s)'.format(tag, count))
     print()
+
+
+@skills.command('validate')
+@click.argument('name_or_path')
+def skills_validate(name_or_path):
+    """Run static security analysis on a skill (registered name or local path)."""
+    from skills.validator import SkillValidator
+    from cli.formatting import bold, green, red, yellow
+
+    validator = SkillValidator()
+    expanded = os.path.expanduser(name_or_path)
+
+    if os.path.isdir(expanded):
+        from skills.loader import parse_skill_md
+        skill_file = os.path.join(expanded, 'SKILL.md')
+        metadata = parse_skill_md(skill_file) if os.path.isfile(skill_file) else None
+        result = validator.validate(expanded, metadata)
+    else:
+        from skills.db_registry import get_registry
+        registry = get_registry()
+        try:
+            skill = registry.get_skill(name_or_path)
+        except KeyError as e:
+            print(str(e).strip('"\''))
+            raise SystemExit(1)
+        if not skill:
+            print('Skill not found: {}'.format(name_or_path))
+            raise SystemExit(1)
+        result = validator.validate(skill.path, skill.metadata)
+
+    if not result.findings:
+        print(green('No issues found in {}'.format(bold(result.skill_name))))
+        return
+
+    criticals = [f for f in result.findings if f.severity == 'critical']
+    warnings = [f for f in result.findings if f.severity == 'warning']
+
+    if criticals:
+        print(red(bold('CRITICAL ({})'.format(len(criticals)))))
+        for f in criticals:
+            loc = '{}:{}'.format(f.file, f.line) if f.line else f.file
+            print('  {} — {} [{}]'.format(red(loc), f.message, f.check))
+
+    if warnings:
+        print(yellow(bold('WARNINGS ({})'.format(len(warnings)))))
+        for f in warnings:
+            loc = '{}:{}'.format(f.file, f.line) if f.line else f.file
+            print('  {} — {} [{}]'.format(yellow(loc), f.message, f.check))
+
+    if not result.passed:
+        raise SystemExit(1)
+
+
+@skills.command('doctor')
+@click.argument('path', required=False)
+def skills_doctor(path):
+    """Check prerequisites for registered skills or a local skill directory."""
+    from skills.validator import check_prerequisites
+    from cli.formatting import bold, green, red, yellow
+
+    skills_to_check = []
+
+    if path:
+        expanded = os.path.expanduser(path)
+        if not os.path.isdir(expanded):
+            print('Not a directory: {}'.format(path))
+            raise SystemExit(1)
+        from skills.loader import parse_skill_md, discover_skills
+        found = discover_skills(expanded)
+        if not found:
+            skill_file = os.path.join(expanded, 'SKILL.md')
+            meta = parse_skill_md(skill_file) if os.path.isfile(skill_file) else None
+            if meta:
+                skills_to_check.append((meta.name, meta))
+            else:
+                print('No SKILL.md found in {}'.format(expanded))
+                raise SystemExit(1)
+        else:
+            for _, meta in found:
+                skills_to_check.append((meta.name, meta))
+    else:
+        from skills.db_registry import get_registry
+        registry = get_registry()
+        for skill in registry.list_skills():
+            skills_to_check.append((skill.qualified_name, skill.metadata))
+
+    if not skills_to_check:
+        print('No skills to check.')
+        return
+
+    has_issues = False
+    for name, meta in skills_to_check:
+        prereqs = check_prerequisites(meta)
+        status = prereqs['status']
+        if status == 'ok':
+            icon = green('OK')
+        elif status == 'warn':
+            icon = yellow('WARN')
+            has_issues = True
+        else:
+            icon = red('FAIL')
+            has_issues = True
+
+        print('{:<40} {}'.format(bold(name), icon))
+
+        for tool, found in prereqs['tools'].items():
+            mark = green('found') if found else red('MISSING')
+            print('  tool: {:<20} {}'.format(tool, mark))
+        for var, found in prereqs['env'].items():
+            mark = green('set') if found else yellow('NOT SET')
+            print('  env:  {:<20} {}'.format(var, mark))
+
+    if has_issues:
+        raise SystemExit(1)
 
 
 # --- components group ---
