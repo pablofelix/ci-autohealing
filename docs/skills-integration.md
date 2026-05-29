@@ -196,15 +196,17 @@ The MCP server exposes the same data as typed Pydantic models. AI agents (Claude
 | `list_patterns` | `ic patterns list` | Error pattern library |
 | `get_dashboard` | `ic dashboard` | Operational metrics |
 
-### Skill Registry Tools (read-only)
+### Skill Registry Tools
 
 | MCP Tool | CLI Equivalent | Returns |
 |----------|---------------|---------|
 | `list_skills` | `ic skills list` | `List[SkillInfo]` |
 | `get_skill_info` | `ic skills info <name>` | `SkillInfo` |
 | `list_skill_sources` | `ic skills sources` | `List[SkillSourceInfo]` |
+| `validate_skill` | `ic skills validate <name>` | `ValidationResult` |
+| `check_skill_prerequisites` | `ic skills doctor` | `PrerequisiteResult` |
 
-Skills are loaded from external Git repos via `ic skills add` (CLI only). MCP and API provide read-only access — agents can discover and inspect available skills but cannot modify the registry.
+Skills are loaded from external Git repos via `ic skills add` (CLI only). MCP and API provide read-only query and validation — agents can discover, inspect, and validate skills but cannot modify the registry.
 
 ### REST API Endpoints
 
@@ -213,6 +215,8 @@ Skills are loaded from external Git repos via `ic skills add` (CLI only). MCP an
 | `/api/v1/skills` | GET | List skills (query params: `tag`, `source`) |
 | `/api/v1/skills/sources` | GET | List skill sources with skill counts |
 | `/api/v1/skills/{name}` | GET | Skill details by name or qualified name |
+| `/api/v1/skills/{name}/validate` | GET | Run static security scan on a registered skill |
+| `/api/v1/skills/{name}/prerequisites` | GET | Check tool/env prerequisites for a skill |
 
 ### Pydantic Models
 
@@ -225,6 +229,9 @@ MCP tools return structured data matching these models (defined in `src/mcp_serv
 - **StatsResponse**: `build` (pending/analyzed/auto_fixable), `conforma` (same), `total_cost`
 - **SkillInfo**: `qualified_name`, `name`, `source`, `description`, `status`, `tags[]`, `category`, `user_invocable`
 - **SkillSourceInfo**: `name`, `url`, `commit`, `skill_count`
+- **SkillValidationFinding**: `severity`, `check`, `message`, `file`, `line`
+- **SkillValidationResult**: `skill_name`, `passed`, `critical_count`, `warning_count`, `findings[]`
+- **SkillPrerequisiteResult**: `skill_name`, `status`, `tools{}`, `env{}`
 
 ---
 

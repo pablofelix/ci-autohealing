@@ -1,10 +1,16 @@
-"""Skill registry endpoints (read-only)."""
+"""Skill registry endpoints (read-only, with validation)."""
 
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from mcp_server.models import SkillInfo, SkillSourceInfo
+from mcp_server.models import (
+    SkillInfo,
+    SkillPrerequisiteResult,
+    SkillSourceInfo,
+    SkillValidationFinding,
+    SkillValidationResult,
+)
 
 router = APIRouter(tags=["skills"])
 
@@ -72,3 +78,55 @@ def get_skill(name: str) -> SkillInfo:
     if not entry:
         raise HTTPException(status_code=404, detail='Skill not found: {}'.format(name))
     return _entry_to_info(entry)
+
+
+@router.get("/skills/{name}/validate")
+def validate_skill(name: str) -> SkillValidationResult:
+    """Run static security analysis on a registered skill."""
+    registry = _registry()
+    try:
+        entry = registry.get_skill(name)
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not entry:
+        raise HTTPException(status_code=404, detail='Skill not found: {}'.format(name))
+
+    from skills.validator import SkillValidator
+    validator = SkillValidator()
+    result = validator.validate(entry.path, entry.metadata)
+
+    return SkillValidationResult(
+        skill_name=result.skill_name,
+        passed=result.passed,
+        critical_count=result.critical_count,
+        warning_count=result.warning_count,
+        findings=[
+            SkillValidationFinding(
+                severity=f.severity, check=f.check,
+                message=f.message, file=f.file, line=f.line,
+            )
+            for f in result.findings
+        ],
+    )
+
+
+@router.get("/skills/{name}/prerequisites")
+def check_skill_prerequisites(name: str) -> SkillPrerequisiteResult:
+    """Check if required tools and env vars are available for a skill."""
+    registry = _registry()
+    try:
+        entry = registry.get_skill(name)
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not entry:
+        raise HTTPException(status_code=404, detail='Skill not found: {}'.format(name))
+
+    from skills.validator import check_prerequisites
+    prereqs = check_prerequisites(entry.metadata)
+
+    return SkillPrerequisiteResult(
+        skill_name=entry.qualified_name,
+        status=prereqs['status'],
+        tools=prereqs['tools'],
+        env=prereqs['env'],
+    )

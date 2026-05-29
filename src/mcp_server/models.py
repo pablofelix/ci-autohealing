@@ -143,3 +143,26 @@ class SkillSourceInfo(BaseModel):
     url: str
     commit: Optional[str] = None
     skill_count: int = 0
+
+
+class SkillValidationFinding(BaseModel):
+    severity: str = Field(..., description="'critical' or 'warning'")
+    check: str
+    message: str
+    file: str
+    line: int = Field(..., description="1-based line number, 0 if N/A")
+
+
+class SkillValidationResult(BaseModel):
+    skill_name: str
+    passed: bool
+    critical_count: int
+    warning_count: int
+    findings: List[SkillValidationFinding]
+
+
+class SkillPrerequisiteResult(BaseModel):
+    skill_name: str
+    status: str = Field(..., description="'ok', 'warn', or 'fail'")
+    tools: Dict[str, bool]
+    env: Dict[str, bool]

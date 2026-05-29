@@ -337,6 +337,10 @@ ic skills sources                          # registered + known sources
 ic skills tag add <skill> <tag>            # add tag to a skill
 ic skills tag remove <skill> <tag>         # remove tag from a skill
 ic skills tags                             # list all tags with counts
+ic skills validate <name>                  # static security scan on registered skill
+ic skills validate ./local/path            # scan local skill directory (pre-publish)
+ic skills doctor                           # check tool/env prerequisites for all skills
+ic skills doctor ./local/path              # check prerequisites for local skill
 ```
 
 ### Configuration
@@ -389,7 +393,7 @@ See `.env.example` for the full list with descriptions.
 │
 ├── src/
 │   ├── cli/                  # CLI implementation (Click)
-│   ├── skills/               # Skill registry (models, loader, registry, known sources)
+│   ├── skills/               # Skill registry (models, loader, registry, validator)
 │   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
 │   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
 │   ├── watcher/              # K8s watch daemon (event-driven monitoring)

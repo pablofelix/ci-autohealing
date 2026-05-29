@@ -228,6 +228,8 @@ External skill management — load, register, and query skills from Git repos.
 - **`get_registry()`** factory — Returns DB registry if PostgreSQL is available, JSON file fallback otherwise
 - **Loader** (`loader.py`) — Clone repos, discover `SKILL.md` files, parse frontmatter
 - **Known Sources** (`known_sources.py`) — Shorthand catalog for well-known repos
+- **SkillValidator** (`validator.py`) — Static security scanning (secrets, destructive ops, exfiltration, unsafe shell patterns). Runs automatically on `ic skills add`, blocking critical findings. Also available standalone via `ic skills validate`
+- **`check_prerequisites()`** (`validator.py`) — Runtime check for required tools (`shutil.which`) and env vars. Powers `ic skills doctor`
 
 **Dual-mode storage:** In a cluster, skills are stored in PostgreSQL (`skill_sources` + `skills` tables with GIN-indexed tag arrays). Locally, they persist in `~/.ic/skills.json`. The CLI writes (git clone + DB insert), while MCP/API provide read-only access.
 

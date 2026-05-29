@@ -22,7 +22,10 @@ from mcp_server.models import (
     FailureSummary,
     HealthWarning,
     SkillInfo,
+    SkillPrerequisiteResult,
     SkillSourceInfo,
+    SkillValidationFinding,
+    SkillValidationResult,
     StatsResponse,
     TriageResponse,
 )
@@ -1244,6 +1247,90 @@ def list_skill_sources() -> List[SkillSourceInfo]:
         )
         for src in sources
     ]
+
+
+@mcp.tool()
+@async_tool
+def validate_skill(name: str) -> SkillValidationResult:
+    """Run static security analysis on a registered skill.
+
+    Checks for hardcoded secrets, destructive operations, data exfiltration
+    patterns, and unsafe shell constructs. Returns findings with file and
+    line number.
+
+    Args:
+        name: Skill name or qualified name (source/name).
+    """
+    registry = _skill_registry()
+    skill = registry.get_skill(name)
+    if not skill:
+        return SkillValidationResult(
+            skill_name=name, passed=False, critical_count=1, warning_count=0,
+            findings=[SkillValidationFinding(
+                severity='critical', check='not_found',
+                message='Skill not found: {}'.format(name),
+                file='', line=0,
+            )],
+        )
+
+    from skills.validator import SkillValidator
+    validator = SkillValidator()
+    result = validator.validate(skill.path, skill.metadata)
+
+    return SkillValidationResult(
+        skill_name=result.skill_name,
+        passed=result.passed,
+        critical_count=result.critical_count,
+        warning_count=result.warning_count,
+        findings=[
+            SkillValidationFinding(
+                severity=f.severity, check=f.check,
+                message=f.message, file=f.file, line=f.line,
+            )
+            for f in result.findings
+        ],
+    )
+
+
+@mcp.tool()
+@async_tool
+def check_skill_prerequisites(
+    name: Optional[str] = None,
+) -> List[SkillPrerequisiteResult]:
+    """Check if required tools and env vars are available for skills.
+
+    Without a name, checks all registered skills. With a name, checks
+    only that skill.
+
+    Args:
+        name: Optional skill name. If omitted, checks all registered skills.
+    """
+    from skills.validator import check_prerequisites
+
+    registry = _skill_registry()
+
+    if name:
+        skill = registry.get_skill(name)
+        if not skill:
+            return [SkillPrerequisiteResult(
+                skill_name=name, status='fail', tools={}, env={},
+            )]
+        skills_to_check = [(skill.qualified_name, skill.metadata)]
+    else:
+        skills_to_check = [
+            (s.qualified_name, s.metadata) for s in registry.list_skills()
+        ]
+
+    results = []
+    for qname, metadata in skills_to_check:
+        prereqs = check_prerequisites(metadata)
+        results.append(SkillPrerequisiteResult(
+            skill_name=qname,
+            status=prereqs['status'],
+            tools=prereqs['tools'],
+            env=prereqs['env'],
+        ))
+    return results
 
 
 # ---------------------------------------------------------------------------
