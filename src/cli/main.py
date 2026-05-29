@@ -1600,6 +1600,9 @@ def skills_add(source_name_or_url):
         registry.add_skill(meta.name, name, skill_dir, meta)
         added.append(meta)
 
+    if not added and blocked:
+        registry.remove_source(name)
+
     registry.save()
 
     if added:
@@ -1612,6 +1615,8 @@ def skills_add(source_name_or_url):
         for skill_name, result in blocked:
             criticals = [f for f in result.findings if f.severity == 'critical']
             print(red('  {} — {}'.format(skill_name, criticals[0].message)))
+        if not added:
+            raise SystemExit(1)
 
 
 @skills.command('remove')

@@ -50,13 +50,23 @@ SECRET_PATTERNS = [
      'Hardcoded secret/token'),
 ]
 
+_SYS_DIRS = r'(bin|boot|etc|home|lib|opt|root|sbin|sys|usr|var)'
 DESTRUCTIVE_PATTERNS = [
+    # rm -rf / or rm -fr /
     (r'rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\s*$', 'Recursive force-delete of root'),
-    (r'rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(bin|boot|etc|home|lib|opt|root|sbin|sys|usr|var)\b',
+    (r'rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/' + _SYS_DIRS + r'\b',
      'Recursive force-delete of system directory'),
     (r'rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+/\s*$', 'Recursive force-delete of root'),
-    (r'rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+/(bin|boot|etc|home|lib|opt|root|sbin|sys|usr|var)\b',
+    (r'rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+/' + _SYS_DIRS + r'\b',
      'Recursive force-delete of system directory'),
+    # rm -r -f / (separated flags)
+    (r'rm\s+(?=.*-[a-zA-Z]*r)(?=.*-[a-zA-Z]*f).*\s+/\s*$',
+     'Recursive force-delete of root'),
+    (r'rm\s+(?=.*-[a-zA-Z]*r)(?=.*-[a-zA-Z]*f).*\s+/' + _SYS_DIRS + r'\b',
+     'Recursive force-delete of system directory'),
+    # rm --recursive --force /
+    (r'rm\s+.*--recursive.*--force.*\s+/\s*$', 'Recursive force-delete of root'),
+    (r'rm\s+.*--force.*--recursive.*\s+/\s*$', 'Recursive force-delete of root'),
     (r'dd\s+if=.*of=/dev/', 'Raw disk write with dd'),
     (r'mkfs\b', 'Filesystem format command'),
     (r'DROP\s+(TABLE|DATABASE)\b', 'SQL DROP statement'),
@@ -169,7 +179,8 @@ class SkillValidator:
     def _check_destructive_ops(self, rel_path: str,
                                lines: List[str]) -> List[Finding]:
         return self._scan_patterns(
-            rel_path, lines, DESTRUCTIVE_PATTERNS, 'destructive_op', 'critical')
+            rel_path, lines, DESTRUCTIVE_PATTERNS, 'destructive_op', 'critical',
+            ignore_case=True)
 
     def _check_exfiltration(self, rel_path: str,
                             lines: List[str]) -> List[Finding]:
@@ -214,11 +225,12 @@ class SkillValidator:
     @staticmethod
     def _scan_patterns(rel_path: str, lines: List[str],
                        patterns: list, check_name: str,
-                       severity: str) -> List[Finding]:
+                       severity: str, ignore_case: bool = False) -> List[Finding]:
+        flags = re.IGNORECASE if ignore_case else 0
         findings = []
         for i, line in enumerate(lines, 1):
             for pattern, desc in patterns:
-                if re.search(pattern, line, re.IGNORECASE):
+                if re.search(pattern, line, flags):
                     findings.append(Finding(
                         severity=severity, check=check_name,
                         message=desc, file=rel_path, line=i,

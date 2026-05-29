@@ -84,6 +84,24 @@ class TestSkillValidator:
         findings = [f for f in result.findings if f.check == 'destructive_op']
         assert len(findings) >= 1
 
+    def test_detects_rm_separated_flags(self, tmp_path):
+        """rm -r -f / with separated flags is also caught."""
+        skill_dir, meta = _make_skill(tmp_path, scripts={
+            'bad.sh': '#!/bin/bash\nrm -r -f /etc\n',
+        })
+        result = SkillValidator().validate(skill_dir, meta)
+        assert not result.passed
+        assert any(f.check == 'destructive_op' for f in result.findings)
+
+    def test_detects_rm_long_flags(self, tmp_path):
+        """rm --recursive --force / with long flags is caught."""
+        skill_dir, meta = _make_skill(tmp_path, scripts={
+            'bad.sh': '#!/bin/bash\nrm --recursive --force /\n',
+        })
+        result = SkillValidator().validate(skill_dir, meta)
+        assert not result.passed
+        assert any(f.check == 'destructive_op' for f in result.findings)
+
     def test_rm_tmp_not_flagged(self, tmp_path):
         """rm -rf /tmp/workdir is safe and should not be flagged."""
         skill_dir, meta = _make_skill(tmp_path, scripts={
