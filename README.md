@@ -236,6 +236,10 @@ ic get exceptions                          # policy exceptions expiring soon
 ic get pipelineruns [--limit N]            # recent PipelineRun failures
 ic get apps                                # available application versions
 ic get vulnerabilities [--component X]     # CVE summary from SARIF scans
+
+# All get/describe commands support --json for structured output
+ic get alerts --json                       # parseable JSON for scripts/skills
+ic describe component <name> --json        # JSON failure details
 ```
 
 ### Detail Views
