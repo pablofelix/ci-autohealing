@@ -204,12 +204,20 @@ class DatabaseSkillRegistry:
 
 
 def get_registry():
-    """Return DB registry if database is available, JSON file registry otherwise."""
+    """Return DB registry if skills tables exist, JSON file registry otherwise."""
     try:
         from cli.db import check_db
         if check_db():
             from cli.db import _get_db_connection
-            return DatabaseSkillRegistry(_get_db_connection())
+            db = _get_db_connection()
+            with db.connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = 'skills'"
+                )
+                if cur.fetchone():
+                    return DatabaseSkillRegistry(db)
     except Exception:
         pass
     from skills.registry import SkillRegistry
