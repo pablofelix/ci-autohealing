@@ -119,6 +119,12 @@ tasks:
     cmds:
       - python3 -m serve --mcp
 
+  worker:
+    desc: Run worker pipeline (collect → analyze → fix loop)
+    dir: "{{.SRC_DIR}}"
+    cmds:
+      - python3 -m worker
+
   watch:
     desc: Start K8s watch daemon (event-driven monitoring)
     dir: "{{.SRC_DIR}}"

@@ -8,9 +8,9 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 
 ## Key Features
 
-- **Continuous Monitoring** — Event-driven Kubernetes watch daemon for real-time CI monitoring, plus cron-driven pipeline scans every 20 minutes. Tracks build failures, Conforma (Enterprise Contract) policy violations, and release readiness across multiple application versions.
+- **Continuous Monitoring** — Event-driven Kubernetes watch daemon for real-time CI monitoring, plus a worker pipeline loop with configurable intervals. Tracks build failures, Conforma (Enterprise Contract) policy violations, and release readiness across multiple application versions.
 - **AI Root Cause Analysis** — LLM-powered failure classification with confidence scoring, actionable fix recommendations, and automatic error pattern learning.
-- **Autonomous Fix PRs** — High-confidence failures get automatically fixed via GitHub PRs, with safety gates (confidence >= 0.95, no prior attempts, branch deduplication) and verification on the next cron cycle.
+- **Autonomous Fix PRs** — High-confidence failures get automatically fixed via GitHub PRs, with safety gates (confidence >= 0.95, no prior attempts, branch deduplication) and verification on the next worker cycle.
 - **CVE Scanning** — Parallel SARIF vulnerability scanning across all container images in a snapshot, surfacing critical and high CVEs before release.
 - **Jira Integration** — Create tickets, monitor comments, draft AI replies, and track resolution — all from the CLI.
 - **Skill Registry** — Load, validate, and manage external skills from Git repos. Dual-mode storage (PostgreSQL in cluster, JSON file locally) with read-only MCP/API access for AI agents.
@@ -49,7 +49,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
                   └─────────────────────────────────┘
                                    ▲
           ┌─────────────────────┐  ┌──────────────────────┐
-          │  Watch Daemon       │  │  Cron Pipeline       │
+          │  Watch Daemon       │  │  Worker Pipeline     │
           │  K8s event streams  │  │  Collect → Analyze   │
           │  real-time detect   │  │  → Fix → Verify      │
           └──────────┬──────────┘  └──────────┬───────────┘
@@ -171,35 +171,35 @@ ic config watch disable jira  # disable specific watchers (builds, tests, confor
 
 Features: per-application watch streams, automatic reconnection on 410 Gone errors, UID-based deduplication, optional AI auto-analysis on new failures, periodic reconciliation, and Jira comment polling.
 
-### Cron Pipeline (Batch)
+### Worker Pipeline (Batch)
 
-Every 20 minutes, the cron pipeline runs:
+The worker runs as a long-lived process (`python -m worker`) with configurable step intervals:
 
-| Step | Script | What it does |
-|------|--------|-------------|
-| 1 | `collect_comprehensive.py` | Scan for new build failures |
-| 2 | `sync_component_status.py` | Mark resolved / passed components |
-| 3 | `verify_fixes.py` | Check if fix PRs merged and builds passed |
-| 4 | `check_conforma_status.py` | Update Conforma pass/fail status |
-| 5 | `collect_conforma.py` | Fetch violation details |
-| 6 | `collect_commit_context.py` | Gather diffs, Dockerfiles, Tekton configs |
-| 7 | `analyze_failures.py` | AI root cause analysis |
-| 8 | `auto_fix.py` | Generate fix PRs (autonomous, opt-in) |
-| 9 | `poll_jira_comments.py` | Draft replies to Jira comments |
+| Step | Interval | What it does | Requires |
+|------|----------|-------------|----------|
+| collect | 20min | Scan for new build failures | — |
+| sync_status | 20min | Mark resolved / passed components | — |
+| verify_fixes | 20min | Check if fix PRs merged and builds passed | `GITHUB_TOKEN` |
+| check_conforma | 20min | Update Conforma pass/fail status | — |
+| collect_conforma | 20min | Fetch violation details | — |
+| enrich_context | 20min | Gather diffs, Dockerfiles, Tekton configs | `GITHUB_TOKEN` |
+| analyze | 20min | AI root cause analysis | `LLM_PROVIDER` |
+| auto_fix | 20min | Generate fix PRs (autonomous, opt-in) | `AUTONOMOUS_MODE` |
+| doc_context | 1h | Refresh documentation for error patterns | — |
+| jira_poll | 10min | Draft replies to Jira comments | `JIRA_TOKEN` |
 
-Steps 6-9 are optional — they require additional credentials and are skipped if not configured.
-
-Install the cron job:
+Steps with missing env vars are skipped gracefully. Health endpoint on port 8001.
 
 ```bash
-./cron/install-cron.sh
+task worker                   # run locally
+docker compose up worker      # run in Docker
 ```
 
 ### Autonomous Mode
 
 When `AUTONOMOUS_MODE=true`, the system automatically creates fix PRs for high-confidence failures.
 
-Safety gates (all must pass): AI confidence >= 0.95, `can_auto_fix = true`, `requires_human_review = false`, no prior fix attempts, no existing fix branch. Rate-limited to 3 PRs per cron run.
+Safety gates (all must pass): AI confidence >= 0.95, `can_auto_fix = true`, `requires_human_review = false`, no prior fix attempts, no existing fix branch. Rate-limited to 3 PRs per worker run.
 
 Enable only after manual validation of at least 5 fixes.
 
@@ -208,13 +208,16 @@ Enable only after manual validation of at least 5 fixes.
 ## Taskfile Commands
 
 ```bash
-task test              # run 382 tests
+task test              # run 402 tests
 task lint              # ruff linter
 task check             # lint + tests
 
 task db:start          # start PostgreSQL
 task db:migrate        # apply migrations
 task db:psql           # open psql shell
+
+task worker            # run worker pipeline loop
+task watch             # start K8s watch daemon
 
 task serve             # API + MCP server (port 8000)
 task serve:mcp         # MCP stdio (for Claude Code)
@@ -404,6 +407,7 @@ See `.env.example` for the full list with descriptions.
 │   ├── skills/               # Skill registry (models, loader, registry, validator)
 │   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
 │   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
+│   ├── worker/               # Worker pipeline loop (replaces cron)
 │   ├── watcher/              # K8s watch daemon (event-driven monitoring)
 │   ├── analyzers/            # LLM analyzers (build, conforma, release)
 │   ├── fixers/               # Fix generators (PR, Jira, verification)
@@ -412,7 +416,7 @@ See `.env.example` for the full list with descriptions.
 │   ├── repositories/         # Database repositories (SQL)
 │   ├── proactive/            # Health monitoring, CVE warnings, nightly staleness
 │   ├── utils/                # Shared utilities (log filtering)
-│   ├── tests/                # Test suite (382 tests)
+│   ├── tests/                # Test suite (402 tests)
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)

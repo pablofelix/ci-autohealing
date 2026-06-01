@@ -158,7 +158,7 @@ Real-time CI monitoring via Kubernetes watch streams. Detects build failures and
 
 **Directory:** `collectors/`
 
-High-level workflows that coordinate clients + repositories. Run via cron every 20 minutes.
+High-level workflows that coordinate clients + repositories. Run via the worker pipeline loop (replaces cron).
 
 - **BuildFailureCollector** — Discover failing components, fetch logs, store in DB
 - **ConformaViolationCollector** — Collect policy violations and detailed reports
@@ -311,18 +311,21 @@ WatchDaemon.start()
 └─ jira-poller: poll for new Jira comments, draft AI replies
 ```
 
-### Cron Pipeline (every 20 minutes)
+### Worker Pipeline (replaces cron)
 
 ```
-collect_comprehensive.py     → Scan for new build failures
-sync_component_status.py     → Mark resolved / passed components
-verify_fixes.py              → Check if fix PRs merged and builds passed
-check_conforma_status.py     → Update Conforma pass/fail status
-collect_conforma.py          → Fetch violation details
-collect_commit_context.py    → Gather diffs, Dockerfiles, Tekton configs
-analyze_failures.py          → AI root cause analysis
-auto_fix.py                  → Generate fix PRs (autonomous, opt-in)
-poll_jira_comments.py        → Draft replies to Jira comments
+python -m worker
+└─ WorkerPipeline.run() — timed loop, each step has its own interval
+   ├─ collect (20min)        → BuildFailureCollector.run()
+   ├─ sync_status (20min)    → StatusSynchronizer.run()
+   ├─ verify_fixes (20min)   → verify fix PRs [requires GITHUB_TOKEN]
+   ├─ check_conforma (20min) → check Conforma test status from cluster
+   ├─ collect_conforma (20m) → ConformaViolationCollector.run()
+   ├─ enrich_context (20min) → CommitContextCollector [requires GITHUB_TOKEN]
+   ├─ analyze (20min)        → BatchAnalysisService.run_batch() [requires LLM_PROVIDER]
+   ├─ auto_fix (20min)       → AutoFixService [requires AUTONOMOUS_MODE=true]
+   ├─ doc_context (1h)       → refresh doc pages for error patterns
+   └─ jira_poll (10min)      → poll Jira comments [requires JIRA_TOKEN]
 ```
 
 ### Build Failure Collection
@@ -341,9 +344,61 @@ poll_jira_comments.py        → Draft replies to Jira comments
 
 ---
 
+## Process Model
+
+Three processes, one Docker image, different entrypoints:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                Same Docker image: ic-server:latest               │
+├─────────────────┬───────────────────┬───────────────────────────┤
+│  api-server     │  worker           │  watcher                  │
+│  python -m serve│  python -m worker │  python -m watcher        │
+│                 │                   │                           │
+│  REST API       │  Sequential loop  │  K8s watch streams        │
+│  MCP SSE        │  10 pipeline steps│  Async, long-lived        │
+│  Read-heavy     │  Configurable     │  Auto-reconnect           │
+│  Stateless      │  intervals & env  │  UID dedup                │
+│  Port 8000      │  gates            │  Reconciliation           │
+│                 │  Port 8001        │                           │
+│                 │  (health)         │                           │
+└─────────────────┴───────────────────┴───────────────────────────┘
+         │                 │                    │
+         └─────────────────┴────────────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │      PostgreSQL         │
+              │  (implicit job queue)   │
+              └─────────────────────────┘
+```
+
+**api-server** — Serves REST API and MCP SSE. Stateless, horizontally scalable. Read-heavy queries against PostgreSQL.
+
+**worker** — Long-running Python process that replaces the bash-orchestrated cron pipeline. Each `PipelineStep` has its own interval, environment gates, and criticality flag. Non-critical failures log and continue; critical failures stop the pipeline. Health endpoint on port 8001 for K8s liveness/readiness probes.
+
+**watcher** — Event-driven Kubernetes watch daemon. Fundamentally different from the worker: async, long-lived WebSocket connections, automatic reconnection on 410 Gone errors. Runs as an optional profile in Docker Compose (requires K8s API access).
+
+### Coordination
+
+No message broker needed at current scale (~70 components). PostgreSQL acts as the implicit job queue:
+- `ai_analyzed = FALSE` is the analysis queue
+- `resolved_at IS NULL` is the active failures set
+- Workers read/write the same tables; the sequential pipeline avoids contention
+
+### Future: Analyzer Worker Split
+
+When LLM analysis becomes a bottleneck (>200 pending analyses consistently, or analysis batches taking >30 minutes):
+
+1. Extract the `analyze` step from worker into a dedicated `worker-analyzer` process
+2. Use `SELECT ... FROM build_failures WHERE ai_analyzed = FALSE FOR UPDATE SKIP LOCKED LIMIT 1` for safe multi-worker concurrency
+3. Scale `worker-analyzer` replicas independently
+4. Collector worker continues unchanged — no code changes needed beyond moving the step to a separate entrypoint
+
+---
+
 ## Testing
 
-**382 tests**, all passing. Run with `task test`.
+**402 tests**, all passing. Run with `task test`.
 
 - **Parser tests** — Pure function tests with mock Kubernetes JSON, no I/O
 - **Client tests** — Mock HTTP/API responses, verify retry and error handling
@@ -362,4 +417,5 @@ Database: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
 AI: `LLM_PROVIDER`, `ANTHROPIC_API_KEY`
 Storage: `BLOB_STORE` (`local` or `minio`), `BLOB_THRESHOLD` (default 51200)
 Integrations: `GITHUB_TOKEN`, `JIRA_URL`, `JIRA_TOKEN`, `KUBEARCHIVE_URL`
+Worker: `WORKER_COLLECT_INTERVAL`, `WORKER_ANALYZE_INTERVAL`, `WORKER_JIRA_INTERVAL`, `WORKER_HEALTH_PORT`
 Skills: `IC_SKILLS_DIR` (optional, default `~/.ic`)

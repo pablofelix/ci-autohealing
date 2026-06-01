@@ -56,3 +56,43 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: ci-autohealing-worker
+    command: ["python", "-m", "worker"]
+    ports:
+      - "8001:8001"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-admin}
+      DB_NAME: ${DB_NAME:-konflux_monitoring}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  watcher:
+    build: .
+    container_name: ci-autohealing-watcher
+    command: ["python", "-m", "watcher"]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-admin}
+      DB_NAME: ${DB_NAME:-konflux_monitoring}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - watcher
