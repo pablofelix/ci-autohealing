@@ -8,9 +8,26 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict
 
+from datetime import datetime, timezone
+
 from logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def _nightly_component_for_app(application):
+    # type: (str) -> str
+    """Derive FBC fragment component name from application.
+
+    rhoai-v3-5-ea-2 → rhoai-fbc-fragment-v3-5-ea-2
+    rhoai-v3-6      → rhoai-fbc-fragment-v3-6
+    """
+    parts = application.split('-v', 1)
+    if len(parts) != 2:
+        return '{}-fbc-fragment'.format(application)
+    prefix = parts[0]
+    version = parts[1]
+    return '{}-fbc-fragment-v{}'.format(prefix, version)
 
 
 @dataclass
@@ -39,6 +56,7 @@ class HealthMonitor:
         warnings.extend(self.get_pattern_cascades())
         warnings.extend(self.get_repeat_failures())
         warnings.extend(self.get_cve_warnings())
+        warnings.extend(self.get_stale_nightly_builds())
         return warnings
 
     def get_degrading_components(self):
@@ -233,6 +251,51 @@ class HealthMonitor:
         except Exception as e:
             logger.debug("CVE health check skipped: %s", e)
             return []
+
+    def get_stale_nightly_builds(self, staleness_hours=None):
+        # type: (Optional[int],) -> List[HealthWarning]
+        """Detect FBC fragment components with no recent successful build."""
+        threshold = staleness_hours or int(os.environ.get('NIGHTLY_STALENESS_HOURS', '24'))
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT component_name, application, last_successful_build,
+                       last_failed_build, current_status
+                FROM component_health
+                WHERE component_name LIKE '%%fbc-fragment%%'
+                  AND (last_successful_build IS NULL
+                       OR last_successful_build < NOW() - (%s || ' hours')::INTERVAL)
+                ORDER BY last_successful_build ASC NULLS FIRST
+            """, (threshold,))
+            cols = [d[0] for d in cursor.description]
+            rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+        warnings = []
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            last_build = r['last_successful_build']
+            if last_build is None:
+                severity = 'critical'
+                msg = '{} ({}) — no successful build on record'.format(
+                    r['component_name'], r['application'] or '?')
+            else:
+                if last_build.tzinfo is None:
+                    last_build = last_build.replace(tzinfo=timezone.utc)
+                hours_ago = (now - last_build).total_seconds() / 3600
+                severity = 'critical' if hours_ago >= 48 else 'warning'
+                msg = '{} ({}) — last successful build {:.0f}h ago ({})'.format(
+                    r['component_name'], r['application'] or '?',
+                    hours_ago, last_build.strftime('%Y-%m-%d %H:%M'))
+
+            warnings.append(HealthWarning(
+                component_name=r['component_name'],
+                application=r['application'] or '',
+                signal_type='stale_nightly',
+                severity=severity,
+                message=msg,
+                evidence=r,
+            ))
+        return warnings
 
     def get_component_health_summary(self, application=None):
         # type: (Optional[str],) -> List[Dict[str, Any]]
