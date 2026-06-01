@@ -25,7 +25,7 @@ class PipelineStep:
 
         self.last_run = 0.0
         self.last_duration = 0.0
-        self.last_error = None  # type: Optional[str]
+        self.last_error = None
         self.run_count = 0
         self.error_count = 0
 
@@ -76,7 +76,7 @@ class WorkerPipeline:
     """Runs pipeline steps in a loop with configurable intervals."""
 
     def __init__(self, check_interval=30):
-        self.steps = []  # type: List[PipelineStep]
+        self.steps = []
         self.check_interval = check_interval
         self.running = False
         self._started_at = 0.0

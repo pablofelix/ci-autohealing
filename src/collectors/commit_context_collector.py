@@ -21,7 +21,6 @@ class CommitContextCollector:
     """Fetches and stores commit context for build failures."""
 
     def __init__(self, config, db=None, github=None):
-        # type: (CollectorConfig, ..., ...) -> None
         if db is None:
             db = DatabaseConnection(config.db)
         self.config = config
@@ -31,7 +30,6 @@ class CommitContextCollector:
         )
 
     def get_pending_failures(self, limit=20):
-        # type: (int) -> List[Dict[str, Any]]
         """Get failures that need commit context fetched.
 
         Criteria: has commit_sha, has repository_url, no commit_context yet.
@@ -63,7 +61,6 @@ class CommitContextCollector:
             return results
 
     def store_context(self, failure_id, context):
-        # type: (int, Dict[str, Any]) -> None
         """Store commit context in the build_failures table."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -75,7 +72,6 @@ class CommitContextCollector:
             conn.commit()
 
     def run(self, limit=20):
-        # type: (int) -> Dict[str, Any]
         """Fetch commit context for pending failures.
 
         Returns stats dict: fetched count, skipped, duration.

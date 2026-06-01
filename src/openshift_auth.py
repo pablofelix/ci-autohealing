@@ -20,7 +20,6 @@ _k8s_loaded = False
 
 
 def _ensure_k8s_config():
-    # type: () -> None
     global _k8s_loaded
     if not _k8s_loaded:
         config.load_kube_config()
@@ -28,7 +27,6 @@ def _ensure_k8s_config():
 
 
 def is_logged_in():
-    # type: () -> bool
     """Check if user has a valid kubeconfig (equivalent to oc whoami)."""
     try:
         _ensure_k8s_config()
@@ -40,7 +38,6 @@ def is_logged_in():
 
 
 def get_openshift_token():
-    # type: () -> Optional[str]
     """Get the Bearer token from kubeconfig."""
     try:
         _ensure_k8s_config()
@@ -54,7 +51,6 @@ def get_openshift_token():
 
 
 def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
-    # type: (str) -> str
     """Discover KubeArchive API URL from cluster ConfigMap.
 
     Falls back to a known URL if the ConfigMap is not accessible.
@@ -74,7 +70,6 @@ def discover_kubearchive_api_url(fallback_url=KUBEARCHIVE_FALLBACK_URL):
 
 
 def discover_openshift_api_url(fallback_url=""):
-    # type: (str) -> str
     """Discover the OpenShift API server URL from kubeconfig."""
     try:
         _ensure_k8s_config()
@@ -85,7 +80,6 @@ def discover_openshift_api_url(fallback_url=""):
 
 
 def create_authenticated_session(token):
-    # type: (str) -> requests.Session
     """Create an HTTP session with Bearer token authentication."""
     session = requests.Session()
     session.headers.update({

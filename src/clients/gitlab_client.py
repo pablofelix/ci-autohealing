@@ -26,7 +26,6 @@ class GitLabClient:
     DEFAULT_API_BASE = os.environ.get('GITLAB_API_BASE', '')
 
     def __init__(self, token=None, api_base=None):
-        # type: (Optional[str], Optional[str]) -> None
         self._api_base = api_base or self.DEFAULT_API_BASE
         self._session = requests.Session()
         self._session.headers.update({
@@ -37,7 +36,6 @@ class GitLabClient:
             self._session.headers['PRIVATE-TOKEN'] = token
 
     def _get(self, path, params=None):
-        # type: (str, Optional[Dict]) -> Optional[requests.Response]
         url = '{}{}'.format(self._api_base, path)
         try:
             response = self._session.get(url, params=params, timeout=30)
@@ -58,11 +56,9 @@ class GitLabClient:
             return None
 
     def _encode_project(self, project):
-        # type: (str) -> str
         return quote(project, safe='')
 
     def get_file_content(self, project, file_path, ref='main'):
-        # type: (str, str, str) -> Optional[str]
         """Fetch a single file's decoded content from a GitLab repository.
 
         Args:
@@ -100,7 +96,6 @@ class GitLabClient:
         return content or None
 
     def list_directory(self, project, path, ref='main'):
-        # type: (str, str, str) -> Optional[List[Dict[str, Any]]]
         """List files in a directory within a GitLab repository.
 
         Args:

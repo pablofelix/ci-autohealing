@@ -26,12 +26,10 @@ class PyxisClient:
     PROD_URL = os.environ.get('PYXIS_PROD_URL', '')
 
     def __init__(self, target='prod'):
-        # type: (str) -> None
         self._base_url = self.STAGE_URL if target == 'stage' else self.PROD_URL
         self._target = target
 
     def _get(self, path, params=None):
-        # type: (str, Optional[Dict]) -> Optional[Dict]
         url = '{}{}'.format(self._base_url, path)
         if params:
             url = '{}?{}'.format(url, urlencode(params))
@@ -54,7 +52,6 @@ class PyxisClient:
             return None
 
     def check_image(self, registry, repository, digest):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         """Check if an image exists in Pyxis by repository and manifest list digest.
 
         Snapshot digests are manifest list (multi-arch) digests, so we search
@@ -72,7 +69,6 @@ class PyxisClient:
         return None
 
     def check_images_batch(self, images):
-        # type: (List[Dict[str, str]]) -> List[Dict[str, str]]
         """Check multiple images against Pyxis.
 
         Args:
@@ -98,7 +94,6 @@ class PyxisClient:
         return results
 
     def get_advisories(self, filter_str=None, page_size=10):
-        # type: (Optional[str], int) -> List[Dict[str, Any]]
         """Query Red Hat advisories from Pyxis.
 
         Args:

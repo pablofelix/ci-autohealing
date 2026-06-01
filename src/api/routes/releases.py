@@ -22,7 +22,6 @@ router = APIRouter(tags=["releases"])
 
 
 def _db():
-    # type: () -> DatabaseConnection
     cfg = CollectorConfig.from_env()
     return DatabaseConnection(cfg.db)
 

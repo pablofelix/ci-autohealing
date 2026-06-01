@@ -18,7 +18,6 @@ class LangfuseTracker:
     """
 
     def __init__(self, enabled=True):
-        # type: (bool,) -> None
         self.enabled = enabled
         self._langfuse = None
 
@@ -31,7 +30,6 @@ class LangfuseTracker:
                 self.enabled = False
 
     def create_trace(self, name, input_data=None, metadata=None):
-        # type: (str, Optional[Dict], Optional[Dict]) -> Optional[Any]
         """Create a trace for an analysis run.
 
         Args:
@@ -58,7 +56,6 @@ class LangfuseTracker:
 
     def record_generation(self, trace, name, model, prompt, completion,
                          input_tokens, output_tokens, duration_ms):
-        # type: (Any, str, str, str, str, int, int, int) -> None
         """Record an LLM generation within a trace.
 
         Args:
@@ -94,7 +91,6 @@ class LangfuseTracker:
             pass
 
     def end_trace(self, trace, output=None):
-        # type: (Any, Optional[Dict]) -> None
         """Finalize trace with output data.
 
         Args:
@@ -110,7 +106,6 @@ class LangfuseTracker:
             pass
 
     def flush(self):
-        # type: () -> None
         """Flush pending events to Langfuse server.
 
         Should be called at the end of an analysis run to ensure all events

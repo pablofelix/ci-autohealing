@@ -57,7 +57,6 @@ class JiraConfig:
 
     @property
     def auth(self):
-        # type: () -> tuple
         return (self.email, self.token)
 
 

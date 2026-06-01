@@ -25,7 +25,6 @@ class ConformaViolationCollector:
 
     def __init__(self, config, db=None, conforma_repo=None, kubearchive=None, k8s=None,
                  tekton_results=None):
-        # type: (CollectorConfig, ...) -> None
         self.config = config
         if db is None:
             db = DatabaseConnection(config.db)
@@ -38,9 +37,8 @@ class ConformaViolationCollector:
         self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
 
     def _collect_conforma_latest(self, pipelineruns):
-        # type: (List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]
         """Build a map of (component, scenario) -> latest conforma PipelineRun info."""
-        latest_per_key = {}  # type: Dict[Tuple[str, str], Dict[str, Any]]
+        latest_per_key = {}
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
             comp = labels.get('appstudio.openshift.io/component')
@@ -76,7 +74,6 @@ class ConformaViolationCollector:
         return latest_per_key
 
     def get_conforma_pipelineruns(self):
-        # type: () -> Dict[Tuple[str, str], Dict[str, Any]]
         """Get latest Conforma PipelineRun status per (component, scenario).
 
         Queries both KubeArchive/cluster and Tekton Results, merging by
@@ -116,16 +113,13 @@ class ConformaViolationCollector:
         return latest_per_key
 
     def get_verify_taskrun(self, pr_data):
-        # type: (Dict[str, Any]) -> Optional[str]
         return extract_verify_taskrun_name(pr_data)
 
     def get_step_logs(self, pod_name, step_name):
-        # type: (str, str) -> Optional[str]
         container = "step-{}".format(step_name)
         return self.kubearchive.get_pod_logs(pod_name, container=container)
 
     def extract_violation_details(self, pr_name, pr_data):
-        # type: (str, Dict[str, Any]) -> Dict[str, Any]
         """Extract violation details from Conforma PipelineRun logs.
 
         Tries KubeArchive first, falls back to Tekton Results for logs.
@@ -198,7 +192,6 @@ class ConformaViolationCollector:
 
     @staticmethod
     def _extract_step_section(logs, step_name):
-        # type: (str, str) -> Optional[str]
         """Extract a specific step's output from combined TaskRun logs."""
         import re
         pattern = r'===== TaskRun: [^=]*/ Step: {step}\b[^=]*=====(.*?)(?=\n===== |$)'.format(
@@ -208,17 +201,14 @@ class ConformaViolationCollector:
         return match.group(1).strip() if match else None
 
     def get_component_repo_url(self, component_name):
-        # type: (str) -> str
         meta = self.k8s.get_component_metadata(component_name)
         return meta['repository_url'] if meta else ''
 
     def extract_component_info(self, pr_data, component_name):
-        # type: (Dict[str, Any], str) -> Dict[str, Any]
         repo_url_fallback = self.get_component_repo_url(component_name)
         return extract_conforma_component_info(pr_data, component_name, repo_url_fallback)
 
     def save_to_db(self, component, scenario, pr_name, pr_uid, violations, comp_info):
-        # type: (str, str, str, str, Dict[str, Any], Dict[str, Any]) -> bool
         """Save violation to DB. Detects future scenarios by -future suffix."""
         try:
             # Detect if this is a future-policy scenario (informational, non-blocking)
@@ -241,7 +231,6 @@ class ConformaViolationCollector:
             return False
 
     def get_conforma_history(self, component_name, limit=10):
-        # type: (str, int) -> List[Dict[str, Any]]
         """Get conforma test history for a component from Tekton Results.
 
         Returns list of dicts with: name, timestamp, scenario, status, violations_count.
@@ -285,13 +274,11 @@ class ConformaViolationCollector:
         return results
 
     def resolve_fixed_components(self, currently_failing, all_seen):
-        # type: (Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int
         return self.conforma_repo.resolve_fixed_components(
             self.config.k8s.application_name, currently_failing, all_seen
         )
 
     def _resolve_deleted_components(self):
-        # type: () -> int
         """Auto-resolve conforma violations for components deleted from the cluster."""
         app = self.config.k8s.application_name
         unresolved = self.conforma_repo.find_unresolved_component_names(app)
@@ -305,7 +292,6 @@ class ConformaViolationCollector:
         return resolved_count
 
     def run(self):
-        # type: () -> Dict[str, Any]
         start_time = time.time()
 
         logger.info("=" * 70)

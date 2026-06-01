@@ -40,7 +40,6 @@ KONFLUX_CENTRAL_REPO = os.environ.get('KONFLUX_CENTRAL_REPO', '')
 
 
 def conforma_branch_name(component, conforma_id):
-    # type: (str, int) -> str
     return 'ci-autohealing/conforma/{}/{}'.format(component, conforma_id)
 
 
@@ -58,7 +57,6 @@ _FLOATING_REF_RE = re.compile(
 
 
 def load_failure_and_analysis(db_conn, failure_id=None, component=None, application=None):
-    # type: (DatabaseConnection, Optional[int], Optional[str], Optional[str]) -> Tuple[Optional[Dict], Optional[Dict]]
     """Load build failure, AI analysis, pattern data, and resolution history.
 
     Returns (failure_row, analysis_row). Either can be None.
@@ -131,7 +129,6 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
 
 
 def determine_target_repo(failure, analysis, fix_response):
-    # type: (Dict, Optional[Dict], Dict) -> str
     """Return the repo URL to target for the PR."""
     if fix_response.get('target_repo') == 'konflux-central':
         return KONFLUX_CENTRAL_REPO
@@ -139,7 +136,6 @@ def determine_target_repo(failure, analysis, fix_response):
 
 
 def fetch_files_for_fix(github_client, repo_url, branch, recommended_files):
-    # type: (GitHubClient, str, str, List[str]) -> Dict[str, Optional[str]]
     """Fetch current content of files Claude needs to see."""
     parsed = parse_github_repo(repo_url)
     if not parsed:
@@ -161,7 +157,6 @@ def fetch_files_for_fix(github_client, repo_url, branch, recommended_files):
 
 
 def generate_unified_diff(path, old_content, new_content):
-    # type: (str, str, str) -> str
     """Generate a unified diff between old and new file content."""
     old_lines = (old_content or '').splitlines()
     new_lines = (new_content or '').splitlines()
@@ -177,7 +172,6 @@ def generate_unified_diff(path, old_content, new_content):
 
 
 def _format_pattern_section(analysis):
-    # type: (Dict) -> List[str]
     """Format known pattern data for prompt injection."""
     if not analysis or not analysis.get('pattern_name'):
         return []
@@ -199,7 +193,6 @@ def _format_pattern_section(analysis):
 
 
 def _format_enrichment_section(enriched_context):
-    # type: (Optional[Dict]) -> List[str]
     """Format enriched context (dependency changes, related failures)."""
     if not enriched_context or not isinstance(enriched_context, dict):
         return []
@@ -229,7 +222,6 @@ def _format_enrichment_section(enriched_context):
 
 
 def _format_previous_attempts(attempts):
-    # type: (List[Dict]) -> List[str]
     """Format previous resolution attempts for prompt injection."""
     if not attempts:
         return []
@@ -253,7 +245,6 @@ def _format_previous_attempts(attempts):
 
 
 def build_fix_prompt(failure, analysis, file_contents):
-    # type: (Dict, Optional[Dict], Dict[str, Optional[str]]) -> str
     """Build the user message for Claude's fix generation.
 
     Includes enriched context, pattern data, and resolution history
@@ -310,7 +301,6 @@ def build_fix_prompt(failure, analysis, file_contents):
 # ---------------------------------------------------------------------------
 
 def run_pr_mode(config, component, failure_id, application, execute=False):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool) -> int
     """Fetch files, call Claude, print unified diff.
 
     With execute=True: creates branch, pushes files, opens PR on GitHub.
@@ -520,7 +510,6 @@ def run_pr_mode(config, component, failure_id, application, execute=False):
 # ---------------------------------------------------------------------------
 
 def load_conforma_and_analysis(db_conn, conforma_id=None, component=None, application=None):
-    # type: (DatabaseConnection, Optional[int], Optional[str], Optional[str]) -> Tuple[Optional[Dict], Optional[Dict]]
     """Load conforma_results row and any associated AI analysis.
 
     Returns (conforma_row, analysis_row). Either can be None.
@@ -574,7 +563,6 @@ def load_conforma_and_analysis(db_conn, conforma_id=None, component=None, applic
 
 
 def parse_deprecated_task_fixes(violation_details):
-    # type: (Any) -> List[Dict[str, str]]
     """Extract old→new bundle ref pairs from policy_deprecated_task violation details.
 
     violation_details is a JSONB object with structure:
@@ -621,7 +609,6 @@ def parse_deprecated_task_fixes(violation_details):
 
 
 def apply_hermetic_fix(content):
-    # type: (str) -> str
     """Return content with hermetic pipeline param set to 'true'.
 
     Handles both 'value: false' and 'value: "false"' forms.
@@ -632,12 +619,10 @@ def apply_hermetic_fix(content):
 
 
 def _has_prefetch_configured(content):
-    # type: (str) -> bool
     return bool(re.search(r'-\s*name:\s*prefetch-dependencies\b', content))
 
 
 def apply_sbom_vendor_label_fix(content):
-    # type: (str) -> str
     """Add 'LABEL vendor="Red Hat, Inc."' to a Containerfile if not already present.
 
     Inserts after the last existing LABEL line, or before the first
@@ -669,7 +654,6 @@ def apply_sbom_vendor_label_fix(content):
 
 
 def apply_rpm_repo_id_fix(content):
-    # type: (str) -> str
     """Replace generic RPM repo section IDs with arch-parameterised format.
 
     [ubi-9-baseos-rpms] → [ubi-9-for-$basearch-baseos-rpms]
@@ -683,7 +667,6 @@ def apply_rpm_repo_id_fix(content):
 
 
 def find_floating_bundle_refs(content):
-    # type: (str) -> List[Tuple[str, str, str]]
     """Return deduplicated list of (full_ref, repo_path, tag) for floating quay.io refs."""
     seen = set()
     results = []
@@ -696,7 +679,6 @@ def find_floating_bundle_refs(content):
 
 
 def resolve_quay_digest(repo_path, tag):
-    # type: (str, str) -> str
     """Resolve a quay.io tag to its content-addressable digest via the v2 registry API.
 
     Returns 'sha256:...' string, or empty string if resolution fails.
@@ -722,7 +704,6 @@ def _push_pr_and_record(github, db_conn, conforma, owner, repo,
                         branch_name, changed_files, make_commit_msg,
                         pr_title, pr_body, changes_description,
                         attempted_by='ic-fix'):
-    # type: (...) -> int
     """Create branch, push changed_files, open PR, record resolution attempt."""
     base_sha = github.get_ref_sha(owner, repo, _BASE_BRANCH)
     if not base_sha:
@@ -777,7 +758,6 @@ def _push_pr_and_record(github, db_conn, conforma, owner, repo,
 
 
 def run_conforma_hermetic_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Fix policy_hermetic_build: set hermetic=true in .tekton YAML files.
 
     Searches konflux-central first (shared pipeline repo), then the component's
@@ -921,7 +901,6 @@ def run_conforma_hermetic_mode(config, component, conforma_id, application, exec
 
 
 def run_conforma_sbom_vendor_label_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Fix policy_sbom_vendor_label: add LABEL vendor="Red Hat, Inc." to Containerfile."""
     if not config.github_token:
         print("Error: GITHUB_TOKEN not set in .env", file=sys.stderr)
@@ -1014,7 +993,6 @@ def run_conforma_sbom_vendor_label_mode(config, component, conforma_id, applicat
 
 
 def run_conforma_rpm_repo_id_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Fix policy_rpm_repository: replace generic RPM repo IDs with arch-specific format.
 
     Searches rpms.in.yaml and any *.repo files in the component's repository root.
@@ -1118,7 +1096,6 @@ def run_conforma_rpm_repo_id_mode(config, component, conforma_id, application, e
 
 
 def parse_untrusted_image_refs(violation_details):
-    # type: (Any) -> List[str]
     """Extract old image refs from policy_untrusted_image violation details.
 
     Returns a list of full refs (quay.io/repo:tag@sha256:digest) that were
@@ -1158,7 +1135,6 @@ def parse_untrusted_image_refs(violation_details):
 
 
 def _refresh_pinned_ref(old_ref):
-    # type: (str) -> Optional[str]
     """Re-resolve a pinned ref to its tag's current digest.
 
     Given quay.io/repo:tag@sha256:OLD (or oci://quay.io/...), resolve the
@@ -1183,7 +1159,6 @@ def _refresh_pinned_ref(old_ref):
 
 
 def run_conforma_untrusted_image_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Fix policy_untrusted_image: update outdated build image refs to fresh digests.
 
     Parses flagged refs from violation_details, re-resolves each via the quay.io
@@ -1328,7 +1303,6 @@ def run_conforma_untrusted_image_mode(config, component, conforma_id, applicatio
 
 
 def run_conforma_unpinned_task_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Fix policy_unpinned_task: pin floating quay.io task bundle refs to sha256 digests.
 
     Fetches .tekton/*.yaml from the component repo, calls the quay.io v2 API to
@@ -1408,7 +1382,6 @@ def run_conforma_unpinned_task_mode(config, component, conforma_id, application,
 
     # Pin floating refs in each file using re.sub to avoid double-pinning
     def _pin_ref(m):
-        # type: (...) -> str
         digest = digest_map.get((m.group(1), m.group(2)))
         return '{}@{}'.format(m.group(0), digest) if digest else m.group(0)
 
@@ -1495,7 +1468,6 @@ def run_conforma_unpinned_task_mode(config, component, conforma_id, application,
 
 
 def run_conforma_pr_mode(config, component, conforma_id, application, execute=False, attempted_by='ic-fix'):
-    # type: (CollectorConfig, Optional[str], Optional[int], str, bool, str) -> int
     """Generate a PR that fixes policy_deprecated_task conforma violations.
 
     Deterministic fix: parse old→new bundle refs from violation_details,
@@ -1630,7 +1602,6 @@ def run_conforma_pr_mode(config, component, conforma_id, application, execute=Fa
 # ---------------------------------------------------------------------------
 
 def _open_tty():
-    # type: () -> Any
     """Return a readable file for interactive prompts.
 
     When stdin is a pipe (ticket text), input() reads from stdin which
@@ -1646,7 +1617,6 @@ def _open_tty():
 
 
 def _prompt(tty, msg):
-    # type: (Any, str) -> str
     """Print msg and read one line from tty (not stdin)."""
     print(msg, end='', flush=True)
     try:
@@ -1656,7 +1626,6 @@ def _prompt(tty, msg):
 
 
 def run_jira_mode(config, component, summary=None):
-    # type: (CollectorConfig, str, Optional[str]) -> int
     """Read ticket from stdin, interactive edit loop, POST to Jira."""
     if not config.llm:
         print("Error: LLM not configured — set ANTHROPIC_API_KEY in .env", file=sys.stderr)
@@ -1754,7 +1723,6 @@ def run_jira_mode(config, component, summary=None):
 # ---------------------------------------------------------------------------
 
 def main():
-    # type: () -> int
     parser = argparse.ArgumentParser(description='CI failure fix generator')
     parser.add_argument('--mode', choices=['pr', 'jira'], required=True)
     parser.add_argument('--component', help='Component name')

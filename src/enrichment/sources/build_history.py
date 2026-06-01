@@ -35,7 +35,6 @@ class BuildHistorySource(ContextSource):
         return 60
 
     def fetch(self, failure):
-        # type: (Dict[str, Any]) -> Optional[Dict[str, Any]]
         component = failure.get('component_name', '')
         application = failure.get('application', '') or self.config.k8s.application_name
         fail_sha = failure.get('commit_sha')
@@ -69,7 +68,6 @@ class BuildHistorySource(ContextSource):
         }
 
     def _find_last_success(self, application, component, fail_sha):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         try:
             from clients.tekton_results import TektonResultsClient
             ns = self.config.k8s.namespace
@@ -102,7 +100,6 @@ class BuildHistorySource(ContextSource):
         return None
 
     def _compare_commits(self, repo_url, base_sha, head_sha):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         if self._github_client is None:
             token = getattr(self.config, 'github_token', None) or os.environ.get('GITHUB_TOKEN')
             if not token:
@@ -165,7 +162,6 @@ class BuildHistorySource(ContextSource):
             return None
 
     def _parse_repo(self, repo_url):
-        # type: (str) -> tuple
         url = repo_url.rstrip('/')
         if url.endswith('.git'):
             url = url[:-4]

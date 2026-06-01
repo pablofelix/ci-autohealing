@@ -212,7 +212,7 @@ class BatchAnalysisService:
             'conforma_pending': conforma_pending,
             'total_pending': total_pending,
             'eta_hours': round(eta_hours, 1)
-        }  # type: Dict[str, Any]
+        }
 
         if self.all_apps:
             apps = self._discover_apps_with_pending()

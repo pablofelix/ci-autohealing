@@ -21,7 +21,6 @@ logger = setup_logger(__name__)
 
 
 def benchmark_pipelinerun_query(component_name, namespace):
-    # type: (str, str) -> Dict[str, Any]
     """Compare query speed for a specific component."""
     label = f'appstudio.openshift.io/component={component_name}'
 
@@ -83,7 +82,6 @@ def benchmark_pipelinerun_query(component_name, namespace):
 
 
 def benchmark_logs_availability(pr_name, namespace):
-    # type: (str, str) -> Dict[str, Any]
     """Compare log availability for a specific PipelineRun."""
     config = CollectorConfig.from_env()
     kubearchive = KubeArchiveClient(

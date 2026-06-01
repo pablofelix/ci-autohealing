@@ -39,7 +39,6 @@ def _get_connection():
 
 
 def check_db():
-    # type: () -> bool
     global _db_available
     if _db_available is not None:
         return _db_available
@@ -52,7 +51,6 @@ def check_db():
 
 
 def require_db():
-    # type: () -> bool
     if not check_db():
         from cli.formatting import red, cyan
         print(red('Error: database is not running ({})'.format(_DB_CONTAINER)),
@@ -64,7 +62,6 @@ def require_db():
 
 
 def sql(query):
-    # type: (str) -> Optional[str]
     """Run a query and return the first column of the first row (like bash sql())."""
     try:
         conn = _get_connection()
@@ -79,7 +76,6 @@ def sql(query):
 
 
 def sql_rows(query):
-    # type: (str) -> List[Tuple]
     """Run a query and return all rows as a list of tuples."""
     try:
         conn = _get_connection()
@@ -91,7 +87,6 @@ def sql_rows(query):
 
 
 def sql_dicts(query):
-    # type: (str) -> List[Dict[str, Any]]
     """Run a query and return rows as a list of dicts (column names as keys)."""
     try:
         conn = _get_connection()
@@ -103,7 +98,6 @@ def sql_dicts(query):
 
 
 def sql_table(query):
-    # type: (str) -> None
     """Run a query and print results as a formatted table (like psql output)."""
     try:
         conn = _get_connection()
@@ -119,7 +113,6 @@ def sql_table(query):
 
 
 def sql_execute(query):
-    # type: (str) -> int
     """Run a write query and return rows affected."""
     try:
         conn = _get_connection()
@@ -147,13 +140,11 @@ def get_repo(repo_class):
 
 
 def print_table(headers, rows):
-    # type: (list, list) -> None
     """Print a formatted table from headers + rows."""
     _print_table(headers, rows)
 
 
 def _print_table(headers, rows):
-    # type: (List[str], List[Tuple]) -> None
     """Print a psql-style table."""
     if not rows:
         print('(0 rows)')
@@ -179,7 +170,6 @@ def _print_table(headers, rows):
 
 
 def _fmt_cell(value):
-    # type: (Any) -> str
     if value is None:
         return ''
     return str(value)

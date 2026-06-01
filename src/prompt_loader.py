@@ -13,7 +13,6 @@ _PROMPTS_DIR = Path(__file__).parent.parent / 'prompts'
 
 
 def load_prompt(name):
-    # type: (str) -> str
     """Return the body of prompts/<name>.md with frontmatter stripped."""
     path = _PROMPTS_DIR / f'{name}.md'
     if not path.exists():

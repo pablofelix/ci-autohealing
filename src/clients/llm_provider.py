@@ -38,7 +38,6 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def create_message(self, system, user_content, tools=None, max_tokens=4096):
-        # type: (str, str, Optional[List[Dict]], int) -> LLMResponse
         """Send a message to the LLM and return a structured response.
 
         Args:
@@ -53,7 +52,6 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def model_name(self):
-        # type: () -> str
         """Return the model identifier for logging/tracking.
 
         Used in ai_analysis.model_used column and Langfuse traces.
@@ -61,7 +59,6 @@ class LLMProvider(ABC):
 
 
 def create_llm_provider(config):
-    # type: (Any) -> LLMProvider
     """Create LLM provider from configuration.
 
     Factory function with lazy imports - only loads the SDK that's actually

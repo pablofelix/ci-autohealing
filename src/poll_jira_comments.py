@@ -35,7 +35,6 @@ class JiraCommentPoller:
     """Poll Jira tickets for new comments and generate AI draft replies."""
 
     def __init__(self, config, db=None, draft_repo=None, jira=None, llm=None):
-        # type: (CollectorConfig, ...) -> None
         if db is None:
             db = DatabaseConnection(config.db)
         self._db = db
@@ -60,7 +59,6 @@ class JiraCommentPoller:
         self._llm = llm
 
     def get_active_jira_keys(self):
-        # type: () -> List[str]
         """Return distinct jira_keys from unresolved build and conforma failures."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -75,7 +73,6 @@ class JiraCommentPoller:
                 return [row[0] for row in cur.fetchall()]
 
     def get_failure_context(self, jira_key):
-        # type: (str,) -> Optional[Dict[str, Any]]
         """Fetch failure details and AI analysis for the given jira_key.
 
         Tries build_failures first, then conforma_results.
@@ -146,7 +143,6 @@ class JiraCommentPoller:
         return None
 
     def build_user_prompt(self, comment, failure_context, jira_key):
-        # type: (Dict[str, Any], Optional[Dict[str, Any]], str) -> str
         """Build the user prompt for the reply drafter LLM."""
         author = (comment.get('author') or {}).get('displayName', 'Unknown')
         body = comment.get('body', '').strip()
@@ -219,7 +215,6 @@ class JiraCommentPoller:
         return "\n\n".join(sections)
 
     def _notify(self, jira_key, author, jira_url):
-        # type: (str, str, str) -> None
         """Send a desktop notification via notify-send."""
         summary = "Jira reply drafted: {}".format(jira_key)
         body = "New comment from {}. Draft ready in `ic jira inbox`.".format(author)
@@ -233,7 +228,6 @@ class JiraCommentPoller:
             logger.debug("notify-send not available or timed out")
 
     def run(self):
-        # type: () -> Dict[str, int]
         """Poll all active Jira tickets and draft replies for new comments."""
         start = time.time()
         stats = {'tickets': 0, 'new_comments': 0, 'drafted': 0, 'errors': 0}

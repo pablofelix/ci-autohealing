@@ -16,7 +16,6 @@ class AnthropicDirectProvider(LLMProvider):
     """
 
     def __init__(self, api_key=None, model='claude-sonnet-4-5-20250929'):
-        # type: (str, str) -> None
         """Initialize Anthropic direct provider.
 
         Args:
@@ -27,7 +26,6 @@ class AnthropicDirectProvider(LLMProvider):
         self._client = Anthropic(api_key=api_key)
 
     def create_message(self, system, user_content, tools=None, max_tokens=4096):
-        # type: (str, str, ...) -> LLMResponse
         """Call Claude via the Anthropic API and return standardized response."""
         kwargs = {
             'model': self._model,
@@ -65,6 +63,5 @@ class AnthropicDirectProvider(LLMProvider):
         )
 
     def model_name(self):
-        # type: () -> str
         """Return model identifier for tracking."""
         return self._model

@@ -24,7 +24,6 @@ class AIAnalysisRepository:
                        langfuse_trace_url=None, langfuse_observation_id=None,
                        build_failure_id=None, conforma_result_id=None,
                        error_pattern_id=None):
-        # type: (...) -> int
         """Insert AI analysis for either build failure or Conforma violation.
 
         Uses a transaction: INSERT into ai_analysis + UPDATE source table.
@@ -124,7 +123,6 @@ class AIAnalysisRepository:
             return analysis_id
 
     def get_analysis_for_failure(self, build_failure_id):
-        # type: (int,) -> Optional[Dict[str, Any]]
         """Get existing analysis for a failure (avoid re-analyzing).
 
         Args:
@@ -167,7 +165,6 @@ class AIAnalysisRepository:
             }
 
     def increment_attempts(self, build_failure_id=None, conforma_result_id=None):
-        # type: (Optional[int], Optional[int]) -> int
         """Increment ai_attempts before an LLM call. Returns the new count.
 
         Called once per analysis attempt so callers can circuit-break after
@@ -194,7 +191,6 @@ class AIAnalysisRepository:
             return row[0] if row else 1
 
     def mark_skipped(self, reason, build_failure_id=None, conforma_result_id=None):
-        # type: (str, Optional[int], Optional[int]) -> None
         """Permanently exclude a row from the analysis queue.
 
         Sets ai_skip_reason and ai_analyzed=TRUE so the pending queries
@@ -219,7 +215,6 @@ class AIAnalysisRepository:
             conn.commit()
 
     def skip_no_logs_timeouts(self, application, timeout_days=7):
-        # type: (str, int) -> int
         """Mark build failures that never got logs after timeout_days as skipped.
 
         These rows would otherwise stay in the pending queue forever.
@@ -243,7 +238,6 @@ class AIAnalysisRepository:
             return count
 
     def get_status_counts(self, application):
-        # type: (str,) -> Dict[str, Any]
         """Return all counts needed for ic ai status in a single query per type."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -299,7 +293,6 @@ class AIAnalysisRepository:
             return {'build': build, 'conforma': conforma}
 
     def get_pending_failures(self, application=None, limit=5, component_filter=None, force=False):
-        # type: (Optional[str], int, Optional[str], bool) -> List[Dict[str, Any]]
         """Get failures awaiting AI analysis.
 
         Criteria: ai_analyzed=FALSE (unless force=True), is_resolved=FALSE,
@@ -401,7 +394,6 @@ class AIAnalysisRepository:
             return results
 
     def get_pending_count(self, application=None):
-        # type: (Optional[str],) -> int
         """Count failures awaiting AI analysis.
 
         Args:
@@ -435,7 +427,6 @@ class AIAnalysisRepository:
             return cursor.fetchone()[0]
 
     def get_pending_conforma_violations(self, application=None, limit=5, component_filter=None, force=False):
-        # type: (Optional[str], int, Optional[str], bool) -> List[Dict[str, Any]]
         """Get Conforma violations awaiting AI analysis.
 
         Criteria: ai_analyzed=FALSE (unless force=True), is_resolved=FALSE,
@@ -534,7 +525,6 @@ class AIAnalysisRepository:
             return results
 
     def get_pending_conforma_count(self, application=None):
-        # type: (Optional[str],) -> int
         """Count Conforma violations awaiting AI analysis.
 
         Args:
@@ -573,7 +563,6 @@ class AIAnalysisRepository:
                                 tokens_used, cost_usd, analysis_duration,
                                 analysis_json, langfuse_trace_id=None,
                                 **kwargs):
-        # type: (...) -> int
         """Insert AI analysis for a release failure.
 
         Unlike build/conforma analyses which reference source table rows,
@@ -605,7 +594,6 @@ class AIAnalysisRepository:
             return analysis_id
 
     def get_analysis_for_release(self, release_name):
-        # type: (str,) -> Optional[Dict[str, Any]]
         """Get existing analysis for a release (avoid re-analyzing)."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -641,7 +629,6 @@ class AIAnalysisRepository:
             }
 
     def get_extended_status(self, application):
-        # type: (str,) -> Dict
         """Full AI status for CLI display: counts, auto-fixable, cost."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -705,7 +692,6 @@ class AIAnalysisRepository:
             return {'build': build, 'conforma': conforma, 'total_cost': total_cost}
 
     def get_recent_analyses(self, application, days=7, limit=10):
-        # type: (str, int, int) -> list
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -729,7 +715,6 @@ class AIAnalysisRepository:
             ]
 
     def get_category_stats(self, application, days=30):
-        # type: (str, int) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -791,7 +776,6 @@ class AIAnalysisRepository:
             }
 
     def get_cost_summary(self, days=30):
-        # type: (int,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -805,7 +789,6 @@ class AIAnalysisRepository:
             return {'analyses': row[0], 'tokens': row[1], 'cost_usd': row[2]}
 
     def get_analysis_by_component(self, component, application, analysis_type='auto'):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         """Latest AI analysis for a component. Used by MCP/API."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -857,7 +840,6 @@ class AIAnalysisRepository:
             return None
 
     def get_conforma_queue(self, application):
-        # type: (str,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""

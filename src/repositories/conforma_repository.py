@@ -11,11 +11,9 @@ class ConformaRepository:
     """All SQL operations on the conforma_results table."""
 
     def __init__(self, db):
-        # type: (DatabaseConnection,) -> None
         self.db = db
 
     def find_unresolved_component_names(self, application, include_future=True):
-        # type: (str, bool) -> Set[str]
         """Find unresolved components. By default includes both current and future scenarios.
 
         Args:
@@ -47,7 +45,6 @@ class ConformaRepository:
 
     def upsert_violation(self, application, component, scenario,
                          pr_name, pr_uid, violations, comp_info, is_future=False):
-        # type: (str, str, str, str, str, Dict[str, Any], Dict[str, Any], bool) -> bool
         """Insert or update a Conforma violation. Returns True on success.
 
         Args:
@@ -153,7 +150,6 @@ class ConformaRepository:
             return False
 
     def get_violation_details(self, component, application):
-        # type: (str, str) -> Optional[Dict[str, Any]]
         """Full violation details for a component. Used by MCP/API for describe views."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -189,7 +185,6 @@ class ConformaRepository:
             return resolve_blob_fields(result, fields=('violation_details',))
 
     def resolve_fixed_components(self, application, currently_failing, all_seen):
-        # type: (str, Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int
         """Mark (component, scenario) pairs as resolved when we observe them passing.
 
         Only resolves pairs that were seen in the current scan AND whose latest
@@ -228,7 +223,6 @@ class ConformaRepository:
             return 0
 
     def resolve_deleted_component(self, component_name, application):
-        # type: (str, str) -> int
         """Resolve all violations for a component that was deleted from the cluster."""
         try:
             with self.db.connection() as conn:

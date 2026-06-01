@@ -20,7 +20,6 @@ class VertexAIProvider(LLMProvider):
     """
 
     def __init__(self, project_id, region='us-east5', model='claude-sonnet-4-5-20250929'):
-        # type: (str, str, str) -> None
         """Initialize Vertex AI provider.
 
         Args:
@@ -37,7 +36,6 @@ class VertexAIProvider(LLMProvider):
         )
 
     def create_message(self, system, user_content, tools=None, max_tokens=4096):
-        # type: (str, str, ...) -> LLMResponse
         """Call Claude via Vertex AI and return standardized response.
 
         Uses the same messages.create() API as direct Anthropic - only
@@ -79,6 +77,5 @@ class VertexAIProvider(LLMProvider):
         )
 
     def model_name(self):
-        # type: () -> str
         """Return model identifier for tracking."""
         return self._model

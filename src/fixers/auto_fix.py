@@ -55,7 +55,6 @@ _FIXER_BY_CATEGORY = {
 
 
 def _get_candidates(db_conn, min_confidence, max_count):
-    # type: (DatabaseConnection, float, int) -> list
     """Query for conforma violations eligible for autonomous fixing."""
     with db_conn.connection() as conn:
         with conn.cursor() as cur:
@@ -90,7 +89,6 @@ def _get_candidates(db_conn, min_confidence, max_count):
 
 
 def _branch_exists(github, repo_url, branch):
-    # type: (GitHubClient, str, str) -> bool
     """Return True if the named branch already exists in the GitHub repo."""
     parsed = parse_github_repo(repo_url)
     if not parsed:
@@ -105,7 +103,6 @@ def _branch_exists(github, repo_url, branch):
 
 
 def main():
-    # type: () -> int
     if os.environ.get('AUTONOMOUS_MODE', '').lower() != 'true':
         logger.error("AUTONOMOUS_MODE is not set to 'true' — refusing to run")
         return 1

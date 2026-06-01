@@ -26,7 +26,6 @@ class JiraClient:
     """
 
     def __init__(self, base_url, email, token, project):
-        # type: (str, str, str, str) -> None
         self._base_url = base_url.rstrip('/')
         self._project = project
         self._session = requests.Session()
@@ -38,12 +37,10 @@ class JiraClient:
         })
 
     def _api(self, path):
-        # type: (str) -> str
         return '{}/rest/api/{}/{}'.format(self._base_url, JIRA_API_VERSION, path)
 
     def create_issue(self, summary, description_text, issue_type='Bug',
                      priority=None, labels=None, components=None):
-        # type: (str, str, str, Optional[str], Optional[List[str]], Optional[List[str]]) -> Optional[Dict[str, Any]]
         """Create a Jira issue and return the created issue dict (key, id, url).
 
         Args:
@@ -104,7 +101,6 @@ class JiraClient:
         return None
 
     def _get(self, path):
-        # type: (str,) -> Optional[Any]
         """GET request returning parsed JSON, or None on error."""
         try:
             resp = self._session.get(self._api(path), timeout=30)
@@ -120,7 +116,6 @@ class JiraClient:
         return None
 
     def get_comments(self, jira_key):
-        # type: (str,) -> List[Dict[str, Any]]
         """Return all comments for a Jira issue, newest-last.
 
         Each dict contains: id, author (displayName, emailAddress), body, created.
@@ -132,6 +127,5 @@ class JiraClient:
         return data.get('comments', [])
 
     def get_comment(self, jira_key, comment_id):
-        # type: (str, int) -> Optional[Dict[str, Any]]
         """Return a single comment dict by ID, or None if not found."""
         return self._get('issue/{}/comment/{}'.format(jira_key, comment_id))

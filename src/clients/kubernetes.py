@@ -14,11 +14,9 @@ class KubernetesClient(PipelineRunSource):
     """
 
     def __init__(self, namespace=None):
-        # type: (str,) -> None
         self.namespace = namespace
 
     def get_pipelinerun(self, name, namespace=None):
-        # type: (str, Optional[str]) -> Optional[Dict[str, Any]]
         ns = namespace or self.namespace
         try:
             _ensure_k8s_config()
@@ -32,7 +30,6 @@ class KubernetesClient(PipelineRunSource):
             return None
 
     def get_taskrun(self, name, namespace=None):
-        # type: (str, Optional[str]) -> Optional[Dict[str, Any]]
         ns = namespace or self.namespace
         try:
             _ensure_k8s_config()
@@ -46,7 +43,6 @@ class KubernetesClient(PipelineRunSource):
             return None
 
     def get_pod_logs(self, pod_name, container=None, namespace=None, tail_lines=5000):
-        # type: (str, Optional[str], Optional[str], Optional[int]) -> Optional[str]
         ns = namespace or self.namespace
         try:
             _ensure_k8s_config()
@@ -62,7 +58,6 @@ class KubernetesClient(PipelineRunSource):
             return None
 
     def get_component_metadata(self, component_name, namespace=None):
-        # type: (str, Optional[str]) -> Optional[Dict[str, str]]
         """Fetch component repository URL, branch, and promotion status from cluster."""
         ns = namespace or self.namespace
         try:

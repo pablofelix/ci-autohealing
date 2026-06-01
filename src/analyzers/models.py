@@ -61,21 +61,18 @@ class AnalysisResult(BaseModel):
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
-        # type: (float) -> float
         """Round confidence to 2 decimals."""
         return round(v, 2)
 
     @field_validator('recommended_files')
     @classmethod
     def validate_files(cls, v):
-        # type: (List[str]) -> List[str]
         """Ensure files are non-empty strings."""
         return [f.strip() for f in v if f and f.strip()]
 
     @field_validator('root_cause', 'recommended_fix')
     @classmethod
     def validate_not_placeholder(cls, v):
-        # type: (str) -> str
         """Ensure LLM didn't return placeholder text."""
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
         if v.lower().strip() in placeholders:
@@ -143,21 +140,18 @@ class ConformaAnalysisResult(BaseModel):
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
-        # type: (float) -> float
         """Round confidence to 2 decimals."""
         return round(v, 2)
 
     @field_validator('recommended_files')
     @classmethod
     def validate_files(cls, v):
-        # type: (List[str]) -> List[str]
         """Ensure files are non-empty strings."""
         return [f.strip() for f in v if f and f.strip()]
 
     @field_validator('root_cause', 'recommended_fix')
     @classmethod
     def validate_not_placeholder(cls, v):
-        # type: (str) -> str
         """Ensure LLM didn't return placeholder text."""
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
         if v.lower().strip() in placeholders:
@@ -229,19 +223,16 @@ class ReleaseAnalysisResult(BaseModel):
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
-        # type: (float) -> float
         return round(v, 2)
 
     @field_validator('recommended_files', 'affected_images')
     @classmethod
     def validate_string_list(cls, v):
-        # type: (List[str]) -> List[str]
         return [f.strip() for f in v if f and f.strip()]
 
     @field_validator('root_cause', 'recommended_fix')
     @classmethod
     def validate_not_placeholder(cls, v):
-        # type: (str) -> str
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
         if v.lower().strip() in placeholders:
             raise ValueError(f"Invalid placeholder value: {v}")
@@ -288,13 +279,11 @@ class ScenariosAnalysisResult(BaseModel):
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
-        # type: (float) -> float
         return round(v, 2)
 
     @field_validator('findings', 'recommendations')
     @classmethod
     def validate_not_placeholder(cls, v):
-        # type: (str) -> str
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
         if v.lower().strip() in placeholders:
             raise ValueError(f"Invalid placeholder value: {v}")

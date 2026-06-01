@@ -71,13 +71,11 @@ class _TextExtractor(html.parser.HTMLParser):
 
 
 def _cache_path(url):
-    # type: (str,) -> Path
     key = hashlib.md5(url.encode()).hexdigest()[:12]
     return CACHE_DIR / f'{key}.txt'
 
 
 def _read_cache(url):
-    # type: (str,) -> Optional[str]
     path = _cache_path(url)
     if not path.exists():
         return None
@@ -88,13 +86,11 @@ def _read_cache(url):
 
 
 def _write_cache(url, text):
-    # type: (str, str) -> None
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _cache_path(url).write_text(text, encoding='utf-8')
 
 
 def fetch_doc_page(url, max_chars=3000):
-    # type: (str, int) -> Optional[str]
     """Fetch a doc page and return plain-text excerpt up to max_chars.
 
     Returns None if the fetch fails for any reason (network, timeout, bad HTML).
@@ -133,7 +129,6 @@ def fetch_doc_page(url, max_chars=3000):
 
 
 def run(category_filter=None, dry_run=False, stale_days=CACHE_TTL_DAYS):
-    # type: (Optional[str], bool, int) -> dict
     """Fetch doc pages for patterns that need them. Returns stats dict."""
     config = CollectorConfig.from_env()
     db = DatabaseConnection(config.db)

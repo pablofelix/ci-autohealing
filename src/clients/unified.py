@@ -20,7 +20,6 @@ class UnifiedPipelineClient:
     """
 
     def __init__(self, namespace=None, sources=None):
-        # type: (str, Optional[List[PipelineRunSource]]) -> None
         self.namespace = namespace
         if sources is not None:
             self.sources = sources
@@ -36,7 +35,6 @@ class UnifiedPipelineClient:
                 pass
 
     def get_pipelinerun_complete(self, pr_name):
-        # type: (str,) -> Tuple[Optional[Dict[str, Any]], str]
         """Get PipelineRun data from the first source that has it."""
         for source in self.sources:
             pr_data = source.get_pipelinerun(pr_name)
@@ -49,7 +47,6 @@ class UnifiedPipelineClient:
         return None, 'none'
 
     def get_logs_complete(self, pr_name, max_size=200000):
-        # type: (str, int) -> Tuple[Optional[str], str]
         """Get logs from the first source that has them."""
         for source in self.sources:
             logs = source.get_pipelinerun_logs(pr_name)
@@ -65,7 +62,6 @@ class UnifiedPipelineClient:
         return None, 'none'
 
     def get_taskruns_details(self, pr_name):
-        # type: (str,) -> Tuple[List[Dict[str, Any]], str]
         """Get TaskRun details from the first source that has them."""
         for source in self.sources:
             details = source.get_pipelinerun_taskruns_details(pr_name)
@@ -74,7 +70,6 @@ class UnifiedPipelineClient:
         return [], 'none'
 
     def _get_logs_via_api(self, pr_name):
-        # type: (str,) -> Optional[str]
         """Last-resort: get logs by finding pods labeled with the PipelineRun."""
         try:
             _ensure_k8s_config()

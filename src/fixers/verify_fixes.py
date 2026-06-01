@@ -31,7 +31,6 @@ logger = setup_logger(__name__)
 
 
 def check_build_resolved_after(db_conn, component_name, application, after_ts):
-    # type: (DatabaseConnection, str, str, datetime) -> Optional[str]
     """Return the pipelinerun_name if this component's failure was resolved after after_ts.
 
     The StatusSynchronizer marks is_resolved=TRUE when KubeArchive shows a Succeeded
@@ -55,7 +54,6 @@ def check_build_resolved_after(db_conn, component_name, application, after_ts):
 
 
 def verify_one(attempt, github, db_conn, repo_obj, dry_run=False):
-    # type: (...) -> str
     """Check one pending attempt. Returns a short status string for logging."""
     pr_url = attempt['pr_url']
     pr_number = attempt['pr_number']
@@ -143,7 +141,6 @@ def verify_one(attempt, github, db_conn, repo_obj, dry_run=False):
 
 
 def main():
-    # type: () -> int
     parser = argparse.ArgumentParser(description='Verify CI fix resolution attempts')
     parser.add_argument('--dry-run', action='store_true', help='Print without writing to DB')
     args = parser.parse_args()

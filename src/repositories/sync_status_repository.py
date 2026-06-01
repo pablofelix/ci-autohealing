@@ -8,11 +8,9 @@ class SyncStatusRepository:
     """All SQL operations on the sync_status table."""
 
     def __init__(self, db):
-        # type: (DatabaseConnection,) -> None
         self.db = db
 
     def save_build_sync_status(self, application, status, duration):
-        # type: (str, Dict[str, Any], float) -> None
         try:
             running_builds_json = json.dumps(status.get('running_builds', []))
 
@@ -58,7 +56,6 @@ class SyncStatusRepository:
             pass
 
     def save_conforma_sync_status(self, application, failing_components, running=None):
-        # type: (str, Set[str], Optional[Dict[str, Any]]) -> None
         try:
             components_json = json.dumps(sorted(failing_components))
             running_json = json.dumps([

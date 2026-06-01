@@ -16,7 +16,6 @@ logger = setup_logger(__name__)
 
 
 def _nightly_component_for_app(application):
-    # type: (str) -> str
     """Derive FBC fragment component name from application.
 
     rhoai-v3-5-ea-2 → rhoai-fbc-fragment-v3-5-ea-2
@@ -45,11 +44,9 @@ class HealthMonitor:
     """Detects degrading components and cross-app pattern cascades."""
 
     def __init__(self, db):
-        # type: (DatabaseConnection,) -> None
         self.db = db
 
     def run_checks(self):
-        # type: () -> List[HealthWarning]
         """Run all proactive checks. Returns list of warnings."""
         warnings = []
         warnings.extend(self.get_degrading_components())
@@ -60,7 +57,6 @@ class HealthMonitor:
         return warnings
 
     def get_degrading_components(self):
-        # type: () -> List[HealthWarning]
         """Find components with health_status = warning/critical or consecutive_failures >= 2."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -96,7 +92,6 @@ class HealthMonitor:
         return warnings
 
     def get_pattern_cascades(self):
-        # type: () -> List[HealthWarning]
         """Detect patterns spreading from one app to another in the last 14 days."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -152,7 +147,6 @@ class HealthMonitor:
         return warnings
 
     def get_repeat_failures(self):
-        # type: () -> List[HealthWarning]
         """Find components that keep failing with the same error after fixes were attempted."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -193,7 +187,6 @@ class HealthMonitor:
         return warnings
 
     def get_cve_warnings(self, application=None):
-        # type: (Optional[str],) -> List[HealthWarning]
         """Check latest snapshot for critical/high CVEs via SARIF referrers."""
         namespace = os.environ.get('NAMESPACE', '')
         app_name = application or os.environ.get('APPLICATION_NAME', '')
@@ -253,7 +246,6 @@ class HealthMonitor:
             return []
 
     def get_stale_nightly_builds(self, staleness_hours=None):
-        # type: (Optional[int],) -> List[HealthWarning]
         """Detect FBC fragment components with no recent successful build."""
         threshold = staleness_hours or int(os.environ.get('NIGHTLY_STALENESS_HOURS', '24'))
         with self.db.connection() as conn:
@@ -298,7 +290,6 @@ class HealthMonitor:
         return warnings
 
     def get_component_health_summary(self, application=None):
-        # type: (Optional[str],) -> List[Dict[str, Any]]
         """Get health summary for all components, optionally filtered by app."""
         with self.db.connection() as conn:
             cursor = conn.cursor()

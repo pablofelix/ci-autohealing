@@ -39,7 +39,6 @@ WIDTH = 72
 
 
 def wrap(text, indent='    '):
-    # type: (str, str) -> str
     lines = []
     for paragraph in text.splitlines():
         if paragraph.strip():
@@ -50,7 +49,6 @@ def wrap(text, indent='    '):
 
 
 def display_draft(draft, label='Current draft:'):
-    # type: (str, str) -> None
     print()
     print('  \033[1m{}\033[0m'.format(label))
     print(wrap(draft))
@@ -58,7 +56,6 @@ def display_draft(draft, label='Current draft:'):
 
 
 def refine_draft(llm, original_comment, current_draft, feedback, history):
-    # type: (...) -> str
     """Call LLM to revise the draft based on user feedback."""
     history_section = ''
     if history:
@@ -90,7 +87,6 @@ def refine_draft(llm, original_comment, current_draft, feedback, history):
 
 
 def analyze_session(llm, original_draft, history, final_draft):
-    # type: (...) -> Optional[Dict]
     """Analyze refinement session for systematic prompt improvements."""
     if not history:
         return None
@@ -131,7 +127,6 @@ def analyze_session(llm, original_draft, history, final_draft):
 
 
 def apply_prompt_change(proposed_text):
-    # type: (str) -> bool
     """Append the proposed text to jira_reply_drafter.md after user confirms."""
     if not DRAFTER_FILE.exists():
         print('\033[31mError: {} not found\033[0m'.format(DRAFTER_FILE))
@@ -144,7 +139,6 @@ def apply_prompt_change(proposed_text):
 
 
 def get_comment_text(jira, jira_key, comment_id):
-    # type: (JiraClient, str, int) -> Tuple[str, str]
     """Return (author_display_name, body_text) for a comment."""
     data = jira.get_comment(jira_key, comment_id)
     if not data:
@@ -201,7 +195,7 @@ def main():
     print(wrap(comment_body))
 
     original_draft = current_draft
-    history = []  # type: List[Dict]
+    history = []
 
     display_draft(current_draft)
 

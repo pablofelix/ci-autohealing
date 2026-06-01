@@ -14,7 +14,6 @@ class JiraCommentDraftRepository:
         self._db = db
 
     def get_existing_comment_ids(self, jira_key):
-        # type: (str,) -> Set[int]
         """Return set of comment_ids already processed for this jira_key."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -26,7 +25,6 @@ class JiraCommentDraftRepository:
 
     def insert_draft(self, jira_key, comment_id, draft_response,
                      model_used=None, tokens_used=None):
-        # type: (str, int, str, ...) -> bool
         """Insert a new comment draft. Returns True if inserted, False if already exists."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -40,7 +38,6 @@ class JiraCommentDraftRepository:
                 return cur.fetchone() is not None
 
     def mark_notified(self, jira_key, comment_id):
-        # type: (str, int) -> None
         """Record when notify-send was called for this comment."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -50,7 +47,6 @@ class JiraCommentDraftRepository:
                 """, (jira_key, comment_id))
 
     def mark_reviewed(self, jira_key, comment_id):
-        # type: (str, int) -> None
         """Mark a comment as reviewed by the user in ic jira inbox."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -60,7 +56,6 @@ class JiraCommentDraftRepository:
                 """, (jira_key, comment_id))
 
     def get_unreviewed(self):
-        # type: () -> List[Dict[str, Any]]
         """Return all unreviewed drafts ordered oldest-first."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -75,7 +70,6 @@ class JiraCommentDraftRepository:
                 return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def count_unreviewed(self):
-        # type: () -> int
         """Return total count of unreviewed drafts."""
         with self._db.connection() as conn:
             with conn.cursor() as cur:

@@ -16,7 +16,6 @@ _use_color = sys.stdout.isatty()
 
 
 def _c(code, text):
-    # type: (str, str) -> str
     if _use_color:
         return '{}{}{}'.format(code, text, NC)
     return text
@@ -51,12 +50,10 @@ def dim(text):
 
 
 def section_header(text):
-    # type: (str) -> None
     print(_c(DIM, '━' * 40))
     print(_c(HEADER_COLOR, text))
     print(_c(DIM, '━' * 40))
 
 
 def subsection_header(text):
-    # type: (str) -> None
     print(bold(text))

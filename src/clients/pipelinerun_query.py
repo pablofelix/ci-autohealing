@@ -13,7 +13,6 @@ logger = setup_logger(__name__)
 
 
 def _query_live_cluster(namespace, label_selector):
-    # type: (str, str) -> list
     """Query live cluster for PipelineRuns via Kubernetes Python API."""
     try:
         from kubernetes import client
@@ -35,7 +34,6 @@ def query_pipelineruns(namespace, label_selector,
                        kubearchive_url=None, session=None,
                        max_pages=3, page_size=100,
                        kubearchive_timeout=30, recent_days=None):
-    # type: (str, str, Optional[str], Optional[Any], int, int, int, Optional[int]) -> List[Dict[str, Any]]
     """Fetch PipelineRuns from Kubernetes API + KubeArchive, deduplicated by UID.
 
     Queries live cluster first (fast, ~1s), then pages through KubeArchive
@@ -127,7 +125,6 @@ def query_pipelineruns(namespace, label_selector,
 
 
 def _count_components(by_uid):
-    # type: (dict) -> int
     comps = set()
     for pr in by_uid.values():
         c = pr.get('metadata', {}).get('labels', {}).get(

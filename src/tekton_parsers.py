@@ -8,7 +8,6 @@ import re
 
 
 def extract_taskrun_names(pipelinerun_data):
-    # type: (Dict[str, Any]) -> List[str]
     """Extract TaskRun names from PipelineRun childReferences."""
     child_refs = pipelinerun_data.get('status', {}).get('childReferences', [])
     return [
@@ -19,7 +18,6 @@ def extract_taskrun_names(pipelinerun_data):
 
 
 def extract_failed_step_names(taskrun_data):
-    # type: (Dict[str, Any]) -> List[str]
     """Extract names of steps that exited with non-zero code."""
     steps = taskrun_data.get('status', {}).get('steps', [])
     return [
@@ -30,7 +28,6 @@ def extract_failed_step_names(taskrun_data):
 
 
 def build_taskrun_detail(taskrun_data):
-    # type: (Dict[str, Any]) -> Dict[str, Any]
     """Build a structured detail dict from raw TaskRun JSON."""
     status = taskrun_data.get('status', {})
     spec = taskrun_data.get('spec', {})
@@ -75,7 +72,6 @@ _ERROR_PATTERNS = [
 
 
 def extract_error_from_logs(logs):
-    # type: (Optional[str]) -> Tuple[Optional[str], Optional[str]]
     """Extract an error message and its category from build logs.
 
     Filters out script source code, metadata, and Slack messages.
@@ -136,7 +132,6 @@ def extract_error_from_logs(logs):
 
 
 def extract_failed_step_from_logs(logs):
-    # type: (Optional[str]) -> Optional[str]
     """Extract the failed step name from TaskRun/Step markers in logs."""
     if not logs:
         return None
@@ -147,7 +142,6 @@ def extract_failed_step_from_logs(logs):
 
 
 def extract_failed_step_from_pipelinerun(pr_data):
-    # type: (Optional[Dict[str, Any]]) -> Optional[str]
     """Extract the failed task/step name from PipelineRun metadata.
 
     More reliable than parsing logs. Checks childReferences for failed TaskRuns.
@@ -179,7 +173,6 @@ def extract_failed_step_from_pipelinerun(pr_data):
 # -- PipelineRun metadata extraction --
 
 def extract_pr_number_from_annotations(annotations):
-    # type: (Dict[str, str]) -> Optional[int]
     """Extract pull request number from PipelineRun annotations."""
     pr_url = annotations.get('pipelinesascode.tekton.dev/pull-request-url', '')
     if pr_url:
@@ -190,7 +183,6 @@ def extract_pr_number_from_annotations(annotations):
 
 
 def extract_pipelinerun_metadata(pr_data, namespace, application_name):
-    # type: (Optional[Dict[str, Any]], str, str) -> Dict[str, Any]
     """Extract all useful metadata from a PipelineRun dict.
 
     Returns a flat dict with commit info, URLs, timing, and failed tasks.
@@ -288,7 +280,6 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
 # -- PipelineRun status classification --
 
 def classify_pipelinerun_status(reason):
-    # type: (str) -> str
     """Map a PipelineRun condition reason to a human-readable status.
 
     Returns one of: 'Failed', 'Cancelled', 'Timeout', 'Succeeded', 'Running', 'Pending'.
@@ -307,7 +298,6 @@ def classify_pipelinerun_status(reason):
 
 
 def classify_build_status(reason):
-    # type: (str) -> 'BuildStatus'
     """Map a PipelineRun condition reason to a BuildStatus enum value.
 
     Wraps classify_pipelinerun_status and maps to the BuildStatus enum.
@@ -330,7 +320,6 @@ def classify_build_status(reason):
 # -- Conforma-specific parsing --
 
 def extract_conforma_component_info(pr_data, component_name, repo_url_fallback=''):
-    # type: (Dict[str, Any], str, str) -> Dict[str, Any]
     """Extract snapshot, image, repo, and commit info from a Conforma PipelineRun.
 
     Args:
@@ -373,7 +362,6 @@ def extract_conforma_component_info(pr_data, component_name, repo_url_fallback='
 
 
 def extract_verify_taskrun_name(pr_data):
-    # type: (Dict[str, Any]) -> Optional[str]
     """Find the 'verify' TaskRun name from PipelineRun childReferences."""
     child_refs = pr_data.get('status', {}).get('childReferences', [])
     for ref in child_refs:

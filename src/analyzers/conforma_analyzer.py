@@ -86,7 +86,6 @@ class ConformaAnalyzer:
     """Analyzes Conforma compliance violations using an LLM provider."""
 
     def __init__(self, config, db=None, ai_repo=None, llm=None, langfuse=None):
-        # type: (CollectorConfig, ...) -> None
         """Initialize analyzer with dependency injection.
 
         Args:
@@ -118,7 +117,6 @@ class ConformaAnalyzer:
         self.langfuse = langfuse
 
     def get_pending_violations(self, limit=5, component_filter=None, force=False, application=None):
-        # type: (int, Optional[str], bool, Optional[str]) -> List[Dict[str, Any]]
         """Get unanalyzed Conforma violations from DB.
 
         Args:
@@ -138,7 +136,6 @@ class ConformaAnalyzer:
         )
 
     def build_analysis_prompt(self, violation):
-        # type: (Dict[str, Any],) -> Tuple[str, str]
         """Construct system + user prompts from violation data.
 
         Args:
@@ -214,7 +211,6 @@ Use the record_conforma_analysis tool. Remember:
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
 
     def _format_pattern_section(self, violation):
-        # type: (Dict[str, Any],) -> str
         """Return a prompt section with institutional memory from prior occurrences."""
         fix = violation.get('pattern_typical_fix')
         doc = violation.get('pattern_doc_context')
@@ -229,7 +225,6 @@ Use the record_conforma_analysis tool. Remember:
         return '\n'.join(parts)
 
     def _get_policy_exclusions(self, violation):
-        # type: (Dict[str, Any],) -> str
         """Fetch EC policy exclusions relevant to this violation's scenario."""
         scenario = violation.get('scenario', '')
         if not scenario:
@@ -279,7 +274,6 @@ Use the record_conforma_analysis tool. Remember:
             return ''
 
     def _get_sarif_context(self, violation):
-        # type: (Dict[str, Any],) -> str
         """Fetch SARIF scan results if violation is scan-related."""
         summary = (violation.get('violation_summary') or '').lower()
         is_scan = any(kw in summary for kw in ('cve', 'vulnerability', 'clair', 'scan'))
@@ -314,7 +308,6 @@ Use the record_conforma_analysis tool. Remember:
             return ''
 
     def parse_analysis_response(self, llm_response):
-        # type: (Any,) -> Dict[str, Any]
         """Extract structured analysis from LLMResponse.tool_calls.
 
         Pure function with Pydantic validation.
@@ -366,7 +359,6 @@ Use the record_conforma_analysis tool. Remember:
             }
 
     def analyze_violation(self, violation):
-        # type: (Dict[str, Any],) -> Dict[str, Any]
         """Analyze one violation: build prompt -> call LLM -> parse response -> save to DB.
 
         Args:
@@ -447,7 +439,6 @@ Use the record_conforma_analysis tool. Remember:
     MAX_RETRIES = 3
 
     def run(self, limit=5, component_filter=None, force=False, application=None):
-        # type: (int, Optional[str], bool, Optional[str]) -> Dict[str, Any]
         """Analyze up to `limit` pending Conforma violations.
 
         Args:

@@ -26,15 +26,13 @@ class RegistryClient:
     """Read-only OCI registry client for Quay/registry API."""
 
     def __init__(self, token=None):
-        # type: (str) -> None
         self._basic_creds = token or os.environ.get('QUAY_TOKEN', '')
         self._session = requests.Session()
-        self._bearer_cache = {}  # type: dict
-        self._sarif_cache = {}  # type: dict
+        self._bearer_cache = {}
+        self._sarif_cache = {}
 
     @staticmethod
     def parse_image_ref(image_url):
-        # type: (str) -> tuple
         """Parse an image URL into (registry, repository, tag_or_digest).
 
         Examples:
@@ -60,7 +58,6 @@ class RegistryClient:
         return (parts[0], parts[1] if len(parts) > 1 else '', 'latest')
 
     def _get_bearer_token(self, registry, repository):
-        # type: (str, str) -> str
         cache_key = '{}/{}'.format(registry, repository)
         if cache_key in self._bearer_cache:
             return self._bearer_cache[cache_key]
@@ -84,7 +81,6 @@ class RegistryClient:
         return ''
 
     def _api_get(self, registry, path, accept=None, repository=None, session=None):
-        # type: (str, str, str, str, requests.Session) -> requests.Response
         token = self._get_bearer_token(registry, repository or '')
 
         url = 'https://{}/v2/{}'.format(registry, path)
@@ -97,7 +93,6 @@ class RegistryClient:
         return s.get(url, headers=headers, timeout=TIMEOUT)
 
     def list_tags(self, registry, repository):
-        # type: (str, str) -> list
         try:
             resp = self._api_get(registry, '{}/tags/list'.format(repository),
                                  repository=repository)
@@ -109,7 +104,6 @@ class RegistryClient:
             return []
 
     def fetch_log_artifact(self, registry, repository, pr_name):
-        # type: (str, str, str) -> str
         """Fetch export-pipeline-logs artifact for a PipelineRun.
 
         Looks for tags matching <pr-name>-*-logs, fetches the tar.gz layer,
@@ -155,7 +149,6 @@ class RegistryClient:
 
     @staticmethod
     def _extract_logs_from_tarball(data):
-        # type: (bytes) -> str
         try:
             buf = io.BytesIO(data)
             with tarfile.open(fileobj=buf, mode='r:gz') as tar:
@@ -169,7 +162,6 @@ class RegistryClient:
         return ''
 
     def fetch_sarif_results(self, registry, repository, digest):
-        # type: (str, str, str) -> list
         """Fetch SARIF scan results via the OCI referrers API.
 
         Returns a list of vulnerability dicts:
@@ -213,7 +205,6 @@ class RegistryClient:
             return []
 
     def fetch_sarif_batch(self, components, timeout=60):
-        # type: (list, int) -> dict
         """Fetch SARIF results for multiple components in parallel.
 
         Args:
@@ -256,7 +247,6 @@ class RegistryClient:
         return results
 
     def _fetch_sarif_with_session(self, registry, repository, digest, session):
-        # type: (str, str, str, requests.Session) -> list
         """Thread-safe SARIF fetch using a dedicated session."""
         cache_key = '{}/{}@{}'.format(registry, repository, digest)
         if cache_key in self._sarif_cache:
@@ -297,7 +287,6 @@ class RegistryClient:
             return []
 
     def _fetch_single_sarif(self, registry, repository, sarif_digest, session=None):
-        # type: (str, str, str, requests.Session) -> list
         try:
             manifest_resp = self._api_get(
                 registry,
@@ -330,7 +319,6 @@ class RegistryClient:
 
     @staticmethod
     def _parse_sarif(data):
-        # type: (bytes) -> list
         try:
             sarif = json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -370,7 +358,6 @@ class RegistryClient:
 
     @staticmethod
     def format_sarif_summary(results, max_chars=2000):
-        # type: (list, int) -> str
         if not results:
             return ''
 

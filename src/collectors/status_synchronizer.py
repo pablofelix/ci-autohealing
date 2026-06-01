@@ -24,7 +24,6 @@ logger = setup_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def get_failing_build_components(config, recent_days=None):
-    # type: (CollectorConfig, int) -> Dict[str, Any]
     """Get failing components from KubeArchive + live cluster (push builds only).
 
     Groups by component, tracks latest push build and latest incoming build
@@ -110,7 +109,6 @@ def get_failing_build_components(config, recent_days=None):
 
 
 def get_failing_conforma_components(config, recent_days=None):
-    # type: (CollectorConfig, int) -> Dict[str, Any]
     """Query KubeArchive + live cluster for Conforma test PipelineRuns.
 
     Returns dict with:
@@ -197,7 +195,6 @@ class StatusSynchronizer:
     """Synchronizes component status between Kubernetes and database."""
 
     def __init__(self, config, db=None, build_repo=None, k8s=None, tekton_results=None):
-        # type: (CollectorConfig, ...) -> None
         self.config = config
         if db is None:
             db = DatabaseConnection(config.db)
@@ -206,7 +203,6 @@ class StatusSynchronizer:
         self.tekton_results = tekton_results or TektonResultsClient(namespace=config.k8s.namespace)
 
     def get_component_metadata(self, component_name):
-        # type: (str,) -> Optional[Component]
         meta = self.k8s.get_component_metadata(component_name)
         if not meta:
             return None
@@ -218,7 +214,6 @@ class StatusSynchronizer:
         )
 
     def _find_latest_push(self, pipelineruns):
-        # type: (list) -> Optional[tuple]
         latest = None
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
@@ -245,7 +240,6 @@ class StatusSynchronizer:
         return latest
 
     def get_current_status(self, component_name):
-        # type: (str,) -> Optional[Dict[str, Any]]
         """Get current push build status from cluster, KubeArchive, or Tekton Results."""
         label_selector = (
             'appstudio.openshift.io/component={},'
@@ -279,7 +273,6 @@ class StatusSynchronizer:
         return {'name': name, 'uid': uid, 'status': status, 'commit_sha': commit_sha}
 
     def sync_component(self, component):
-        # type: (Component,) -> Dict[str, Any]
         app = self.config.k8s.application_name
         ns = self.config.k8s.namespace
         result = {
@@ -338,7 +331,6 @@ class StatusSynchronizer:
         return result
 
     def run(self, components=None):
-        # type: (Optional[List[Component]],) -> Dict[str, Any]
         start_time = time.time()
         app = self.config.k8s.application_name
 

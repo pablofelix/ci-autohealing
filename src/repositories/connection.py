@@ -15,12 +15,10 @@ class DatabaseConnection:
     """PostgreSQL connection manager."""
 
     def __init__(self, config):
-        # type: (DatabaseConfig,) -> None
         self.config = config
 
     @contextmanager
     def connection(self):
-        # type: () -> Generator[psycopg2.extensions.connection, None, None]
         conn = psycopg2.connect(self.config.connection_string)
         try:
             yield conn
@@ -32,7 +30,6 @@ class DatabaseConnection:
             conn.close()
 
     def create_scan(self, scan_type='python', scan_mode='full'):
-        # type: (str, str) -> str
         scan_id = str(uuid.uuid4())
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -46,7 +43,6 @@ class DatabaseConnection:
         return scan_id
 
     def complete_scan(self, scan_id, result):
-        # type: (str, ScanResult) -> None
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

@@ -20,7 +20,6 @@ MAX_FILE_CONTENT_CHARS = 30000
 
 
 def parse_github_repo(repository_url):
-    # type: (str) -> Optional[Tuple[str, str]]
     """Extract owner/repo from a GitHub URL.
 
     Handles:
@@ -53,7 +52,6 @@ class GitHubClient:
     API_BASE = 'https://api.github.com'
 
     def __init__(self, token=None):
-        # type: (Optional[str]) -> None
         self._session = requests.Session()
         self._session.headers.update({
             'Accept': 'application/vnd.github.v3+json',
@@ -63,7 +61,6 @@ class GitHubClient:
             self._session.headers['Authorization'] = 'token {}'.format(token)
 
     def _get(self, path, params=None, accept=None):
-        # type: (str, Optional[Dict], Optional[str]) -> Optional[requests.Response]
         """Execute GET request with detailed error logging.
 
         Returns response on 200, None on any error (with appropriate logging).
@@ -120,7 +117,6 @@ class GitHubClient:
             return None
 
     def get_commit(self, owner, repo, sha):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         """Fetch commit metadata and diff.
 
         Returns dict with: message, author, date, files changed, patch.
@@ -173,7 +169,6 @@ class GitHubClient:
         }
 
     def get_file_content(self, owner, repo, path, ref=None):
-        # type: (str, str, str, Optional[str]) -> Optional[str]
         """Fetch a single file's content at a specific ref (branch/SHA).
 
         Returns the decoded text content, or None if not found.
@@ -215,7 +210,6 @@ class GitHubClient:
         return None
 
     def get_directory_listing(self, owner, repo, path, ref=None):
-        # type: (str, str, str, Optional[str]) -> Optional[List[str]]
         """List files in a directory at a specific ref.
 
         Returns list of filenames, or None if directory not found.
@@ -238,7 +232,6 @@ class GitHubClient:
         return [item['name'] for item in data]
 
     def get_pr_for_commit(self, owner, repo, sha):
-        # type: (str, str, str) -> Optional[Dict[str, Any]]
         """Find the PR associated with a commit SHA.
 
         Returns dict with: number, title, body, url, labels.
@@ -265,7 +258,6 @@ class GitHubClient:
         }
 
     def get_commit_context(self, repository_url, commit_sha, branch=None):
-        # type: (str, str, Optional[str]) -> Optional[Dict[str, Any]]
         """Fetch complete commit context for AI analysis.
 
         Combines: commit diff + Dockerfile + .tekton/ configs + PR info.
@@ -353,7 +345,6 @@ class GitHubClient:
     # ------------------------------------------------------------------
 
     def _post(self, path, payload):
-        # type: (str, Dict) -> Optional[requests.Response]
         """POST with JSON payload. Returns response on 2xx, None on error."""
         url = '{}{}'.format(self.API_BASE, path)
         try:
@@ -368,7 +359,6 @@ class GitHubClient:
         return None
 
     def _put(self, path, payload):
-        # type: (str, Dict) -> Optional[requests.Response]
         """PUT with JSON payload. Returns response on 2xx, None on error."""
         url = '{}{}'.format(self.API_BASE, path)
         try:
@@ -383,7 +373,6 @@ class GitHubClient:
         return None
 
     def get_ref_sha(self, owner, repo, branch):
-        # type: (str, str, str) -> Optional[str]
         """Return the commit SHA that a branch points to, or None if not found."""
         resp = self._get('/repos/{}/{}/git/ref/heads/{}'.format(owner, repo, branch))
         if not resp:
@@ -391,7 +380,6 @@ class GitHubClient:
         return resp.json().get('object', {}).get('sha')
 
     def get_file_sha(self, owner, repo, path, ref):
-        # type: (str, str, str, str) -> Optional[str]
         """Return the blob SHA of a file (needed to update an existing file)."""
         resp = self._get('/repos/{}/{}/contents/{}'.format(owner, repo, quote(path, safe='')),
                          params={'ref': ref})
@@ -400,7 +388,6 @@ class GitHubClient:
         return resp.json().get('sha')
 
     def create_branch(self, owner, repo, branch_name, from_sha):
-        # type: (str, str, str, str) -> bool
         """Create a new branch pointing to from_sha. Returns True on success."""
         path = '/repos/{}/{}/git/refs'.format(owner, repo)
         payload = {'ref': 'refs/heads/{}'.format(branch_name), 'sha': from_sha}
@@ -418,7 +405,6 @@ class GitHubClient:
         return True
 
     def put_file(self, owner, repo, path, content, message, branch, existing_sha=None):
-        # type: (str, str, str, str, str, str, Optional[str]) -> bool
         """Create or update a file on branch. Returns True on success.
 
         existing_sha is required when updating (not creating) a file — GitHub
@@ -429,7 +415,7 @@ class GitHubClient:
             'message': message,
             'content': encoded,
             'branch': branch,
-        }  # type: Dict[str, Any]
+        }
         if existing_sha:
             payload['sha'] = existing_sha
 
@@ -441,7 +427,6 @@ class GitHubClient:
         return True
 
     def create_pull_request(self, owner, repo, title, body, head, base='main'):
-        # type: (str, str, str, str, str, str) -> Optional[Dict[str, Any]]
         """Create a PR and return {'url': ..., 'number': ...}, or None on failure.
 
         head: branch name that contains the changes (e.g. 'ci-autohealing/comp/42').
@@ -467,7 +452,6 @@ class GitHubClient:
         return {'url': url, 'number': number}
 
     def get_pull_request(self, owner, repo, pr_number):
-        # type: (str, str, int) -> Optional[Dict[str, Any]]
         """Return PR metadata including merge status, or None if not found.
 
         Returned dict keys: number, state, merged, merged_at, merge_commit_sha, title.
@@ -490,7 +474,6 @@ class GitHubClient:
         }
 
     def check_rate_limit(self):
-        # type: () -> Optional[Dict[str, int]]
         """Check remaining API rate limit."""
         resp = self._get('/rate_limit')
         if not resp:

@@ -18,7 +18,6 @@ class ErrorPatternRepository:
         self.db = db
 
     def find_or_create(self, failure_type, failure_category, pattern_name=None):
-        # type: (str, str, Optional[str]) -> Dict[str, Any]
         """Return the pattern for (failure_type, failure_category), creating it if absent.
 
         When creating, pattern_name defaults to failure_category if not given.
@@ -45,7 +44,6 @@ class ErrorPatternRepository:
             return self._row_to_dict(row)
 
     def record_occurrence(self, pattern_id, confidence_score):
-        # type: (int, float) -> None
         """Increment occurrence_count and update rolling avg_confidence and last_seen_at."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -62,7 +60,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def update_typical_fix(self, pattern_id, typical_fix):
-        # type: (int, str) -> None
         """Overwrite typical_fix for a pattern (manual curation or auto-update)."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -72,7 +69,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def update_doc_context(self, pattern_id, doc_context):
-        # type: (int, str) -> None
         """Store a freshly fetched doc excerpt."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -84,7 +80,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def get_needing_doc_fetch(self, stale_days=7):
-        # type: (int,) -> List[Dict[str, Any]]
         """Return patterns that have a doc_url but missing or stale doc_context."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -103,7 +98,6 @@ class ErrorPatternRepository:
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
     def get_all(self, failure_type=None):
-        # type: (Optional[str],) -> List[Dict[str, Any]]
         """Return all patterns, optionally filtered by type. Used by ic patterns list."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -127,7 +121,6 @@ class ErrorPatternRepository:
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
     def get_by_category(self, failure_type, failure_category):
-        # type: (str, str) -> Optional[Dict[str, Any]]
         """Look up a single pattern by type + category. Returns None if not found."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -142,7 +135,6 @@ class ErrorPatternRepository:
             return self._row_to_dict(row) if row else None
 
     def link_analysis(self, analysis_id, pattern_id):
-        # type: (int, int) -> None
         """Set ai_analysis.error_pattern_id after pattern is resolved."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -152,7 +144,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def record_fix_outcome(self, pattern_id, was_successful):
-        # type: (int, bool) -> None
         """Update pattern confidence based on whether the recommended fix worked.
 
         Uses exponential moving average with alpha=0.2 to weight recent
@@ -176,7 +167,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def get_pattern_for_failure(self, build_failure_id=None, conforma_result_id=None):
-        # type: (Optional[int], Optional[int]) -> Optional[int]
         """Look up which pattern was used in the AI analysis for a failure."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -200,7 +190,6 @@ class ErrorPatternRepository:
     MIN_OCCURRENCES_FOR_PATTERN = 3
 
     def discover_new_patterns(self):
-        # type: () -> List[Dict[str, Any]]
         """Find failure categories that recur 3+ times but have no pattern yet.
 
         Returns list of newly created patterns.
@@ -232,7 +221,6 @@ class ErrorPatternRepository:
         return created
 
     def _set_initial_confidence(self, pattern_id, avg_confidence, occurrence_count):
-        # type: (int, float, int) -> None
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -243,7 +231,6 @@ class ErrorPatternRepository:
             conn.commit()
 
     def get_stale_patterns(self, inactive_days=90, min_accuracy=0.3):
-        # type: (int, float) -> List[Dict[str, Any]]
         """Find patterns that should be archived: low accuracy or unused."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -261,7 +248,6 @@ class ErrorPatternRepository:
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
     def get_cross_app_patterns(self):
-        # type: () -> List[Dict[str, Any]]
         """Find patterns that appear across multiple applications.
 
         Joins error_patterns → ai_analysis → build_failures to see which
@@ -303,7 +289,6 @@ class ErrorPatternRepository:
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_patterns_for_app(self, application):
-        # type: (str,) -> List[Dict[str, Any]]
         """Get patterns seen in a specific application, with cross-app context."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -342,7 +327,6 @@ class ErrorPatternRepository:
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_by_name_or_category(self, name):
-        # type: (str,) -> Optional[Dict]
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -357,7 +341,6 @@ class ErrorPatternRepository:
             return self._row_to_dict(row) if row else None
 
     def get_library_summary(self):
-        # type: () -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -375,7 +358,6 @@ class ErrorPatternRepository:
 
     @staticmethod
     def _row_to_dict(row):
-        # type: (Any,) -> Dict[str, Any]
         if row is None:
             return {}
         cols = [

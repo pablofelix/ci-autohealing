@@ -90,7 +90,6 @@ class BuildFailureAnalyzer:
     def __init__(self, config, db=None, build_repo=None,
                  ai_repo=None, llm=None, langfuse=None, pattern_service=None,
                  github_client=None):
-        # type: (CollectorConfig, ...) -> None
         if db is None:
             db = DatabaseConnection(config.db)
 
@@ -124,7 +123,6 @@ class BuildFailureAnalyzer:
         self.pattern_service = pattern_service
 
     def get_pending_failures(self, limit=5, component_filter=None, force=False, application=None):
-        # type: (int, Optional[str], bool, Optional[str]) -> List[Dict[str, Any]]
         """Get unanalyzed failures from DB.
 
         Args:
@@ -144,7 +142,6 @@ class BuildFailureAnalyzer:
         )
 
     def _ensure_context(self, failure):
-        # type: (dict,) -> None
         """Fetch missing commit context from GitHub if DB data is incomplete.
 
         Checks commit_context for completeness (commit diff, tekton configs).
@@ -194,7 +191,6 @@ class BuildFailureAnalyzer:
             logger.warning("Failed to store context in DB: %s", e)
 
     def _ensure_enrichment(self, failure):
-        # type: (dict,) -> None
         """Run enrichment if not yet done for this failure."""
         if failure.get('enriched_context'):
             return
@@ -234,7 +230,6 @@ class BuildFailureAnalyzer:
     _BLOB_FIELDS = frozenset({'build_logs', 'commit_context'})
 
     def _store_field(self, failure, field, data):
-        # type: (dict, str, Any) -> None
         """Write a field to DB, offloading to blob store if above threshold."""
         if field not in self._BLOB_FIELDS:
             raise ValueError("invalid field for blob storage: {}".format(field))
@@ -260,7 +255,6 @@ class BuildFailureAnalyzer:
                 )
 
     def _ensure_logs(self, failure):
-        # type: (dict,) -> None
         """Process logs so the analyzer sees the actual error, not noise.
 
         Four escalating steps:
@@ -330,7 +324,6 @@ class BuildFailureAnalyzer:
         failure['build_logs'] = logs
 
     def _extract_failed_section(self, logs, task_name):
-        # type: (str, str) -> Optional[str]
         """Extract log section for the failed TaskRun using markers."""
         pattern = r'(===== TaskRun: [^/]*{task}[^/]* /.*?(?=\n=====|$))'.format(
             task=re.escape(task_name))
@@ -340,7 +333,6 @@ class BuildFailureAnalyzer:
         return None
 
     def _refetch_logs(self, failure, failed_task=''):
-        # type: (dict, str) -> Optional[str]
         """Re-fetch logs from Tekton Results with a higher size limit."""
         pr_name = failure.get('pipelinerun_name')
         if not pr_name:
@@ -382,7 +374,6 @@ class BuildFailureAnalyzer:
         return full_logs
 
     def _fetch_oci_logs(self, failure):
-        # type: (dict,) -> Optional[str]
         """Fetch logs from OCI registry artifact as fallback when Tekton Results fails."""
         pr_name = failure.get('pipelinerun_name')
         component = failure.get('component_name')
@@ -419,7 +410,6 @@ class BuildFailureAnalyzer:
             return None
 
     def _fetch_sarif_for_failure(self, failure):
-        # type: (dict,) -> str
         """Fetch SARIF scan results if this is a scan-related failure."""
         error_msg = (failure.get('error_message') or '').lower()
         failed_task = (failure.get('failed_task_name') or '').lower()
@@ -454,7 +444,6 @@ class BuildFailureAnalyzer:
             return ''
 
     def _fetch_failed_taskrun_logs(self, failure):
-        # type: (dict,) -> Optional[str]
         """Fetch logs for the specific failed TaskRun via Tekton Results.
 
         For multi-arch builds, also adds a per-platform status summary so
@@ -568,14 +557,12 @@ class BuildFailureAnalyzer:
     )
 
     def _filter_error_lines(self, logs, context_lines=20):
-        # type: (str, int) -> Optional[str]
         """Keep only lines matching error keywords plus surrounding context."""
         from utils.log_filter import filter_error_lines
         result = filter_error_lines(logs, context_lines)
         return result if result != logs else None
 
     def _ai_extract_error(self, logs, failure):
-        # type: (str, dict) -> Optional[str]
         """Use a cheap LLM (Haiku) to extract error-relevant log lines."""
         if self._cheap_llm is None:
             try:
@@ -617,7 +604,6 @@ class BuildFailureAnalyzer:
         return None
 
     def _get_dependency_updates(self, failure):
-        # type: (dict,) -> str
         """Fetch recent MintMaker dependency updates for correlation."""
         component = failure.get('component_name')
         if not component:
@@ -647,7 +633,6 @@ class BuildFailureAnalyzer:
             return ''
 
     def build_analysis_prompt(self, failure):
-        # type: (Dict[str, Any],) -> Tuple[str, str]
         """Construct system + user prompts from failure data.
 
         Pure function extracted for testability.
@@ -744,7 +729,6 @@ CRITICAL FORMATTING RULES:
         return (SYSTEM_PROMPT, user_prompt)
 
     def _format_commit_context(self, commit_context, enriched_context=None):
-        # type: (Optional[Dict[str, Any]], Optional[Dict[str, Any]]) -> str
         """Format commit context and enriched context into prompt text."""
         if not commit_context:
             return "\n## Commit Context\n(Not available — commit diff not fetched yet)\n"
@@ -890,7 +874,6 @@ CRITICAL FORMATTING RULES:
 
 
     def parse_analysis_response(self, llm_response):
-        # type: (Any,) -> Dict[str, Any]
         """Extract structured analysis from LLMResponse.tool_calls.
 
         Pure function with Pydantic validation.
@@ -942,7 +925,6 @@ CRITICAL FORMATTING RULES:
             }
 
     def analyze_failure(self, failure):
-        # type: (Dict[str, Any],) -> Dict[str, Any]
         """Analyze one failure: build prompt -> call LLM -> parse response -> save to DB.
 
         Args:
@@ -1059,7 +1041,6 @@ CRITICAL FORMATTING RULES:
     MAX_RETRIES = 3
 
     def run(self, limit=5, component_filter=None, force=False, application=None):
-        # type: (int, Optional[str], bool, Optional[str]) -> Dict[str, Any]
         """Analyze up to `limit` pending failures.
 
         Args:

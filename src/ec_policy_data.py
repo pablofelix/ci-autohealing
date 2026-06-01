@@ -30,7 +30,6 @@ for h in logger.handlers:
 
 
 def cmd_exceptions(client, name_filter=None):
-    # type: (KonfluxClient, str) -> dict
     policies = client.get_ec_policies(name_filter=name_filter)
     all_exceptions = []
     for p in policies:
@@ -47,7 +46,6 @@ def cmd_exceptions(client, name_filter=None):
 
 
 def cmd_expiring(client, name_filter=None, days=30):
-    # type: (KonfluxClient, str, int) -> dict
     policies = client.get_ec_policies(name_filter=name_filter)
     all_exceptions = []
     for p in policies:
@@ -64,7 +62,6 @@ def cmd_expiring(client, name_filter=None, days=30):
 
 
 def cmd_bindings(client, name_filter=None):
-    # type: (KonfluxClient, str) -> dict
     policies = client.get_ec_policies(name_filter=name_filter)
     policy_names = {p.get('metadata', {}).get('name') for p in policies} - {None}
     rpas = client.get_release_plan_admissions(name_filter=name_filter)
@@ -79,7 +76,6 @@ def cmd_bindings(client, name_filter=None):
 
 
 def cmd_policy_gap(client, releng_client, app_filter=None):
-    # type: (KonfluxClient, KonfluxClient, str) -> dict
     """Compare stage vs prod EC policies to find the gap."""
     rpas = releng_client.get_release_plan_admissions(name_filter=app_filter)
     bindings = KonfluxClient.extract_rpa_bindings(rpas)

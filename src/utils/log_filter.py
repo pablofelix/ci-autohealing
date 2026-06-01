@@ -15,7 +15,6 @@ ERROR_KEYWORDS = re.compile(
 
 
 def filter_error_lines(logs, context_lines=20):
-    # type: (str, int) -> str
     """Keep only lines matching error keywords plus surrounding context.
 
     Returns filtered log text with gap markers, or the original logs

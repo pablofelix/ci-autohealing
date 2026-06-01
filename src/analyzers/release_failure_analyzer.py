@@ -113,7 +113,6 @@ class ReleaseFailureAnalyzer:
     """Analyzes release pipeline failures using an LLM provider."""
 
     def __init__(self, config, db=None, ai_repo=None, llm=None, langfuse=None):
-        # type: (CollectorConfig, ...) -> None
         if db is None:
             db = DatabaseConnection(config.db)
 
@@ -137,7 +136,6 @@ class ReleaseFailureAnalyzer:
         self.gitlab = None
 
     def _get_kubearchive(self):
-        # type: () -> KubeArchiveClient
         if self.kubearchive is None:
             self.kubearchive = KubeArchiveClient(
                 api_url=self.config.k8s.kubearchive_api_url,
@@ -146,13 +144,11 @@ class ReleaseFailureAnalyzer:
         return self.kubearchive
 
     def _get_github(self):
-        # type: () -> GitHubClient
         if self.github is None:
             self.github = GitHubClient(token=self.config.github_token)
         return self.github
 
     def _get_gitlab(self):
-        # type: () -> GitLabClient
         if self.gitlab is None:
             self.gitlab = GitLabClient()
         return self.gitlab
@@ -163,7 +159,6 @@ class ReleaseFailureAnalyzer:
     }
 
     def _k8s_get_json(self, resource, name, namespace=None):
-        # type: (str, str, Optional[str]) -> Optional[Dict[str, Any]]
         ns = namespace or self.config.k8s.namespace
         plural = self._CRD_PLURALS.get(resource)
         if not plural:
@@ -180,7 +175,6 @@ class ReleaseFailureAnalyzer:
             return None
 
     def _derive_branch(self, application):
-        # type: (str) -> str
         """Derive the GitHub branch name from application name.
 
         product-v3-4 -> product-3.4
@@ -191,7 +185,6 @@ class ReleaseFailureAnalyzer:
         return 'main'
 
     def _derive_rpa_filename(self, release_plan):
-        # type: (str) -> str
         """Derive the RPA filename from the ReleasePlan name.
 
         rhoai-onprem-v3-4-components-prod -> rhoai-onperm-v3-4-components-prod.yaml
@@ -200,7 +193,6 @@ class ReleaseFailureAnalyzer:
         return '{}.yaml'.format(release_plan)
 
     def collect_context(self, release_name, namespace=None):
-        # type: (str, Optional[str]) -> Dict[str, Any]
         """Collect all context needed for release failure analysis.
 
         Gathers data from cluster (oc), KubeArchive, GitLab, and GitHub.
@@ -393,7 +385,6 @@ class ReleaseFailureAnalyzer:
         return context
 
     def build_analysis_prompt(self, context):
-        # type: (Dict[str, Any]) -> Tuple[str, str]
         """Construct system + user prompts from collected context."""
 
         sections = ["Analyze this release pipeline failure. Identify the root cause and recommend specific fixes.\n"]
@@ -488,7 +479,6 @@ class ReleaseFailureAnalyzer:
         return (SYSTEM_PROMPT, user_prompt)
 
     def _format_pattern_section(self, context):
-        # type: (Dict[str, Any]) -> str
         """Return a prompt section with institutional memory from seeded patterns."""
         patterns = self.pattern_repo.get_all(failure_type='release')
         if not patterns:
@@ -501,7 +491,6 @@ class ReleaseFailureAnalyzer:
         return '\n'.join(parts)
 
     def parse_analysis_response(self, llm_response):
-        # type: (Any) -> Dict[str, Any]
         """Extract structured analysis from LLMResponse.tool_calls."""
         from pydantic import ValidationError
         from analyzers.models import ReleaseAnalysisResult
@@ -539,7 +528,6 @@ class ReleaseFailureAnalyzer:
             }
 
     def analyze_release(self, release_name, namespace=None, force=False):
-        # type: (str, Optional[str], bool) -> Dict[str, Any]
         """Full analysis pipeline: collect context -> LLM -> parse -> save."""
 
         # Check for existing analysis
@@ -626,5 +614,4 @@ class ReleaseFailureAnalyzer:
         return analysis
 
     def _get_existing_analysis(self, release_name):
-        # type: (str) -> Optional[Dict[str, Any]]
         return self.ai_repo.get_analysis_for_release(release_name)

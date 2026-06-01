@@ -23,7 +23,6 @@ class ResolutionAttemptRepository:
     def record_pr_created(self, build_failure_id, pr_url, pr_number,
                           pr_branch, files_modified, changes_description,
                           notes=None, attempted_by='ic-fix'):
-        # type: (int, str, int, str, List[str], str, Optional[str], str) -> int
         """Insert a resolution attempt row when a build-failure PR is created.
 
         Also marks build_failures.ai_fix_attempted = TRUE atomically.
@@ -83,7 +82,6 @@ class ResolutionAttemptRepository:
     def record_conforma_pr_created(self, conforma_result_id, pr_url, pr_number,
                                    pr_branch, files_modified, changes_description,
                                    notes=None, attempted_by='ic-fix'):
-        # type: (int, str, int, str, List[str], str, Optional[str], str) -> int
         """Insert a resolution attempt row when a conforma PR is created.
 
         Also marks conforma_results.ai_fix_attempted = TRUE atomically.
@@ -141,7 +139,6 @@ class ResolutionAttemptRepository:
             return attempt_id
 
     def get_pending_verification(self):
-        # type: () -> List[Dict[str, Any]]
         """Return attempts where PR merge status has not been checked yet.
 
         Covers both build and conforma attempts. component_name and application
@@ -174,7 +171,6 @@ class ResolutionAttemptRepository:
     def update_verification(self, attempt_id, pr_merged, pr_merged_at,
                             result_pipelinerun_name, result_build_status,
                             was_successful, verification_notes):
-        # type: (int, bool, Any, Optional[str], Optional[str], Optional[bool], str) -> None
         """Write verification outcome: PR merge status and Konflux build result.
 
         Marks ai_fix_successful on whichever parent table the attempt belongs to.
@@ -252,7 +248,6 @@ class ResolutionAttemptRepository:
                         )
 
     def get_all(self, days=30):
-        # type: (int) -> List[Dict[str, Any]]
         """Return attempts from the last N days, newest first. Used by ic get fixes."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -281,7 +276,6 @@ class ResolutionAttemptRepository:
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_outcome_summary(self, days=30):
-        # type: (int,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""

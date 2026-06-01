@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 def _derive_tekton_results_url(openshift_api_url):
-    # type: (str) -> str
     hostname = urlparse(openshift_api_url).hostname or ''
     if hostname.startswith('api.'):
         base_domain = hostname[4:]
@@ -46,7 +45,6 @@ class TektonResultsClient:
     """
 
     def __init__(self, namespace=None, api_url=None):
-        # type: (str, Optional[str]) -> None
         self.namespace = namespace
         if api_url:
             self.api_url = api_url
@@ -60,7 +58,6 @@ class TektonResultsClient:
         self.session.verify = False
 
     def _query_records(self, filter_expr, page_size=20, order_by='create_time desc'):
-        # type: (str, int, str) -> List[Dict[str, Any]]
         url = "{}/parents/{}/results/-/records".format(self.api_url, self.namespace)
         page_size = max(5, min(page_size, 10000))
         params = {
@@ -80,7 +77,6 @@ class TektonResultsClient:
 
     @staticmethod
     def _decode_record(record):
-        # type: (Dict[str, Any]) -> Optional[Dict[str, Any]]
         data_value = record.get('data', {}).get('value')
         if not data_value:
             return None
@@ -90,7 +86,6 @@ class TektonResultsClient:
             return None
 
     def query_pipelinerun_records(self, application, component=None, page_size=20):
-        # type: (str, Optional[str], int) -> List[Dict[str, Any]]
         """Query PipelineRun records filtered by application and optionally component.
 
         Returns decoded PipelineRun dicts (same shape as Kubernetes API responses).
@@ -115,7 +110,6 @@ class TektonResultsClient:
         return results
 
     def query_taskrun_records(self, pipelinerun_name):
-        # type: (str) -> List[Tuple[Dict[str, Any], str]]
         """Query TaskRun records for a given PipelineRun.
 
         Returns list of (decoded_taskrun_dict, record_name) tuples.
@@ -134,7 +128,6 @@ class TektonResultsClient:
         return results
 
     def get_taskrun_logs(self, record_name):
-        # type: (str) -> Optional[str]
         """Fetch logs for a TaskRun using its record_name.
 
         record_name format: {namespace}/results/{result_id}/records/{record_id}
@@ -161,7 +154,6 @@ class TektonResultsClient:
             return None
 
     def find_failed_taskrun(self, pipelinerun_name):
-        # type: (str) -> Tuple[Optional[str], Optional[str], Optional[str]]
         """Find the failed TaskRun in a PipelineRun and fetch its logs.
 
         When no logs are available (e.g. PodCreationFailed, ImagePullFailed),
@@ -194,7 +186,6 @@ class TektonResultsClient:
         return None, None, None
 
     def query_component_build_history(self, application, component, page_size=10):
-        # type: (str, str, int) -> List[Dict[str, Any]]
         """Query build history for a component, returning decoded PipelineRuns
         ordered by creation time (newest first).
 
@@ -221,7 +212,6 @@ class TektonResultsClient:
         return results
 
     def query_conforma_records(self, application, component=None, page_size=20):
-        # type: (str, Optional[str], int) -> List[Dict[str, Any]]
         """Query Conforma (Enterprise Contract) test PipelineRun records."""
         parts = [
             "(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')",
@@ -243,7 +233,6 @@ class TektonResultsClient:
         return results
 
     def get_pipelinerun_logs(self, pipelinerun_name, max_log_size=200000, failed_only=False):
-        # type: (str, int, bool) -> Optional[str]
         """Fetch combined logs for TaskRuns in a PipelineRun from Tekton Results.
 
         When failed_only=True, only downloads logs from failed TaskRuns —

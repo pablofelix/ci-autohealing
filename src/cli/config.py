@@ -37,7 +37,6 @@ BLOB_THRESHOLD = int(os.environ.get('BLOB_THRESHOLD', '51200'))  # 50 KB
 
 
 def app_to_reporter_branch(app_name):
-    # type: (str) -> str
     """Convert APPLICATION_NAME to conforma-reporter branch name.
 
     product-v3-4 -> product-3.4, product-v3-4-ea-1 -> product-3.4-ea.1
@@ -55,7 +54,6 @@ def app_to_reporter_branch(app_name):
 
 
 def conforma_scenario_label(scenario):
-    # type: (str) -> str
     if scenario.endswith('-single-component'):
         return 'single'
     if scenario.startswith('conforma-fbc-'):

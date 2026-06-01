@@ -29,7 +29,6 @@ class KonfluxClient:
     """Read-only client for Konflux CRDs via the K8s REST API."""
 
     def __init__(self, namespace=None):
-        # type: (str) -> None
         self._server = discover_openshift_api_url()
         token = get_openshift_token()
         if not token:
@@ -38,7 +37,6 @@ class KonfluxClient:
         self._namespace = namespace
 
     def _get(self, path, params=None, namespace=None, api_group=None):
-        # type: (str, Optional[Dict], Optional[str], Optional[str]) -> Optional[Dict]
         ns = namespace or self._namespace
         group = api_group or API_GROUP
         url = '{}/{}/namespaces/{}/{}'.format(
@@ -55,7 +53,6 @@ class KonfluxClient:
             return None
 
     def get_ec_policies(self, name_filter=None):
-        # type: (Optional[str]) -> List[Dict[str, Any]]
         data = self._get('enterprisecontractpolicies')
         if not data:
             return []
@@ -66,11 +63,9 @@ class KonfluxClient:
         return items
 
     def get_ec_policy(self, name):
-        # type: (str) -> Optional[Dict[str, Any]]
         return self._get('enterprisecontractpolicies/{}'.format(name))
 
     def get_release_plan_admissions(self, name_filter=None):
-        # type: (Optional[str]) -> List[Dict[str, Any]]
         data = self._get('releaseplanadmissions')
         if not data:
             return []
@@ -82,7 +77,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_exceptions(policy):
-        # type: (Dict[str, Any]) -> List[Dict[str, Any]]
         policy_name = policy.get('metadata', {}).get('name', 'unknown')
         gitlab_link = '{}/{}.yaml'.format(GITLAB_EC_BASE, policy_name)
         now = datetime.now(timezone.utc)
@@ -122,7 +116,6 @@ class KonfluxClient:
         return results
 
     def get_integration_test_scenarios(self, namespace, app_filter=None):
-        # type: (str, Optional[str]) -> List[Dict[str, Any]]
         data = self._get(
             'integrationtestscenarios',
             namespace=namespace,
@@ -138,7 +131,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_its_metadata(scenario):
-        # type: (Dict[str, Any]) -> Dict[str, Any]
         meta = scenario.get('metadata', {})
         spec = scenario.get('spec', {})
         name = meta.get('name', '')
@@ -181,7 +173,6 @@ class KonfluxClient:
         }
 
     def get_snapshots(self, app_filter=None, limit=5):
-        # type: (Optional[str], int) -> List[Dict[str, Any]]
         params = {}
         if app_filter:
             params['labelSelector'] = 'appstudio.openshift.io/application={}'.format(app_filter)
@@ -194,7 +185,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_snapshot_status(snapshot):
-        # type: (Dict[str, Any]) -> Dict[str, Any]
         meta = snapshot.get('metadata', {})
         labels = meta.get('labels', {})
         spec = snapshot.get('spec', {})
@@ -236,7 +226,6 @@ class KonfluxClient:
         }
 
     def get_releases(self, app_filter=None, limit=5):
-        # type: (Optional[str], int) -> List[Dict[str, Any]]
         params = {}
         if app_filter:
             params['labelSelector'] = 'appstudio.openshift.io/application={}'.format(app_filter)
@@ -249,7 +238,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_release_status(release):
-        # type: (Dict[str, Any]) -> Dict[str, Any]
         meta = release.get('metadata', {})
         spec = release.get('spec', {})
         status = release.get('status', {})
@@ -273,7 +261,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_rpa_bindings(rpas, policy_names=None):
-        # type: (List[Dict[str, Any]], Optional[set]) -> List[Dict[str, str]]
         results = []
         for rpa in rpas:
             meta = rpa.get('metadata', {})
@@ -293,7 +280,6 @@ class KonfluxClient:
         return results
 
     def get_dependency_updates(self, component_filter=None, hours=48):
-        # type: (Optional[str], int) -> List[Dict[str, Any]]
         data = self._get('dependencyupdatechecks')
         if not data:
             return []
@@ -321,7 +307,6 @@ class KonfluxClient:
 
     @staticmethod
     def extract_dependency_update(duc):
-        # type: (Dict[str, Any]) -> Dict[str, Any]
         meta = duc.get('metadata', {})
         spec = duc.get('spec', {})
         status = duc.get('status', {})

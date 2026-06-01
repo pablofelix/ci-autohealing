@@ -19,7 +19,6 @@ logger = setup_logger(__name__)
 
 
 def _batch_get_component_metadata(component_names, namespace):
-    # type: (list, str) -> dict
     """Fetch repo URL and branch for components via K8s API (individual gets)."""
     result = {}
     try:

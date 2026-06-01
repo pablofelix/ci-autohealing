@@ -20,21 +20,17 @@ class PipelineRunSource(ABC):
 
     @abstractmethod
     def get_pipelinerun(self, name, namespace=None):
-        # type: (str, Optional[str]) -> Optional[Dict[str, Any]]
         """Fetch PipelineRun data by name."""
 
     @abstractmethod
     def get_taskrun(self, name, namespace=None):
-        # type: (str, Optional[str]) -> Optional[Dict[str, Any]]
         """Fetch TaskRun data by name."""
 
     @abstractmethod
     def get_pod_logs(self, pod_name, container=None, namespace=None, tail_lines=None):
-        # type: (str, Optional[str], Optional[str], Optional[int]) -> Optional[str]
         """Fetch logs for a pod/container."""
 
     def step_container_name(self, step_name):
-        # type: (str) -> str
         """Map a Tekton step name to the container name used to fetch logs.
 
         Override in subclasses where the convention differs (e.g. KubeArchive
@@ -43,7 +39,6 @@ class PipelineRunSource(ABC):
         return step_name
 
     def get_pipelinerun_logs(self, pipelinerun_name, namespace=None, max_log_size=200000):
-        # type: (str, Optional[str], int) -> Optional[str]
         """Fetch combined logs for all failed steps in a PipelineRun.
 
         Orchestrates: PipelineRun -> TaskRuns -> failed steps -> pod logs.
@@ -86,7 +81,6 @@ class PipelineRunSource(ABC):
         return combined or None
 
     def get_pipelinerun_taskruns_details(self, pipelinerun_name, namespace=None):
-        # type: (str, Optional[str]) -> List[Dict[str, Any]]
         """Get detailed information about all TaskRuns in a PipelineRun."""
         ns = namespace or getattr(self, 'namespace', None)
 

@@ -64,7 +64,6 @@ class ScenariosAnalyzer:
     """Proactively analyzes ITS configurations using an LLM provider."""
 
     def __init__(self, config, llm=None, langfuse=None):
-        # type: (CollectorConfig, ..., ...) -> None
         self.config = config
 
         if llm is None:
@@ -79,7 +78,6 @@ class ScenariosAnalyzer:
         self.langfuse = langfuse
 
     def fetch_scenarios(self, namespace, app_filter=None):
-        # type: (str, Optional[str]) -> List[Dict[str, Any]]
         client = KonfluxClient()
         scenarios = client.get_integration_test_scenarios(
             namespace=namespace, app_filter=app_filter,
@@ -87,7 +85,6 @@ class ScenariosAnalyzer:
         return [KonfluxClient.extract_its_metadata(s) for s in scenarios]
 
     def build_analysis_prompt(self, scenarios, app_filter=None):
-        # type: (List[Dict[str, Any]], Optional[str]) -> tuple
         active = [s for s in scenarios if not s['is_disabled']]
         disabled = [s for s in scenarios if s['is_disabled']]
         future = [s for s in scenarios if s['is_future']]
@@ -147,7 +144,6 @@ Use the record_scenarios_analysis tool. Focus on:
         return (SCENARIOS_SYSTEM_PROMPT, user_prompt)
 
     def parse_analysis_response(self, llm_response):
-        # type: (Any,) -> Dict[str, Any]
         from pydantic import ValidationError
         from analyzers.models import ScenariosAnalysisResult
 
@@ -179,7 +175,6 @@ Use the record_scenarios_analysis tool. Focus on:
             }
 
     def analyze(self, namespace, app_filter=None):
-        # type: (str, Optional[str]) -> Dict[str, Any]
         logger.info("Fetching ITS scenarios from %s...", namespace)
         scenarios = self.fetch_scenarios(namespace, app_filter=app_filter)
 
@@ -242,7 +237,6 @@ Use the record_scenarios_analysis tool. Focus on:
         }
 
     def run(self, namespace=None, app_filter=None):
-        # type: (str, Optional[str]) -> Dict[str, Any]
         logger.info("=" * 70)
         logger.info("ITS Scenario Configuration Analysis")
         if app_filter:

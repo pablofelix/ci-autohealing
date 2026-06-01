@@ -29,7 +29,6 @@ for h in logger.handlers:
 
 
 def cmd_list(client, namespace, app_filter=None):
-    # type: (KonfluxClient, str, str) -> dict
     scenarios = client.get_integration_test_scenarios(
         namespace=namespace, app_filter=app_filter,
     )
@@ -56,7 +55,6 @@ def cmd_list(client, namespace, app_filter=None):
 
 
 def _normalize_scenario_type(name):
-    # type: (str) -> str
     """Strip app-specific suffixes to get a canonical scenario type."""
     import re
     cleaned = re.sub(r'-v\d+-\d+(-ea-?\d+)?(-single-component)?(-future)?$', '', name)
@@ -65,11 +63,10 @@ def _normalize_scenario_type(name):
 
 
 def cmd_gaps(client, namespace, app_filter=None):
-    # type: (KonfluxClient, str, str) -> dict
     scenarios = client.get_integration_test_scenarios(namespace=namespace)
     extracted = [KonfluxClient.extract_its_metadata(s) for s in scenarios]
 
-    apps_scenarios = {}  # type: dict
+    apps_scenarios = {}
     for s in extracted:
         if s['is_disabled'] or s['is_future']:
             continue
@@ -81,7 +78,7 @@ def cmd_gaps(client, namespace, app_filter=None):
     if not apps_scenarios:
         return {'source': 'k8s-api', 'gaps': [], 'apps_checked': 0}
 
-    type_counts = Counter()  # type: Counter
+    type_counts = Counter()
     for types in apps_scenarios.values():
         type_counts.update(types)
 
@@ -108,7 +105,6 @@ def cmd_gaps(client, namespace, app_filter=None):
 
 
 def cmd_summary(client, namespace, app_filter=None):
-    # type: (KonfluxClient, str, str) -> dict
     """Compact per-app summary for bash consumption."""
     scenarios = client.get_integration_test_scenarios(namespace=namespace)
     extracted = [KonfluxClient.extract_its_metadata(s) for s in scenarios]
@@ -116,7 +112,7 @@ def cmd_summary(client, namespace, app_filter=None):
     if app_filter:
         extracted = [s for s in extracted if s['application'] == app_filter]
 
-    per_app = {}  # type: dict
+    per_app = {}
     for s in extracted:
         app = s['application']
         entry = per_app.setdefault(app, {

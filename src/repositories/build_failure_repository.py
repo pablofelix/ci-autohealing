@@ -11,11 +11,9 @@ class BuildFailureRepository:
     """All SQL operations on the build_failures table."""
 
     def __init__(self, db):
-        # type: (DatabaseConnection,) -> None
         self.db = db
 
     def pipelinerun_exists(self, name):
-        # type: (str,) -> bool
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -25,7 +23,6 @@ class BuildFailureRepository:
             return cursor.fetchone() is not None
 
     def is_pipelinerun_complete(self, pr_name):
-        # type: (str,) -> bool
         """Check if a PipelineRun has complete data (logs, commit, URL)."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -44,7 +41,6 @@ class BuildFailureRepository:
             return bool(result and all(result))
 
     def find_unresolved_component_names(self, application):
-        # type: (str,) -> Set[str]
         try:
             with self.db.connection() as conn:
                 cursor = conn.cursor()
@@ -62,7 +58,6 @@ class BuildFailureRepository:
             return set()
 
     def find_failing_component_names(self, application):
-        # type: (str,) -> Optional[Set[str]]
         """Get components whose latest build is failed and unresolved."""
         try:
             with self.db.connection() as conn:
@@ -86,7 +81,6 @@ class BuildFailureRepository:
             return None
 
     def count_unresolved(self, component_name, application):
-        # type: (str, str) -> int
         try:
             with self.db.connection() as conn:
                 cursor = conn.cursor()
@@ -105,7 +99,6 @@ class BuildFailureRepository:
             return 0
 
     def get_last_status(self, component_name, application):
-        # type: (str, str) -> Optional[str]
         try:
             with self.db.connection() as conn:
                 cursor = conn.cursor()
@@ -127,7 +120,6 @@ class BuildFailureRepository:
 
     def mark_resolved(self, component_name, application, namespace, resolution_pr_name,
                        resolution_commit_sha=None):
-        # type: (str, str, str, str, Optional[str]) -> bool
         try:
             from cli.config import KONFLUX_UI_BASE
             resolution_url = (
@@ -155,7 +147,6 @@ class BuildFailureRepository:
             return False
 
     def mark_resolved_deleted(self, component_name, application):
-        # type: (str, str) -> bool
         """Mark all unresolved failures as resolved because the component was deleted from the cluster."""
         try:
             with self.db.connection() as conn:
@@ -180,7 +171,6 @@ class BuildFailureRepository:
 
     def record_successful_build(self, component_name, pr_name, pr_uid,
                                 application, namespace, repo_url, branch):
-        # type: (str, str, str, str, str, str, str) -> bool
         """Record a successful build. Returns False if already recorded."""
         try:
             with self.db.connection() as conn:
@@ -211,7 +201,6 @@ class BuildFailureRepository:
     def upsert_failure(self, pr_name, pr_uid, component_name, application, namespace,
                        repo_url, branch, status, logs=None, details=None,
                        error_message=None, error_type=None, failed_step=None, duration=None):
-        # type: (str, str, str, str, str, str, str, str, Optional[str], Optional[Dict], Optional[str], Optional[str], Optional[str], Optional[int]) -> bool
         """Insert or update a build failure with comprehensive data. Returns True if inserted new."""
         try:
             blob_refs = {}
@@ -320,7 +309,6 @@ class BuildFailureRepository:
             raise
 
     def update_component_health(self, component_name):
-        # type: (str,) -> None
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -329,7 +317,6 @@ class BuildFailureRepository:
             )
 
     def get_component_summary(self, name):
-        # type: (str,) -> Optional[Dict]
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -348,7 +335,6 @@ class BuildFailureRepository:
             }
 
     def get_applications(self):
-        # type: () -> list
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -360,7 +346,6 @@ class BuildFailureRepository:
             return [{'application': r[0], 'count': r[1]} for r in cursor.fetchall()]
 
     def get_overview_stats(self, application=None):
-        # type: (Optional[str],) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             if application:
@@ -381,7 +366,6 @@ class BuildFailureRepository:
             return {'total': row[0], 'components': row[1], 'with_logs': row[2]}
 
     def get_daily_stats(self, application, days=7):
-        # type: (str, int) -> list
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -395,7 +379,6 @@ class BuildFailureRepository:
             return [{'date': r[0], 'count': r[1]} for r in cursor.fetchall()]
 
     def get_resolved_stats(self, application):
-        # type: (str,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -412,7 +395,6 @@ class BuildFailureRepository:
             }
 
     def get_triage_summary(self, application):
-        # type: (str,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -453,7 +435,6 @@ class BuildFailureRepository:
             return summary
 
     def get_resolved_components(self, application):
-        # type: (str,) -> list
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -469,7 +450,6 @@ class BuildFailureRepository:
             ]
 
     def get_working_components(self, application):
-        # type: (str,) -> list
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -491,7 +471,6 @@ class BuildFailureRepository:
             ]
 
     def get_component_history(self, component, application, limit=20):
-        # type: (str, str, int) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -533,7 +512,6 @@ class BuildFailureRepository:
             return {'summary': summary, 'builds': builds, 'last_status': last_status}
 
     def get_enrichment_coverage(self, application):
-        # type: (str,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -552,7 +530,6 @@ class BuildFailureRepository:
             }
 
     def get_failure_details(self, component, application):
-        # type: (str, str) -> Optional[Dict[str, Any]]
         """Full failure details for a component. Used by MCP/API for describe views."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -587,7 +564,6 @@ class BuildFailureRepository:
             return resolve_blob_fields(result)
 
     def get_analysis_queue(self, application):
-        # type: (str,) -> Dict
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""

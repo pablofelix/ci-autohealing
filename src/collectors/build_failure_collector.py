@@ -40,7 +40,6 @@ class BuildFailureCollector:
 
     def __init__(self, config, db=None, build_repo=None,
                  kubearchive=None, k8s=None, tekton_results=None, unified=None):
-        # type: (CollectorConfig, ...) -> None
         self.config = config
         if db is None:
             db = DatabaseConnection(config.db)
@@ -57,10 +56,9 @@ class BuildFailureCollector:
     _PUSH_EVENT_TYPES = {'push', 'incoming'}
 
     def _collect_push_latest(self, pipelineruns):
-        # type: (List[Dict[str, Any]]) -> Dict[str, tuple]
         """Build a map of component -> (timestamp, status, reason, annotations)
         from the latest push PipelineRun per component."""
-        push_latest = {}  # type: Dict[str, tuple]
+        push_latest = {}
         for pr in pipelineruns:
             labels = pr.get('metadata', {}).get('labels', {})
             comp = labels.get('appstudio.openshift.io/component')
@@ -80,7 +78,6 @@ class BuildFailureCollector:
         return push_latest
 
     def _enrich_component_metadata(self, component_name, push_latest):
-        # type: (str, Dict[str, tuple]) -> Component
         """Get repository URL and branch for a component from cluster or annotations."""
         repo_url = ''
         branch = ''
@@ -120,7 +117,6 @@ class BuildFailureCollector:
         )
 
     def discover_components_from_cluster(self):
-        # type: () -> List[Component]
         """Discover components with failed latest push builds.
 
         Queries both KubeArchive/cluster and Tekton Results to get the most
@@ -188,7 +184,6 @@ class BuildFailureCollector:
             return []
 
     def get_component_metadata(self, component_name):
-        # type: (str) -> Optional[Component]
         """Fetch component metadata from Kubernetes."""
         meta = self.k8s.get_component_metadata(component_name)
         if not meta:
@@ -201,7 +196,6 @@ class BuildFailureCollector:
         )
 
     def _extract_latest_failed(self, pipelineruns):
-        # type: (List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
         """Find the latest failed push PipelineRun from a list."""
         latest_failed = None
         for pr in pipelineruns:
@@ -233,7 +227,6 @@ class BuildFailureCollector:
         return None
 
     def get_last_failed_pipelinerun(self, component_name):
-        # type: (str) -> Optional[Dict[str, Any]]
         """Get the most recent failed push PipelineRun for a component.
 
         Queries both KubeArchive/cluster and Tekton Results, returns the
@@ -274,25 +267,20 @@ class BuildFailureCollector:
         return ka_result or tr_result
 
     def extract_all_details(self, pr_data, source='kubearchive'):
-        # type: (Dict[str, Any], str) -> Dict[str, Any]
         return extract_pipelinerun_metadata(
             pr_data, self.config.k8s.namespace, self.config.k8s.application_name
         )
 
     def extract_pr_number(self, annotations):
-        # type: (Dict[str, str]) -> Optional[int]
         return extract_pr_number_from_annotations(annotations)
 
     def extract_error_messages(self, logs):
-        # type: (str) -> Tuple[Optional[str], Optional[str]]
         return extract_error_from_logs(logs)
 
     def extract_failed_step_from_logs(self, logs):
-        # type: (str) -> Optional[str]
         return extract_failed_step_from_logs(logs)
 
     def _extract_taskrun_logs_section(self, logs, task_name):
-        # type: (str, str) -> Optional[str]
         """Extract the log section for a specific TaskRun from PipelineRun logs.
 
         Args:
@@ -317,7 +305,6 @@ class BuildFailureCollector:
         return None
 
     def _find_failed_taskrun(self, pr_name, pr_data):
-        # type: (str, Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str], Optional[str]]
         """Find the TaskRun that actually failed and extract its error and logs.
 
         Tries KubeArchive first, then falls back to Tekton Results.
@@ -381,7 +368,6 @@ class BuildFailureCollector:
         return extract_failed_step_from_pipelinerun(pr_data), None, None
 
     def get_comprehensive_logs(self, pr_name):
-        # type: (str) -> Optional[str]
         """Fetch comprehensive logs from all TaskRuns and steps.
 
         Tries KubeArchive/cluster first, then falls back to Tekton Results.
@@ -405,7 +391,6 @@ class BuildFailureCollector:
         return None
 
     def get_logs_from_active_pods(self, pr_name):
-        # type: (str) -> Optional[str]
         """Fetch logs from active Kubernetes pods."""
         try:
             _ensure_k8s_config()
@@ -438,7 +423,6 @@ class BuildFailureCollector:
             return None
 
     def collect_comprehensive_failure(self, component):
-        # type: (Component) -> Tuple[bool, bool, int]
         """Collect comprehensive data for last failure.
 
         Returns:
@@ -592,7 +576,6 @@ class BuildFailureCollector:
         return True, inserted, log_length
 
     def check_resolution_via_history(self, component_name):
-        # type: (str) -> Optional[Dict[str, Any]]
         """Check if a component's failure is resolved by querying build history.
 
         Queries Tekton Results for the component's recent builds. If the newest
@@ -638,7 +621,6 @@ class BuildFailureCollector:
         return None
 
     def get_component_build_history(self, component_name, limit=10):
-        # type: (str, int) -> List[Dict[str, Any]]
         """Get build history for a component from Tekton Results.
 
         Returns list of dicts with: name, timestamp, status, commit_sha, failed_task.
@@ -701,7 +683,6 @@ class BuildFailureCollector:
         return results
 
     def run(self, components=None, limit=None):
-        # type: (Optional[List[Component]], Optional[int]) -> ScanResult
         """Run comprehensive collection scan."""
         start_time = time.time()
 
