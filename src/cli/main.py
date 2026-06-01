@@ -598,6 +598,71 @@ def config_set_app(app_name, force):
     print()
 
 
+# --- watch group ---
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def watch(ctx):
+    """Watch daemon commands."""
+    if ctx.invoked_subcommand is None:
+        click.echo("Usage: ic watch start")
+        click.echo()
+        click.echo("Start the event-driven watch daemon for real-time CI monitoring.")
+        click.echo("Configure with: ic config watch list|add|remove|enable|disable")
+
+
+@watch.command('start')
+def watch_start():
+    """Start the event-driven watch daemon."""
+    import asyncio
+    import signal
+
+    from cli.formatting import bold, cyan, dim, green, red
+    from config import CollectorConfig
+
+    config = CollectorConfig.from_env()
+
+    if not config.watcher or not config.watcher.applications:
+        print(red('Error: No applications configured for watching.'))
+        print()
+        print('  Set {} in .env, or run:'.format(cyan('WATCH_APPLICATIONS')))
+        print('    {}'.format(bold('ic config watch add <app>')))
+        raise SystemExit(1)
+
+    wc = config.watcher
+    print(bold('Watch Daemon'))
+    print()
+    print('  Applications:  {}'.format(cyan(', '.join(wc.applications))))
+    if wc.disabled:
+        print('  Disabled:      {}'.format(', '.join(sorted(wc.disabled))))
+    print('  Auto-analyze:  {}'.format(green('yes') if wc.auto_analyze else dim('no')))
+    print('  Reconcile:     every {}s'.format(wc.reconcile_interval))
+    print()
+    print(dim('  Press Ctrl+C to stop.'))
+    print()
+
+    from watcher.daemon import WatchDaemon
+
+    daemon = WatchDaemon(config)
+    loop = asyncio.new_event_loop()
+
+    def shutdown(sig):
+        print()
+        print(dim('Shutting down...'))
+        loop.create_task(daemon.stop())
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, shutdown, sig)
+
+    try:
+        loop.run_until_complete(daemon.start())
+    except KeyboardInterrupt:
+        loop.run_until_complete(daemon.stop())
+    finally:
+        loop.close()
+        print(dim('Daemon exited.'))
+
+
 # --- config watch subgroup ---
 
 @config.group('watch', invoke_without_command=True)
