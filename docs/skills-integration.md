@@ -188,6 +188,7 @@ The MCP server exposes the same data as typed Pydantic models. AI agents (Claude
 | `get_stats` | `ic ai status` | `StatsResponse` |
 | `get_triage` | `ic triage` | `TriageResponse` |
 | `get_health` | `ic health` | Component health scores |
+| `get_health_warnings` | `ic health warnings` | Proactive warnings (stale nightlies, CVEs, degradation) |
 | `get_conforma_report` | `ic conforma report` | Conforma standup table |
 | `search_failures` | `ic get components` | Filtered failure search |
 | `get_component_history` | `ic history` | Build history timeline |
@@ -227,6 +228,7 @@ MCP tools return structured data matching these models (defined in `src/mcp_serv
 - **ConformaViolationDetails**: `component`, `scenario`, `violations_count`, `warnings_count`, `violation_details`
 - **AnalysisDetails**: `component`, `category`, `root_cause`, `recommended_fix`, `confidence_score`, `can_auto_fix`
 - **StatsResponse**: `build` (pending/analyzed/auto_fixable), `conforma` (same), `total_cost`
+- **HealthWarning**: `type` (signal type: `stale_nightly`, `degrading_health`, `critical_cves`, etc.), `component`, `message`, `severity`
 - **SkillInfo**: `qualified_name`, `name`, `source`, `description`, `status`, `tags[]`, `category`, `user_invocable`
 - **SkillSourceInfo**: `name`, `url`, `commit`, `skill_count`
 - **SkillValidationFinding**: `severity`, `check`, `message`, `file`, `line`

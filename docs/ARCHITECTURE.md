@@ -158,6 +158,18 @@ High-level workflows that coordinate clients + repositories. Run via cron every 
 - **StatusSynchronizer** — Mark resolved failures, record successes
 - **CommitContextCollector** — Fetch diffs, Dockerfiles, Tekton configs from GitHub
 
+### Layer 4c: Proactive Health Monitoring
+
+**Directory:** `proactive/`
+
+On-the-fly health checks computed from `component_health` table and cross-app pattern data. All checks run via `HealthMonitor.run_checks()` and surface through `ic health warnings` CLI and `get_health_warnings` MCP tool.
+
+- **Degrading Components** — Components with warning/critical health status or consecutive failures
+- **Pattern Cascades** — Error patterns spreading across applications within 14 days
+- **Repeat Failures** — Components failing with the same error after fix attempts
+- **CVE Warnings** — Critical/high CVEs from SARIF scans on latest snapshot
+- **Stale Nightly Builds** — FBC fragment components with no successful build in 24h (configurable via `NIGHTLY_STALENESS_HOURS`)
+
 ### Layer 5: Analyzers (AI)
 
 **Directory:** `analyzers/`
@@ -324,7 +336,7 @@ poll_jira_comments.py        → Draft replies to Jira comments
 
 ## Testing
 
-**278 tests**, all passing. Run with `task test`.
+**340 tests**, all passing. Run with `task test`.
 
 - **Parser tests** — Pure function tests with mock Kubernetes JSON, no I/O
 - **Client tests** — Mock HTTP/API responses, verify retry and error handling

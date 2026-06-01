@@ -402,8 +402,8 @@ See `.env.example` for the full list with descriptions.
 │   ├── collectors/           # Data collectors (failures, violations)
 │   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay)
 │   ├── repositories/         # Database repositories (SQL)
-│   ├── proactive/            # Health monitoring and CVE warnings
-│   ├── tests/                # Test suite (278 tests)
+│   ├── proactive/            # Health monitoring, CVE warnings, nightly staleness
+│   ├── tests/                # Test suite (340 tests)
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)
