@@ -136,13 +136,12 @@ def get_health_warnings(application: str):
     from proactive.health_monitor import HealthMonitor
     monitor = HealthMonitor(get_pool())
     checks = monitor.run_checks()
-    warnings = []
-    for check in checks:
-        for item in check.get('items', []):
-            warnings.append(HealthWarning(
-                type=check.get('check', 'unknown'),
-                component=item.get('component', ''),
-                message=item.get('message', str(item)),
-                severity=check.get('severity', 'warning'),
-            ))
-    return warnings
+    return [
+        HealthWarning(
+            type=w.signal_type,
+            component=w.component_name,
+            message=w.message,
+            severity=w.severity,
+        )
+        for w in checks
+    ]
