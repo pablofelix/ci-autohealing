@@ -1,6 +1,10 @@
 """Repository for build_failures table operations."""
 
+import json
 
+from clients.blob_store import (
+    get_blob_store, make_blob_key, resolve_blob_fields, should_offload,
+)
 
 
 class BuildFailureRepository:
@@ -27,7 +31,8 @@ class BuildFailureRepository:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT build_logs IS NOT NULL AND LENGTH(build_logs) > 100,
+                SELECT (build_logs IS NOT NULL AND LENGTH(build_logs) > 100)
+                       OR (blob_refs ? 'build_logs'),
                        commit_sha IS NOT NULL,
                        konflux_url IS NOT NULL
                 FROM build_failures
@@ -209,6 +214,13 @@ class BuildFailureRepository:
         # type: (str, str, str, str, str, str, str, str, Optional[str], Optional[Dict], Optional[str], Optional[str], Optional[str], Optional[int]) -> bool
         """Insert or update a build failure with comprehensive data. Returns True if inserted new."""
         try:
+            blob_refs = {}
+            if logs and should_offload(logs):
+                key = make_blob_key('build-failures', component_name, pr_name, 'build_logs')
+                get_blob_store().put(key, logs)
+                blob_refs['build_logs'] = key
+                logs = None
+
             with self.db.connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -262,6 +274,14 @@ class BuildFailureRepository:
                          d.get('chains_git_url'), d.get('chains_git_commit'),
                          pr_name)
                     )
+                    if blob_refs:
+                        cursor.execute(
+                            """UPDATE build_failures
+                               SET build_logs = NULL,
+                                   blob_refs = COALESCE(blob_refs, '{}') || %s::jsonb
+                               WHERE pipelinerun_name = %s""",
+                            (json.dumps(blob_refs), pr_name)
+                        )
                     return False
                 else:
                     repository = repo_url.replace('https://github.com/', '').replace('.git', '')
@@ -275,10 +295,10 @@ class BuildFailureRepository:
                             failed_step_name, build_duration_seconds,
                             konflux_url, logs_full_url, build_logs,
                             output_image, image_digest, task_summary,
-                            chains_git_url, chains_git_commit
+                            chains_git_url, chains_git_commit, blob_refs
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         """,
                         (component_name, pr_name, pr_uid,
@@ -292,7 +312,8 @@ class BuildFailureRepository:
                          d.get('pipeline_url'), logs,
                          d.get('output_image'), d.get('image_digest'),
                          d.get('task_summary'),
-                         d.get('chains_git_url'), d.get('chains_git_commit'))
+                         d.get('chains_git_url'), d.get('chains_git_commit'),
+                         json.dumps(blob_refs))
                     )
                     return True
         except Exception:
@@ -313,7 +334,7 @@ class BuildFailureRepository:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COUNT(*),
-                       COUNT(*) FILTER (WHERE build_logs IS NOT NULL),
+                       COUNT(*) FILTER (WHERE build_logs IS NOT NULL OR blob_refs ? 'build_logs'),
                        MIN(first_detected_at),
                        MAX(first_detected_at)
                 FROM build_failures WHERE component_name = %s
@@ -346,14 +367,14 @@ class BuildFailureRepository:
                 cursor.execute("""
                     SELECT COUNT(*),
                            COUNT(DISTINCT component_name),
-                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL)
+                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL OR blob_refs ? 'build_logs')
                     FROM build_failures WHERE application = %s
                 """, (application,))
             else:
                 cursor.execute("""
                     SELECT COUNT(*),
                            COUNT(DISTINCT component_name),
-                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL)
+                           COUNT(*) FILTER (WHERE build_logs IS NOT NULL OR blob_refs ? 'build_logs')
                     FROM build_failures
                 """)
             row = cursor.fetchone()
@@ -399,7 +420,7 @@ class BuildFailureRepository:
                     SELECT DISTINCT ON (component_name)
                         component_name, pipelinerun_name, status,
                         is_resolved, first_detected_at,
-                        build_logs IS NOT NULL as has_logs
+                        (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs
                     FROM build_failures WHERE application = %s
                     ORDER BY component_name, first_detected_at DESC
                 )
@@ -416,8 +437,8 @@ class BuildFailureRepository:
                 WITH latest_builds AS (
                     SELECT DISTINCT ON (component_name)
                         component_name, first_detected_at,
-                        build_logs IS NOT NULL as has_logs,
-                        commit_context IS NOT NULL as has_context
+                        (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
+                        (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context
                     FROM build_failures
                     WHERE application = %s AND status = 'Failed' AND is_resolved = FALSE
                     ORDER BY component_name, first_detected_at DESC
@@ -539,11 +560,11 @@ class BuildFailureRepository:
                 SELECT
                     component_name, pipelinerun_name, error_message, error_type,
                     failed_task_name, failed_step_name,
-                    LEFT(build_logs, 50000) as build_logs,
+                    build_logs,
                     commit_sha, commit_message, commit_author, commit_url,
                     repository_url, branch, commit_context,
                     konflux_url, first_detected_at, last_updated_at,
-                    status, ai_analyzed, jira_key
+                    status, ai_analyzed, jira_key, blob_refs
                 FROM build_failures
                 WHERE component_name = %s
                   AND application = %s
@@ -560,9 +581,10 @@ class BuildFailureRepository:
                 'commit_sha', 'commit_message', 'commit_author', 'commit_url',
                 'repository_url', 'branch', 'commit_context',
                 'konflux_url', 'first_detected_at', 'last_updated_at',
-                'status', 'ai_analyzed', 'jira_key',
+                'status', 'ai_analyzed', 'jira_key', 'blob_refs',
             ]
-            return dict(zip(cols, row))
+            result = dict(zip(cols, row))
+            return resolve_blob_fields(result)
 
     def get_analysis_queue(self, application):
         # type: (str,) -> Dict

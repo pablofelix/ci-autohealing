@@ -59,15 +59,18 @@ CREATE TABLE IF NOT EXISTS build_failures (
     image_digest VARCHAR(255),
 
     -- Logs & Debug
-    build_logs TEXT,  -- Full build logs from pods/KubeArchive
+    build_logs TEXT,  -- Full build logs (NULL if offloaded to blob storage)
     logs_snippet TEXT,  -- Last 100 lines of error
     logs_full_url TEXT,  -- URL to full logs (S3/storage)
     konflux_url TEXT,
     konflux_logs_url TEXT,  -- Direct link to logs in Konflux UI
     raw_pipelinerun_yaml JSONB,  -- Full PR YAML for reference
 
+    -- Blob Storage (large data offloaded to external storage)
+    blob_refs JSONB,  -- {"build_logs": "key", "commit_context": "key"} pointers to blob store
+
     -- Commit Context (fetched from GitHub API)
-    commit_context JSONB,  -- Commit diff, Dockerfile, .tekton/ configs, PR info
+    commit_context JSONB,  -- Commit diff, Dockerfile, .tekton/ configs, PR info (NULL if offloaded)
 
     -- AI Processing
     ai_analyzed BOOLEAN DEFAULT FALSE,
@@ -622,7 +625,8 @@ CREATE TABLE IF NOT EXISTS conforma_results (
     warnings_count INTEGER DEFAULT 0,
     successes_count INTEGER DEFAULT 0,
     violation_summary TEXT,
-    violation_details JSONB,
+    violation_details JSONB,  -- NULL if offloaded to blob storage
+    blob_refs JSONB,  -- {"violation_details": "key"} pointers to blob store
     snapshot_name VARCHAR(255),
     container_image TEXT,
     repository_url TEXT,

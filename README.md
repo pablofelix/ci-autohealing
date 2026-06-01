@@ -40,6 +40,12 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
                   │  build_failures · conforma ·    │
                   │  ai_analysis · error_patterns · │
                   │  component_health · releases    │
+                  └────────────────┬────────────────┘
+                                   │ large blobs (>50KB)
+                  ┌────────────────▼────────────────┐
+                  │       Blob Storage              │
+                  │  Local FS (~/.ic/blobs/)         │
+                  │  or MinIO / S3                   │
                   └─────────────────────────────────┘
                                    ▲
           ┌─────────────────────┐  ┌──────────────────────┐
@@ -202,7 +208,7 @@ Enable only after manual validation of at least 5 fixes.
 ## Taskfile Commands
 
 ```bash
-task test              # run 278 tests
+task test              # run 382 tests
 task lint              # ruff linter
 task check             # lint + tests
 
@@ -375,6 +381,8 @@ Copy `.env.example` to `.env`. The file is sourced by `ic` automatically.
 | `WATCH_AUTO_ANALYZE` | No | `true` to auto-analyze new failures from watch daemon |
 | `WATCH_DISABLE` | No | Space-separated list of watchers to disable |
 | `AUTONOMOUS_MODE` | No | `true` to enable autonomous fix PRs (default: `false`) |
+| `BLOB_STORE` | No | `local` (default) or `minio` for blob storage backend |
+| `BLOB_THRESHOLD` | No | Size in bytes to offload to blob storage (default: `51200`) |
 
 See `.env.example` for the full list with descriptions.
 
@@ -400,14 +408,15 @@ See `.env.example` for the full list with descriptions.
 │   ├── analyzers/            # LLM analyzers (build, conforma, release)
 │   ├── fixers/               # Fix generators (PR, Jira, verification)
 │   ├── collectors/           # Data collectors (failures, violations)
-│   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay)
+│   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay, BlobStore)
 │   ├── repositories/         # Database repositories (SQL)
 │   ├── proactive/            # Health monitoring, CVE warnings, nightly staleness
-│   ├── tests/                # Test suite (340 tests)
+│   ├── utils/                # Shared utilities (log filtering)
+│   ├── tests/                # Test suite (382 tests)
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)
-├── db/migrations/            # PostgreSQL schema migrations (001–016)
+├── db/migrations/            # PostgreSQL schema migrations (001–017)
 ├── cron/                     # Cron scripts for automated collection
 ├── k8s/                      # Kubernetes deployment manifests
 ├── .claude/commands/         # Claude Code slash commands (/triage, /release, etc.)

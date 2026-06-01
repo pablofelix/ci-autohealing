@@ -10,7 +10,7 @@ CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and poli
 - Tracks Conforma (Enterprise Contract) policy violations
 - Uses AI to classify failures and recommend fixes
 - Generates fix PRs autonomously for high-confidence failures
-- Stores everything in PostgreSQL for historical analysis
+- Stores structured data in PostgreSQL, offloading large blobs (build logs, commit context, violation details) to external storage (local filesystem or MinIO/S3)
 - Powers the `ic` CLI, MCP server (40+ tools), and REST API
 
 **Data sources:**
@@ -65,8 +65,12 @@ CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and poli
 │  UnifiedPipeline    │         │  ComponentHealth    │
 │  GitHub · GitLab    │         │  ErrorPatterns      │
 │  Jira · Quay        │         │  SyncStatus         │
-│  LLMProvider ABC    │         └─────────────────────┘
-│  LangfuseTracker    │
+│  BlobStore          │         └─────────────────────┘
+│  LLMProvider ABC    │                   │
+│  LangfuseTracker    │         ┌─────────▼───────────┐
+│                     │         │  Blob Storage       │
+│                     │         │  Local FS / MinIO   │
+│                     │         └─────────────────────┘
 └────────┬────────────┘
          │
 ┌────────▼────────────┐
@@ -103,6 +107,9 @@ Adapters that fetch data from external systems behind a common interface.
 - **TektonResultsClient** — Tekton Results API
 - **UnifiedPipelineClient** — Tries all sources with fallback
 
+**Storage clients:**
+- **BlobStore** — Offloads large data (>50KB) to local filesystem (`~/.ic/blobs/`) or MinIO/S3. Transparent via `resolve_blob_fields()` — callers see inline data regardless of where it lives.
+
 **Integration clients:**
 - **GitHubClient** — Commit diffs, PRs, file content, PR creation
 - **GitLabClient** — Policy exception files, MRs
@@ -119,7 +126,7 @@ Adapters that fetch data from external systems behind a common interface.
 
 **Directory:** `repositories/`
 
-SQL operations on PostgreSQL tables. Parameterized queries, no business logic.
+SQL operations on PostgreSQL tables. Parameterized queries, no business logic. Large fields (build_logs, commit_context, violation_details) transparently resolve from blob storage via `blob_refs` JSONB column when inline data is NULL.
 
 **Repositories:**
 - **BuildFailureRepository** — `build_failures` table
@@ -336,7 +343,7 @@ poll_jira_comments.py        → Draft replies to Jira comments
 
 ## Testing
 
-**340 tests**, all passing. Run with `task test`.
+**382 tests**, all passing. Run with `task test`.
 
 - **Parser tests** — Pure function tests with mock Kubernetes JSON, no I/O
 - **Client tests** — Mock HTTP/API responses, verify retry and error handling
@@ -353,5 +360,6 @@ All configuration via environment variables in `.env`. See `.env.example` for th
 Core: `NAMESPACE`, `APPLICATION_NAME`
 Database: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
 AI: `LLM_PROVIDER`, `ANTHROPIC_API_KEY`
+Storage: `BLOB_STORE` (`local` or `minio`), `BLOB_THRESHOLD` (default 51200)
 Integrations: `GITHUB_TOKEN`, `JIRA_URL`, `JIRA_TOKEN`, `KUBEARCHIVE_URL`
 Skills: `IC_SKILLS_DIR` (optional, default `~/.ic`)

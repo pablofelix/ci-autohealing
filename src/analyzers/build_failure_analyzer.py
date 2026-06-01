@@ -14,6 +14,7 @@ import time
 
 from logger import setup_logger
 from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository, ErrorPatternRepository
+from clients.blob_store import get_blob_store, make_blob_key, should_offload
 from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
 from prompt_loader import load_prompt
@@ -187,13 +188,8 @@ class BuildFailureAnalyzer:
         failure['commit_context'] = ctx
 
         try:
-            with self.db.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE build_failures SET commit_context = %s WHERE id = %s",
-                    (json.dumps(ctx), failure['id'])
-                )
-            logger.info("Stored live-fetched context in DB for failure %s", failure['id'])
+            self._store_field(failure, 'commit_context', ctx)
+            logger.info("Stored live-fetched context for failure %s", failure['id'])
         except Exception as e:
             logger.warning("Failed to store context in DB: %s", e)
 
@@ -234,6 +230,34 @@ class BuildFailureAnalyzer:
                             failure.get('component_name'))
         except Exception as e:
             logger.warning("Auto-enrichment failed: %s", e)
+
+    _BLOB_FIELDS = frozenset({'build_logs', 'commit_context'})
+
+    def _store_field(self, failure, field, data):
+        # type: (dict, str, Any) -> None
+        """Write a field to DB, offloading to blob store if above threshold."""
+        if field not in self._BLOB_FIELDS:
+            raise ValueError("invalid field for blob storage: {}".format(field))
+        serialized = json.dumps(data) if not isinstance(data, str) else data
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            if should_offload(serialized):
+                ext = 'json' if not isinstance(data, str) else 'txt'
+                key = make_blob_key('build-failures', failure['component_name'],
+                                    failure['pipelinerun_name'], field, ext)
+                get_blob_store().put(key, serialized)
+                cursor.execute(
+                    """UPDATE build_failures
+                       SET {field} = NULL,
+                           blob_refs = COALESCE(blob_refs, '{{}}') || %s::jsonb
+                       WHERE id = %s""".format(field=field),
+                    (json.dumps({field: key}), failure['id'])
+                )
+            else:
+                cursor.execute(
+                    "UPDATE build_failures SET {field} = %s WHERE id = %s".format(field=field),
+                    (serialized, failure['id'])
+                )
 
     def _ensure_logs(self, failure):
         # type: (dict,) -> None
@@ -343,15 +367,9 @@ class BuildFailureAnalyzer:
         logger.info("Re-fetched %d chars (was %d in DB)",
                      len(full_logs), len(failure.get('build_logs', '')))
 
-        # Update DB with fuller logs
         try:
-            with self.db.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE build_failures SET build_logs = %s WHERE id = %s",
-                    (full_logs, failure['id'])
-                )
-            logger.info("Updated DB with re-fetched logs for failure %s", failure['id'])
+            self._store_field(failure, 'build_logs', full_logs)
+            logger.info("Updated re-fetched logs for failure %s", failure['id'])
         except Exception as e:
             logger.warning("Failed to update logs in DB: %s", e)
 
@@ -532,12 +550,7 @@ class BuildFailureAnalyzer:
                     failed_logs = '\n'.join(header_parts) + '\n' + failed_logs
 
                 failure['build_logs'] = failed_logs
-                with self.db.connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "UPDATE build_failures SET build_logs = %s WHERE id = %s",
-                        (failed_logs, failure['id'])
-                    )
+                self._store_field(failure, 'build_logs', failed_logs)
                 return failed_logs
         except Exception as e:
             logger.warning("Failed to fetch TaskRun logs: %s", e)
@@ -557,36 +570,9 @@ class BuildFailureAnalyzer:
     def _filter_error_lines(self, logs, context_lines=20):
         # type: (str, int) -> Optional[str]
         """Keep only lines matching error keywords plus surrounding context."""
-        lines = logs.split('\n')
-        total = len(lines)
-        keep = set()
-
-        # Always keep first 10 and last 30 lines
-        for i in range(min(10, total)):
-            keep.add(i)
-        for i in range(max(0, total - 30), total):
-            keep.add(i)
-
-        # Mark error lines + context
-        for i, line in enumerate(lines):
-            if self._ERROR_KEYWORDS.search(line):
-                for j in range(max(0, i - context_lines), min(total, i + context_lines + 1)):
-                    keep.add(j)
-
-        if len(keep) >= total * 0.8:
-            return None
-
-        # Build filtered output with gap markers
-        result = []
-        prev_kept = -1
-        for i in sorted(keep):
-            if prev_kept >= 0 and i > prev_kept + 1:
-                skipped = i - prev_kept - 1
-                result.append('... ({} lines filtered) ...'.format(skipped))
-            result.append(lines[i])
-            prev_kept = i
-
-        return '\n'.join(result)
+        from utils.log_filter import filter_error_lines
+        result = filter_error_lines(logs, context_lines)
+        return result if result != logs else None
 
     def _ai_extract_error(self, logs, failure):
         # type: (str, dict) -> Optional[str]

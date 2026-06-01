@@ -204,7 +204,11 @@ def get_failure(
         return None
 
     konflux = row.get('konflux_url') or _konflux_url(row.get('pipelinerun_name', ''))
-    logs = row.get('build_logs') if include_logs else None
+    logs = None
+    if include_logs:
+        from utils.log_filter import filter_error_lines
+        raw_logs = row.get('build_logs')
+        logs = filter_error_lines(raw_logs) if raw_logs else None
     context = row.get('commit_context') if include_commit_context else None
 
     return BuildFailureDetails(

@@ -7,6 +7,7 @@ build_failures.enriched_context JSONB column.
 import json
 from typing import Any, Dict, List
 
+from clients.blob_store import resolve_blob_fields
 from repositories.connection import DatabaseConnection
 
 
@@ -58,7 +59,7 @@ class ContextEnrichmentRepository:
             cursor.execute("""
                 SELECT id, component_name, pipelinerun_name,
                        commit_sha, repository_url, error_type, error_message,
-                       commit_context, application
+                       commit_context, application, blob_refs
                 FROM build_failures
                 WHERE {}
                 ORDER BY first_detected_at DESC
@@ -67,7 +68,7 @@ class ContextEnrichmentRepository:
 
             results = []
             for row in cursor.fetchall():
-                results.append({
+                entry = {
                     'id': row[0],
                     'component_name': row[1],
                     'pipelinerun_name': row[2],
@@ -77,7 +78,10 @@ class ContextEnrichmentRepository:
                     'error_message': row[6],
                     'commit_context': row[7],
                     'application': row[8],
-                })
+                    'blob_refs': row[9],
+                }
+                resolve_blob_fields(entry, fields=('commit_context',))
+                results.append(entry)
             return results
 
     def update_enriched_context(self, failure_id: int, enriched_context: Dict[str, Any]) -> None:

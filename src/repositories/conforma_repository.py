@@ -2,6 +2,9 @@
 
 import json
 
+from clients.blob_store import (
+    get_blob_store, make_blob_key, resolve_blob_fields, should_offload,
+)
 
 
 class ConformaRepository:
@@ -52,6 +55,17 @@ class ConformaRepository:
                       False if current policy (gate-blocking)
         """
         try:
+            violation_details_json = json.dumps(violations.get('violation_details')) \
+                if violations.get('violation_details') else None
+
+            blob_refs = {}
+            if violation_details_json and should_offload(violation_details_json):
+                key = make_blob_key('conforma', component, pr_name,
+                                    'violation_details', 'json')
+                get_blob_store().put(key, violation_details_json)
+                blob_refs['violation_details'] = key
+                violation_details_json = None
+
             with self.db.connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -59,9 +73,6 @@ class ConformaRepository:
                     (pr_name,)
                 )
                 exists = cursor.fetchone()
-
-                violation_details_json = json.dumps(violations.get('violation_details')) \
-                    if violations.get('violation_details') else None
 
                 if exists:
                     cursor.execute(
@@ -84,6 +95,14 @@ class ConformaRepository:
                          comp_info.get('commit_url', ''),
                          pr_name)
                     )
+                    if blob_refs:
+                        cursor.execute(
+                            """UPDATE conforma_results
+                               SET violation_details = NULL,
+                                   blob_refs = COALESCE(blob_refs, '{}') || %s::jsonb
+                               WHERE pipelinerun_name = %s""",
+                            (json.dumps(blob_refs), pr_name)
+                        )
                     return True
                 else:
                     cursor.execute(
@@ -116,8 +135,8 @@ class ConformaRepository:
                             status, violations_count, warnings_count, successes_count,
                             violation_summary, violation_details,
                             snapshot_name, container_image, repository_url, commit_sha, commit_url,
-                            jira_key, is_future
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            jira_key, is_future, blob_refs
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (application, component, scenario,
                          pr_name, pr_uid, 'Failed',
@@ -127,7 +146,7 @@ class ConformaRepository:
                          comp_info.get('snapshot_name'), comp_info.get('container_image'),
                          comp_info.get('repository_url'), comp_info.get('commit_sha'),
                          comp_info.get('commit_url'),
-                         prev_jira_key, is_future)
+                         prev_jira_key, is_future, json.dumps(blob_refs))
                     )
                     return True
         except Exception:
@@ -146,7 +165,7 @@ class ConformaRepository:
                     repository_url, commit_sha, commit_url,
                     snapshot_name, pipelinerun_name,
                     first_detected_at, last_updated_at,
-                    ai_analyzed, jira_key
+                    ai_analyzed, jira_key, blob_refs
                 FROM conforma_results
                 WHERE component_name = %s
                   AND application = %s
@@ -164,9 +183,10 @@ class ConformaRepository:
                 'repository_url', 'commit_sha', 'commit_url',
                 'snapshot_name', 'pipelinerun_name',
                 'first_detected_at', 'last_updated_at',
-                'ai_analyzed', 'jira_key',
+                'ai_analyzed', 'jira_key', 'blob_refs',
             ]
-            return dict(zip(cols, row))
+            result = dict(zip(cols, row))
+            return resolve_blob_fields(result, fields=('violation_details',))
 
     def resolve_fixed_components(self, application, currently_failing, all_seen):
         # type: (str, Set[Tuple[str, str]], Set[Tuple[str, str]]) -> int

@@ -32,6 +32,9 @@ COMPONENT_DATA_TTL = int(os.environ.get('COMPONENT_DATA_TTL', '86400'))
 SYNC_STALENESS_MINUTES = int(os.environ.get('SYNC_STALENESS_MINUTES', '30'))
 NIGHTLY_STALENESS_HOURS = int(os.environ.get('NIGHTLY_STALENESS_HOURS', '24'))
 
+BLOB_STORE = os.environ.get('BLOB_STORE', 'local')
+BLOB_THRESHOLD = int(os.environ.get('BLOB_THRESHOLD', '51200'))  # 50 KB
+
 
 def app_to_reporter_branch(app_name):
     # type: (str) -> str

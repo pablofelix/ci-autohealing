@@ -7,6 +7,8 @@ returns dicts/sets.
 
 import json
 
+from clients.blob_store import resolve_blob_fields
+
 
 class AIAnalysisRepository:
     """SQL operations on the ai_analysis table."""
@@ -347,7 +349,8 @@ class AIAnalysisRepository:
                        ep.typical_fix    AS pattern_typical_fix,
                        ep.doc_context    AS pattern_doc_context,
                        ep.pattern_name   AS pattern_name,
-                       ep.id             AS pattern_id
+                       ep.id             AS pattern_id,
+                       bf.blob_refs
                 FROM build_failures bf
                 LEFT JOIN LATERAL (
                     SELECT failure_category
@@ -368,7 +371,7 @@ class AIAnalysisRepository:
 
             results = []
             for row in cursor.fetchall():
-                results.append({
+                entry = {
                     'id': row[0],
                     'component_name': row[1],
                     'pipelinerun_name': row[2],
@@ -390,7 +393,10 @@ class AIAnalysisRepository:
                     'pattern_doc_context': row[18],
                     'pattern_name': row[19],
                     'pattern_id': row[20],
-                })
+                    'blob_refs': row[21],
+                }
+                resolve_blob_fields(entry)
+                results.append(entry)
 
             return results
 
@@ -477,7 +483,8 @@ class AIAnalysisRepository:
                        ep.typical_fix    AS pattern_typical_fix,
                        ep.doc_context    AS pattern_doc_context,
                        ep.pattern_name   AS pattern_name,
-                       ep.id             AS pattern_id
+                       ep.id             AS pattern_id,
+                       cr.blob_refs
                 FROM conforma_results cr
                 LEFT JOIN LATERAL (
                     SELECT failure_category
@@ -498,7 +505,7 @@ class AIAnalysisRepository:
 
             results = []
             for row in cursor.fetchall():
-                results.append({
+                entry = {
                     'id': row[0],
                     'component_name': row[1],
                     'pipelinerun_name': row[2],
@@ -519,7 +526,10 @@ class AIAnalysisRepository:
                     'pattern_doc_context': row[14],
                     'pattern_name': row[15],
                     'pattern_id': row[16],
-                })
+                    'blob_refs': row[17],
+                }
+                resolve_blob_fields(entry, fields=('violation_details',))
+                results.append(entry)
 
             return results
 
