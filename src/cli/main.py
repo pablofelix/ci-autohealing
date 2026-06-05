@@ -1212,8 +1212,10 @@ def working():
 @cli.command()
 @click.argument('application', required=False)
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.option('--no-cache', is_flag=True, help='Skip ref cache, query GitHub fresh')
+@click.option('--no-diagnose', is_flag=True, help='Skip trigger diagnosis')
 @click.pass_context
-def stale(ctx, application, output_json):
+def stale(ctx, application, output_json, no_cache, no_diagnose):
     """Detect components with untriggered commits."""
     import json as json_mod
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
@@ -1223,7 +1225,8 @@ def stale(ctx, application, output_json):
     app = application or cfg.APPLICATION_NAME
 
     monitor = HealthMonitor(db=None)
-    result = monitor.get_stale_components(app)
+    result = monitor.get_stale_components(
+        app, use_cache=not no_cache, diagnose=not no_diagnose)
 
     if output_json:
         print(json_mod.dumps(result, indent=2, default=str))
@@ -1243,24 +1246,57 @@ def stale(ctx, application, output_json):
             print(dim('  Results may be incomplete — set GITHUB_TOKEN for reliable checks'))
         else:
             print(green('All components up to date'))
-        print(dim('  Checked {} components ({} skipped — {} unique refs queried)'.format(
-            result.get('checked', 0), result.get('skipped', 0), result.get('unique_refs', 0))))
-        print()
+        _print_stale_footer(result, dim, yellow, cyan, bold)
         return
 
     print(bold(yellow('{} component(s) with untriggered commits:'.format(len(stale_list)))))
     print()
     from cli.db import print_table
-    print_table(
-        ['Component', 'Branch', 'Built', 'HEAD', 'Repo'],
-        [(s['component'], s['branch'],
-          s['built_commit'], s['head_commit'],
-          s['repository_url'].rstrip('/').split('/')[-1])
-         for s in stale_list],
-    )
+
+    has_diagnosis = any(s.get('diagnosis') for s in stale_list)
+    if has_diagnosis:
+        print_table(
+            ['Component', 'Branch', 'Built', 'HEAD', 'Diagnosis'],
+            [(s['component'], s['branch'],
+              s['built_commit'], s['head_commit'],
+              _short_diagnosis(s.get('diagnosis', {})))
+             for s in stale_list],
+        )
+    else:
+        print_table(
+            ['Component', 'Branch', 'Built', 'HEAD', 'Repo'],
+            [(s['component'], s['branch'],
+              s['built_commit'], s['head_commit'],
+              s['repository_url'].rstrip('/').split('/')[-1])
+             for s in stale_list],
+        )
+
     print()
-    print(dim('Checked {} components ({} skipped — {} unique refs queried)'.format(
-        result.get('checked', 0), result.get('skipped', 0), result.get('unique_refs', 0))))
+    _print_stale_footer(result, dim, yellow, cyan, bold)
+
+
+def _short_diagnosis(diag):
+    """Format diagnosis cause for table display."""
+    labels = {
+        'missing_pac_repository': 'No webhook',
+        'nudge_misconfiguration': 'Bad nudge',
+        'recent_build_failed': 'Build failed',
+        'build_running': 'Building...',
+        'unknown': '?',
+    }
+    return labels.get(diag.get('cause', ''), diag.get('cause', '?'))
+
+
+def _print_stale_footer(result, dim, yellow, cyan, bold):
+    cache = result.get('cache', {})
+    api_calls = result.get('api_calls', result.get('unique_refs', 0))
+    parts = ['Checked {} components'.format(result.get('checked', 0))]
+    if result.get('skipped'):
+        parts.append('{} skipped'.format(result['skipped']))
+    parts.append('{} GitHub API calls'.format(api_calls))
+    if cache:
+        parts.append('{} cache hits'.format(cache.get('hits', 0)))
+    print(dim('  ' + ' — '.join(parts)))
     if result.get('warning'):
         print(yellow('Warning: ' + result['warning']))
     print()

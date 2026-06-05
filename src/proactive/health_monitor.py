@@ -55,6 +55,7 @@ class HealthMonitor:
         warnings.extend(self.get_repeat_failures())
         warnings.extend(self.get_cve_warnings())
         warnings.extend(self.get_stale_nightly_builds())
+        warnings.extend(self.get_stale_warnings())
         return warnings
 
     def get_degrading_components(self):
@@ -418,7 +419,8 @@ class HealthMonitor:
             'blockers_count': len(blockers),
         }
 
-    def get_stale_components(self, application=None):
+    def get_stale_components(self, application=None, use_cache=True,
+                              diagnose=True):
         """Detect components where branch HEAD is ahead of lastBuiltCommit.
 
         Compares each component's last built commit (from cluster Component CR)
@@ -426,6 +428,7 @@ class HealthMonitor:
         """
         from clients.github_client import GitHubClient, parse_github_repo
         from clients.kubernetes import KubernetesClient
+        from proactive.ref_cache import CacheConfig, RefCache
 
         namespace = os.environ.get('NAMESPACE', '')
         app_name = application or os.environ.get('APPLICATION_NAME', '')
@@ -453,30 +456,47 @@ class HealthMonitor:
                 continue
             candidates.append({**comp, '_owner': parsed[0], '_repo': parsed[1]})
 
-        unique_refs = {}
+        unique_ref_keys = []
+        seen = set()
         for c in candidates:
-            key = (c['_owner'], c['_repo'], c['branch'])
-            if key not in unique_refs:
-                unique_refs[key] = None
+            key = '{}/{}/{}'.format(c['_owner'], c['_repo'], c['branch'])
+            if key not in seen:
+                seen.add(key)
+                unique_ref_keys.append(key)
 
-        def _fetch_head(key):
-            owner, repo, branch = key
+        cache = RefCache(CacheConfig.from_env()) if use_cache else None
+        cached = cache.get_batch(unique_ref_keys) if cache else {}
+
+        to_fetch = [k for k in unique_ref_keys if cached.get(k) is None]
+
+        def _fetch_head(cache_key):
+            parts = cache_key.split('/', 2)
             try:
-                sha = gh.get_ref_sha(owner, repo, branch)
-                return (key, sha)
+                sha = gh.get_ref_sha(parts[0], parts[1], parts[2])
+                return (cache_key, sha)
             except Exception:
-                return (key, None)
+                return (cache_key, None)
 
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            for key, sha in pool.map(lambda k: _fetch_head(k), unique_refs.keys()):
-                unique_refs[key] = sha
+        fetched = {}
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                for key, sha in pool.map(_fetch_head, to_fetch):
+                    if sha:
+                        fetched[key] = sha
 
-        api_errors = sum(1 for v in unique_refs.values() if v is None)
+            if cache and fetched:
+                cache.put_batch(fetched)
+
+        ref_shas = {}
+        for key in unique_ref_keys:
+            ref_shas[key] = cached.get(key) or fetched.get(key)
+
+        api_errors = sum(1 for k in to_fetch if k not in fetched)
 
         stale = []
         for comp in candidates:
-            key = (comp['_owner'], comp['_repo'], comp['branch'])
-            head = unique_refs.get(key)
+            key = '{}/{}/{}'.format(comp['_owner'], comp['_repo'], comp['branch'])
+            head = ref_shas.get(key)
             if not head:
                 continue
             if head == comp['last_built_commit']:
@@ -490,7 +510,11 @@ class HealthMonitor:
                 'head_commit': head[:12],
                 'built_commit_full': comp['last_built_commit'],
                 'head_commit_full': head,
+                'nudges': comp.get('nudges', []),
             })
+
+        if diagnose and stale:
+            stale = self._diagnose_stale(kc, stale, all_comps)
 
         stale.sort(key=lambda s: s['component'])
         result = {
@@ -499,10 +523,74 @@ class HealthMonitor:
             'stale_count': len(stale),
             'checked': len(candidates),
             'skipped': skipped,
-            'unique_refs': len(unique_refs),
+            'unique_refs': len(unique_ref_keys),
+            'api_calls': len(to_fetch),
         }
+        if cache:
+            result['cache'] = cache.stats()
         if api_errors:
             result['api_errors'] = api_errors
-            result['warning'] = '{} of {} unique refs failed GitHub API lookup (rate limit?)'.format(
-                api_errors, len(unique_refs))
+            result['warning'] = '{} of {} refs failed GitHub API lookup (rate limit?)'.format(
+                api_errors, len(to_fetch))
         return result
+
+    def _diagnose_stale(self, kc, stale_list, all_comps):
+        """Run trigger diagnosis on each stale component."""
+        from proactive.trigger_diagnosis import diagnose_stale_trigger
+
+        try:
+            pac_repos = kc.list_pac_repositories()
+        except Exception:
+            pac_repos = []
+
+        all_names = {c['name'] for c in all_comps}
+
+        for entry in stale_list:
+            recent_runs = []
+            try:
+                recent_runs = kc.list_recent_pipelineruns(entry['component'])
+            except Exception:
+                pass
+
+            diagnosis = diagnose_stale_trigger(
+                component_name=entry['component'],
+                repository_url=entry.get('repository_url', ''),
+                pac_repositories=pac_repos,
+                nudge_refs=entry.get('nudges', []),
+                all_component_names=all_names,
+                recent_pipelineruns=recent_runs,
+                head_commit=entry.get('head_commit_full', ''),
+            )
+            entry['diagnosis'] = {
+                'cause': diagnosis.cause,
+                'severity': diagnosis.severity,
+                'detail': diagnosis.detail,
+            }
+
+        return stale_list
+
+    def get_stale_warnings(self, application=None):
+        """Generate HealthWarning entries for stale components."""
+        try:
+            result = self.get_stale_components(application, diagnose=False)
+        except Exception as exc:
+            logger.debug("Stale check skipped: %s", exc)
+            return []
+
+        warnings = []
+        app_name = result.get('application', '')
+        for entry in result.get('stale', []):
+            warnings.append(HealthWarning(
+                component_name=entry['component'],
+                application=app_name,
+                signal_type='commit_staleness',
+                severity='warning',
+                message='Branch HEAD {} is ahead of built commit {}'.format(
+                    entry['head_commit'], entry['built_commit']),
+                evidence={
+                    'branch': entry.get('branch', ''),
+                    'head_commit': entry.get('head_commit', ''),
+                    'built_commit': entry.get('built_commit', ''),
+                },
+            ))
+        return warnings

@@ -32,6 +32,9 @@ NIGHTLY_STALENESS_HOURS = int(os.environ.get('NIGHTLY_STALENESS_HOURS', '24'))
 BLOB_STORE = os.environ.get('BLOB_STORE', 'local')
 BLOB_THRESHOLD = int(os.environ.get('BLOB_THRESHOLD', '51200'))  # 50 KB
 
+REF_CACHE_DIR = os.environ.get('IC_CACHE_DIR', os.path.expanduser('~/.ic/cache'))
+REF_CACHE_TTL = int(os.environ.get('REF_CACHE_TTL', '300'))
+
 
 def app_to_reporter_branch(app_name):
     """Convert APPLICATION_NAME to conforma-reporter branch name.

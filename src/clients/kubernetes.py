@@ -104,7 +104,67 @@ class KubernetesClient(PipelineRunSource):
                     'repository_url': spec.get('source', {}).get('git', {}).get('url', ''),
                     'branch': spec.get('source', {}).get('git', {}).get('revision', ''),
                     'last_built_commit': status.get('lastBuiltCommit', ''),
+                    'nudges': spec.get('build-nudges-ref', []),
                 })
             return components
+        except Exception:
+            return []
+
+    def list_pac_repositories(self, namespace=None):
+        """List PipelinesAsCode Repository CRs — one per webhook-enabled repo."""
+        ns = namespace or self.namespace
+        try:
+            _ensure_k8s_config()
+            api = client.CustomObjectsApi()
+            result = api.list_namespaced_custom_object(
+                group='pipelinesascode.tekton.dev', version='v1alpha1',
+                namespace=ns, plural='repositories',
+            )
+            repos = []
+            for item in result.get('items', []):
+                spec = item.get('spec', {})
+                repos.append({
+                    'name': item.get('metadata', {}).get('name', ''),
+                    'url': spec.get('url', ''),
+                    'branch': spec.get('git_provider', {}).get('branch', ''),
+                })
+            return repos
+        except Exception:
+            return []
+
+    def list_recent_pipelineruns(self, component_name, namespace=None, limit=5):
+        """List recent PipelineRuns for a component, newest first."""
+        ns = namespace or self.namespace
+        try:
+            _ensure_k8s_config()
+            api = client.CustomObjectsApi()
+            result = api.list_namespaced_custom_object(
+                group='tekton.dev', version='v1',
+                namespace=ns, plural='pipelineruns',
+                label_selector='appstudio.openshift.io/component={}'.format(
+                    component_name),
+            )
+            runs = []
+            for item in result.get('items', []):
+                meta = item.get('metadata', {})
+                labels = meta.get('labels', {})
+                conditions = item.get('status', {}).get('conditions', [])
+                status = 'unknown'
+                for cond in conditions:
+                    if cond.get('type') == 'Succeeded':
+                        status = 'succeeded' if cond.get('status') == 'True' else 'failed'
+                        if cond.get('reason') == 'Running':
+                            status = 'running'
+                runs.append({
+                    'name': meta.get('name', ''),
+                    'status': status,
+                    'commit_sha': labels.get(
+                        'pipelinesascode.tekton.dev/sha', ''),
+                    'event_type': labels.get(
+                        'pipelinesascode.tekton.dev/event-type', ''),
+                    'created_at': meta.get('creationTimestamp', ''),
+                })
+            runs.sort(key=lambda r: r['created_at'], reverse=True)
+            return runs[:limit]
         except Exception:
             return []
