@@ -3,20 +3,17 @@
 import os
 from pathlib import Path
 
+from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, KUBEARCHIVE_URL, NAMESPACE  # noqa: F401
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 PYTHON_DIR = PROJECT_DIR / 'src'
 
-NAMESPACE = os.environ.get('NAMESPACE', '')
-APPLICATION_NAME = os.environ.get('APPLICATION_NAME', '')
 KNOWN_APPLICATIONS = os.environ.get('KNOWN_APPLICATIONS', '').split()
 AUTONOMOUS_MODE = os.environ.get('AUTONOMOUS_MODE', 'false')
 
 DB_CONTAINER = os.environ.get('DB_CONTAINER', 'ci-autohealing-db')
 DB_NAME = os.environ.get('DB_NAME', 'konflux_monitoring')
 DB_USER = os.environ.get('DB_USER', 'postgres')
-
-KUBEARCHIVE_URL = os.environ.get('KUBEARCHIVE_URL', '')
-KONFLUX_UI_BASE = os.environ.get('KONFLUX_UI_BASE', '')
 
 JIRA_URL = os.environ.get('JIRA_URL', '')
 JIRA_EMAIL = os.environ.get('JIRA_EMAIL', '')

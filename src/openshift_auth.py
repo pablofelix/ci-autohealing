@@ -14,7 +14,7 @@ import requests
 from kubernetes import client, config
 
 
-from cli.config import KUBEARCHIVE_URL as KUBEARCHIVE_FALLBACK_URL
+from shared_config import KUBEARCHIVE_URL as KUBEARCHIVE_FALLBACK_URL
 
 _k8s_loaded = False
 

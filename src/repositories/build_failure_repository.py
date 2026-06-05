@@ -121,7 +121,7 @@ class BuildFailureRepository:
     def mark_resolved(self, component_name, application, namespace, resolution_pr_name,
                        resolution_commit_sha=None):
         try:
-            from cli.config import KONFLUX_UI_BASE
+            from shared_config import KONFLUX_UI_BASE
             resolution_url = (
                 "{}/ns/{}/pipelinerun/{}".format(KONFLUX_UI_BASE, namespace, resolution_pr_name)
             )

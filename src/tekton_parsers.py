@@ -214,7 +214,7 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
         pr_name = pr_data.get('metadata', {}).get('name')
         ns = pr_data.get('metadata', {}).get('namespace', namespace)
         if pr_name:
-            from cli.config import KONFLUX_UI_BASE
+            from shared_config import KONFLUX_UI_BASE
             konflux_url = (
                 "{}/ns/{}/applications/{}/pipelineruns/{}/logs"
             ).format(KONFLUX_UI_BASE, ns, application_name, pr_name)

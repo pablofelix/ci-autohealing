@@ -30,7 +30,7 @@ from mcp_server.models import (
     TriageResponse,
 )
 
-from cli.config import APPLICATION_NAME, KONFLUX_UI_BASE, NAMESPACE
+from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, NAMESPACE
 
 DEFAULT_APPLICATION = APPLICATION_NAME
 

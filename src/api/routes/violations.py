@@ -9,7 +9,7 @@ from mcp_server.models import ConformaViolationDetails
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 
-from cli.config import KONFLUX_UI_BASE, NAMESPACE
+from shared_config import KONFLUX_UI_BASE, NAMESPACE
 
 router = APIRouter(tags=["violations"])
 
