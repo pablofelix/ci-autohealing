@@ -7,16 +7,18 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-# Delegate to Python CLI unless we're being called back from it
-if [ "${IC_PYTHON_FALLBACK:-}" != "1" ]; then
-    exec $PYTHON "$SCRIPT_DIR/ic.py" "$@"
-fi
-
-# Load configuration
+# Load configuration early so $PYTHON is set before exec
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
     source "$SCRIPT_DIR/.env"
     set +a
+fi
+
+: "${PYTHON:=python3}"
+
+# Delegate to Python CLI unless we're being called back from it
+if [ "${IC_PYTHON_FALLBACK:-}" != "1" ]; then
+    exec $PYTHON "$SCRIPT_DIR/ic.py" "$@"
 fi
 
 source "$SCRIPT_DIR/ic-config.sh"
@@ -893,7 +895,7 @@ usage() {
     echo "    ic <1-N> [--log]                         Describe Nth failing component"
     echo "                                             (e.g., \"ic 1\" for component #1)"
     echo "                                             --log: Show complete logs"
-    echo "    ic triage                                Currently failing components overview"
+    echo "    ic triage                                Triage dashboard (tracked items + untracked)"
     echo ""
     echo -e "  ${CYAN}Releases:${NC}"
     echo "    ic get releases                          List recent Release CRs by epoch"
@@ -975,6 +977,32 @@ usage() {
     echo "    ic working                               Components currently working (last build = success)"
     echo "    ic resolved                              Components that were resolved"
     echo "    ic history <component>                   Full build history (successes + failures)"
+    echo ""
+    echo -e "  ${CYAN}Triage Tracking:${NC}"
+    echo "    ic triage                                Triage dashboard (tracked + untracked)"
+    echo "    ic triage show                           Same as above"
+    echo "    ic triage show --all                     Include resolved items"
+    echo "    ic triage track <component>              Start tracking a failure"
+    echo "    ic triage track <comp> --group 'label'   Track with group label"
+    echo "    ic triage track <comp> --slack <url>     Track with Slack thread"
+    echo "    ic triage track <comp> --jira <key>      Track with Jira ticket"
+    echo "    ic triage track <comp> --add-to <id>     Add component to existing item"
+    echo "    ic triage update <id> --slack <url>      Update tracking links"
+    echo "    ic triage update <id> --status monitoring Change status"
+    echo "    ic triage resolve <id|component>         Mark resolved"
+    echo "    ic triage resolve <id> --pr <url>        Resolve with fix PR"
+    echo "    ic triage report                         Status report table"
+    echo "    ic triage report --date 2026-06-01       Report for specific date"
+    echo "    ic triage history                        Resolved items (last 7 days)"
+    echo "    ic triage history --days 30              Resolved items (last 30 days)"
+    echo ""
+    echo -e "  ${CYAN}Watch Daemon:${NC}"
+    echo "    ic watch start                           Start event-driven watch daemon"
+    echo "    ic config watch list                     Show watched apps and watcher status"
+    echo "    ic config watch add <app>                Add application to watch list"
+    echo "    ic config watch remove <app>             Remove application from watch list"
+    echo "    ic config watch enable <watcher>         Enable a watcher (builds, tests, conforma, jira, components)"
+    echo "    ic config watch disable <watcher>        Disable a watcher"
     echo ""
     echo -e "  ${CYAN}Database:${NC}"
     echo "    ic db status                             Check database connection"

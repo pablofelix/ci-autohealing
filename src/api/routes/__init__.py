@@ -12,6 +12,7 @@ from api.routes import (
     patterns,
     releases,
     skills,
+    triage,
     violations,
 )
 
@@ -27,3 +28,4 @@ def mount_routes(app: FastAPI) -> None:
     app.include_router(exports.router, prefix="/api/v1")
     app.include_router(releases.router, prefix="/api/v1")
     app.include_router(skills.router, prefix="/api/v1")
+    app.include_router(triage.router, prefix="/api/v1")

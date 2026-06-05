@@ -127,6 +127,23 @@ def get_schedule(application: str) -> Optional[Dict[str, Any]]:
         return result
 
 
+@router.get("/applications/{application}/stale")
+def get_stale(application: str) -> Dict[str, Any]:
+    """Components with untriggered commits (branch HEAD ahead of last build)."""
+    from proactive.health_monitor import HealthMonitor
+    monitor = HealthMonitor(db=None)
+    return monitor.get_stale_components(application)
+
+
+@router.get("/applications/{application}/nightly")
+def get_nightly(application: str) -> Dict[str, Any]:
+    """Nightly build status: FBC fragment health + blockers."""
+    from proactive.health_monitor import HealthMonitor
+    db = _db()
+    monitor = HealthMonitor(db)
+    return monitor.get_nightly_status(application)
+
+
 @router.get("/applications/{application}/readiness")
 def get_readiness(application: str) -> Dict[str, Any]:
     build_repo = get_repository(BuildFailureRepository)

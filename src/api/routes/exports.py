@@ -1,7 +1,8 @@
 """Export endpoints: Jira, Markdown, Slack, JSON formats."""
 
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter
@@ -133,6 +134,41 @@ def _export_markdown(component: str, application: str, _include_logs: bool) -> s
     return f"No unresolved failures found for {component} in {application}"
 
 
+def _format_failure_duration(first_detected_at):
+    """Format how long a failure has been active."""
+    if not first_detected_at:
+        return None
+    first = first_detected_at
+    if hasattr(first, 'tzinfo') and (first.tzinfo is None):
+        first = first.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    days = (now - first).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return "{} ({} days)".format(first.strftime('%b %d'), days)
+
+
+def _fetch_open_prs(repo_url, branch, limit=3):
+    """Fetch open GitHub PRs for a component's branch. Returns [] on any error."""
+    if not repo_url:
+        return []
+    try:
+        from clients.github_client import GitHubClient, parse_github_repo
+        parsed = parse_github_repo(repo_url)
+        if not parsed:
+            return []
+        owner, repo = parsed
+        token = os.environ.get('GITHUB_TOKEN', '')
+        if not token:
+            return []
+        gh = GitHubClient(token)
+        return gh.list_pull_requests(owner, repo, base=branch or None, state='open', limit=limit)
+    except Exception:
+        return []
+
+
 def _export_slack(component: str, application: str, _include_logs: bool) -> str:
     failure = _build_repo().get_failure_details(component, application)
     analysis_row = _ai_repo().get_analysis_by_component(component, application)
@@ -147,6 +183,34 @@ def _export_slack(component: str, application: str, _include_logs: bool) -> str:
             text += f"Failed Step: `{failure['failed_step_name']}`\n"
         if failure.get('commit_sha') and failure.get('commit_url'):
             text += f"Commit: <{failure['commit_url']}|{failure['commit_sha'][:8]}> by {failure.get('commit_author')}\n"
+
+        if failure.get('repository_url'):
+            repo_name = failure['repository_url'].rstrip('/').split('/')[-1]
+            text += f"Repo: <{failure['repository_url']}|{repo_name}>"
+            if failure.get('branch'):
+                text += f" (`{failure['branch']}`)"
+            text += "\n"
+
+        duration = _format_failure_duration(failure.get('first_detected_at'))
+        if duration:
+            text += f"Failing since: {duration}\n"
+
+        open_prs = _fetch_open_prs(failure.get('repository_url'), failure.get('branch'))
+        if open_prs:
+            text += "\n:mag: *Open PRs:*\n"
+            for p in open_prs:
+                title = p['title'][:50] + ('...' if len(p['title']) > 50 else '')
+                text += f"  <{p['url']}|#{p['number']}> {title} ({p['author']})\n"
+
+        contacts = set()
+        if failure.get('commit_author'):
+            contacts.add(failure['commit_author'])
+        for p in open_prs:
+            if p.get('author'):
+                contacts.add(p['author'])
+        if contacts:
+            text += ":bust_in_silhouette: Contacts: {}\n".format(', '.join(sorted(contacts)))
+
         if ai:
             text += f"\n:robot_face: *AI Analysis* ({int(ai.confidence_score * 100)}% confidence)\n"
             text += f"Category: `{ai.failure_category}`\n"

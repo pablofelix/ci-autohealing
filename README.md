@@ -113,6 +113,19 @@ ic describe failure my-component-v3-4      # inspect a build failure in detail
 ic describe conforma my-component-v3-4     # inspect a conforma violation
 ```
 
+### Track
+
+```bash
+ic triage                                  # triage dashboard: tracked + untracked failures
+ic triage track my-comp --group "OFED 404" # track a failure with root cause group
+ic triage track other-comp --add-to 3      # add component to existing triage item
+ic triage update 3 --jira RHOAIENG-12345   # link Jira ticket
+ic triage update 3 --slack "https://..."   # link Slack thread
+ic triage resolve 3 -r "PR merged"         # mark resolved
+ic triage report                           # status report table
+ic triage history                          # resolved items (last 7 days)
+```
+
 ### Fix
 
 ```bash
@@ -300,6 +313,23 @@ ic jira inbox                              # unreviewed AI reply drafts
 ic jira inbox refine <N>                   # refine draft interactively
 ```
 
+### Triage Tracking
+
+```bash
+ic triage                                  # dashboard: tracked + untracked failures
+ic triage track <component>                # start tracking a failure
+ic triage track <comp> --group "label"     # track with root cause group
+ic triage track <comp> --add-to <id>       # add component to existing item
+ic triage update <id> --jira KEY           # link Jira ticket
+ic triage update <id> --slack URL          # link Slack thread
+ic triage update <id> --cause "desc"       # set root cause
+ic triage resolve <id|component>           # mark resolved
+ic triage resolve <id> -r "how" --pr URL   # resolve with details
+ic triage report                           # status report table
+ic triage report --date 2026-06-03         # report for specific date
+ic triage history [--days N]               # resolved items
+```
+
 ### Export
 
 ```bash
@@ -413,7 +443,7 @@ See `.env.example` for the full list with descriptions.
 │   ├── fixers/               # Fix generators (PR, Jira, verification)
 │   ├── collectors/           # Data collectors (failures, violations)
 │   ├── clients/              # External APIs (GitHub, GitLab, Jira, K8s, Quay, BlobStore)
-│   ├── repositories/         # Database repositories (SQL)
+│   ├── repositories/         # Database repositories (SQL, incl. triage tracking)
 │   ├── proactive/            # Health monitoring, CVE warnings, nightly staleness
 │   ├── utils/                # Shared utilities (log filtering)
 │   ├── tests/                # Test suite (402 tests)

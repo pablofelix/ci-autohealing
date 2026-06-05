@@ -13,9 +13,15 @@ You are triaging Konflux CI/CD **Conforma (Enterprise Contract) violations** for
 
 The working directory is: .
 
-### Step 1: Scan the current conforma landscape
+### Step 1: Check triage state and scan conforma landscape
 
-Run these commands to understand the full picture:
+Start by checking what's already tracked and what the current violation landscape looks like.
+
+Run these commands in parallel:
+
+```bash
+./ic triage show 2>/dev/null
+```
 
 ```bash
 ./ic get alerts 2>/dev/null
@@ -36,7 +42,8 @@ Run these commands to understand the full picture:
 If the user provided a specific component as `$ARGUMENTS`, skip this step and go directly to Step 2 for that component only.
 
 From the output, focus on **conforma violations only** (ignore build failures):
-- Total conforma violations (count and component names)
+- **Already tracked**: which violations have triage items with Jira/Slack/exception links
+- **Untracked**: which violations don't have triage items yet
 - Which violation rules are most common (from `conforma categories`)
 - Which scenarios are active (from `conforma scenarios`)
 - Which violations already have exceptions or Jira tickets
@@ -44,8 +51,8 @@ From the output, focus on **conforma violations only** (ignore build failures):
 Present a brief summary:
 ```
 ## Current Conforma Violations
-- X components failing conforma tests
-- Y total violations across Z distinct rules
+- X components failing conforma tests (Y already tracked, Z untracked)
+- N total violations across M distinct rules
 - Top violation categories: [list from conforma categories]
 - Exceptions: [count] with exceptions, [count] without
 ```
@@ -75,7 +82,7 @@ For each component with violations, gather data using ALL relevant `ic` commands
 - Affected images (single arch vs multi-arch — same violation across all arches?)
 - Total violations vs warnings vs successes (severity gauge)
 - Whether it has an exception (YES/PARTIAL/NO)
-- Whether it has a Jira ticket linked
+- Whether it has a Jira ticket linked (check triage items from Step 1)
 - How long it's been failing (Since column)
 
 **When violations share a rule across components, investigate one deeply and apply to all.**
@@ -123,12 +130,14 @@ Show a summary table:
 ```
 ## Conforma Triage Assessment
 
-| # | Component | Rule | Violations | Exception | AI Conf. | Solution |
-|---|-----------|------|------------|-----------|----------|----------|
-| 1 | comp-a    | hermetic_task | 4 | NO | 95% | Add hermetic param to pipeline |
-| 2 | comp-b    | labels | 11 | NO | 82% | Add required labels to Dockerfile |
+| # | Component | Rule | Violations | Exception | Tracked | AI Conf. | Solution |
+|---|-----------|------|------------|-----------|---------|----------|----------|
+| 1 | comp-a    | hermetic_task | 4 | NO | #5 | 95% | Add hermetic param to pipeline |
+| 2 | comp-b    | labels | 11 | NO | — | 82% | Add required labels to Dockerfile |
 | ...
 ```
+
+The "Tracked" column shows the triage item ID if already tracked, or "—" if untracked.
 
 Then for each root cause group, provide a **detailed diagnosis**:
 - What the violated rule requires and why it matters
@@ -136,7 +145,22 @@ Then for each root cause group, provide a **detailed diagnosis**:
 - Whether an exception is appropriate (and the exact exclusion string from the violation data)
 - Whether this is a new violation or chronic (from the "Since" date)
 
-### Step 6: Ask user what to do
+### Step 6: Track untracked violations
+
+For any violations not yet tracked in triage, track them now:
+
+```bash
+./ic triage track <component> --group "violation rule" --cause "root cause description" 2>/dev/null
+```
+
+If multiple components share the same violated rule, group them:
+
+```bash
+./ic triage track <first-component> --group "base_image_registries" --cause "untrusted base image" 2>/dev/null
+./ic triage track <second-component> --add-to <item-id> 2>/dev/null
+```
+
+### Step 7: Ask user what to do
 
 Use AskUserQuestion to ask the user what actions to take. Group violations when they share a root cause rule.
 
@@ -155,27 +179,41 @@ When the user selects "Create Jira ticket" or "Send Slack message":
 4. If edit: ask what to change, apply, show again, re-ask
 5. If send: show the formatted content for the user to copy
 
-### Step 7: Summary
+**After creating Jira or Slack messages, update the triage item:**
 
-After processing all violations, show:
+```bash
+./ic triage update <item-id> --jira RHOAIENG-XXXXX 2>/dev/null
+./ic triage update <item-id> --slack "https://slack-thread-url" 2>/dev/null
+```
+
+### Step 8: Summary
+
+After processing all violations, show a combined view using triage report:
+
+```bash
+./ic triage report 2>/dev/null
+```
+
+Then summarize:
 
 ```
 ## Conforma Triage Complete
 
 Diagnosed:
-- Group A (labels.required_labels, 2 components): [root cause + solution]
-- Group B (base_image_registries, 4 components): [root cause + solution]
-- Group C (cve.cve_results_found, 3 components): [root cause + solution]
+- Group A (labels.required_labels, 2 components): [root cause + solution] — Triage #N
+- Group B (base_image_registries, 4 components): [root cause + solution] — Triage #M
+- Group C (cve.cve_results_found, 3 components): [root cause + solution] — Triage #P
 
 Actions taken:
-- Jira content generated for: comp-a, comp-b
+- Jira content generated for: comp-a (RHOAIENG-XXXXX), comp-b (RHOAIENG-YYYYY)
 - Slack messages generated for: comp-c
+- Triage items created: #N, #M, #P
 
 Already covered (exceptions):
 - comp-e: full policy exception
 
 Still pending:
-- comp-g: needs manual investigation (reason)
+- comp-g: needs manual investigation (reason) — Triage #Q
 
 Next steps:
 - [Specific actionable items based on the diagnosis]
@@ -192,3 +230,5 @@ Next steps:
 - When multiple components share the same violated rule, investigate one deeply and apply findings to the group
 - Pay attention to exception status — fully excepted violations don't need action
 - Use the AI analysis `recommended_fix` field — it often contains specific fix steps
+- ALWAYS track violations in `ic triage` — this is how we maintain state across sessions
+- Update triage items with Jira keys and Slack URLs as you create them

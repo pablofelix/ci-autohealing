@@ -75,6 +75,11 @@ def _resolution_repo():
     return _get_repo(ResolutionAttemptRepository)
 
 
+def _triage_repo():
+    from repositories.triage_repository import TriageRepository
+    return _get_repo(TriageRepository)
+
+
 def _konflux_url(pr_name: str) -> str:
     return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
 
@@ -430,6 +435,189 @@ def get_triage(application: str = DEFAULT_APPLICATION) -> TriageResponse:
 
 @mcp.tool()
 @async_tool
+def get_triage_report(application: str = DEFAULT_APPLICATION,
+                      date: Optional[str] = None) -> Dict[str, Any]:
+    """Get triage tracking report: tracked items with status, Slack/Jira links.
+
+    Returns active and resolved triage items with their tracking info.
+    Use date parameter (YYYY-MM-DD) to filter to a specific day.
+
+    Args:
+        application: Which version to query
+        date: Optional date filter (YYYY-MM-DD)
+    """
+    repo = _triage_repo()
+    items = repo.get_report(application, date=date)
+    summary = repo.get_summary(application)
+    return {"application": application, "summary": summary, "items": items}
+
+
+@mcp.tool()
+@async_tool
+def track_triage_item(component: str,
+                      application: str = DEFAULT_APPLICATION,
+                      group_label: Optional[str] = None,
+                      root_cause: Optional[str] = None,
+                      failed_step: Optional[str] = None,
+                      slack_thread_url: Optional[str] = None,
+                      jira_key: Optional[str] = None,
+                      notes: Optional[str] = None,
+                      add_to_id: Optional[int] = None) -> Dict[str, Any]:
+    """Track a build failure in triage. Creates or updates a triage item.
+
+    Use add_to_id to add a component to an existing triage group.
+
+    Args:
+        component: Component name to track
+        application: Which version
+        group_label: Group label (e.g., "Go 1.26 mismatch")
+        root_cause: Root cause description
+        failed_step: Failed build step
+        slack_thread_url: Slack thread URL
+        jira_key: Jira ticket key
+        notes: Additional notes
+        add_to_id: Add to existing triage item ID instead of creating new
+    """
+    repo = _triage_repo()
+
+    if add_to_id:
+        existing = repo.get_by_id(add_to_id)
+        if not existing:
+            return {"error": "Triage item #{} not found".format(add_to_id)}
+        components = list(existing['components'])
+        if component not in components:
+            components.append(component)
+        updates = {'components': components}
+        if slack_thread_url:
+            updates['slack_thread_url'] = slack_thread_url
+        if jira_key:
+            updates['jira_key'] = jira_key
+        if notes:
+            updates['notes'] = notes
+        repo.update_item(add_to_id, **updates)
+        return {"action": "added", "item_id": add_to_id, "component": component}
+
+    existing = repo.find_by_component(component, application)
+    if existing:
+        return {"action": "exists", "item": existing}
+
+    item_id = repo.create_item(
+        application=application, components=[component],
+        group_label=group_label, root_cause=root_cause,
+        failed_step=failed_step, slack_thread_url=slack_thread_url,
+        jira_key=jira_key, notes=notes,
+    )
+    return {"action": "created", "item_id": item_id, "component": component}
+
+
+@mcp.tool()
+@async_tool
+def update_triage_item(item_id: int,
+                       slack_thread_url: Optional[str] = None,
+                       jira_key: Optional[str] = None,
+                       notes: Optional[str] = None,
+                       root_cause: Optional[str] = None,
+                       status: Optional[str] = None,
+                       resolution: Optional[str] = None,
+                       resolution_pr_url: Optional[str] = None) -> Dict[str, Any]:
+    """Update a triage item's tracking info or resolve it.
+
+    Args:
+        item_id: Triage item ID
+        slack_thread_url: Slack thread URL
+        jira_key: Jira ticket key
+        notes: Additional notes
+        root_cause: Root cause description
+        status: New status (active, monitoring, resolved)
+        resolution: Resolution description (when resolving)
+        resolution_pr_url: Fix PR URL (when resolving)
+    """
+    repo = _triage_repo()
+    existing = repo.get_by_id(item_id)
+    if not existing:
+        return {"error": "Triage item #{} not found".format(item_id)}
+
+    if status == 'resolved':
+        repo.resolve_item(item_id, resolution=resolution, pr_url=resolution_pr_url)
+        return {"action": "resolved", "item_id": item_id}
+
+    updates = {}
+    if slack_thread_url:
+        updates['slack_thread_url'] = slack_thread_url
+    if jira_key:
+        updates['jira_key'] = jira_key
+    if notes:
+        updates['notes'] = notes
+    if root_cause:
+        updates['root_cause'] = root_cause
+    if status:
+        updates['status'] = status
+    if not updates:
+        return {"error": "No updates provided"}
+    repo.update_item(item_id, **updates)
+    return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
+
+
+@mcp.tool()
+@async_tool
+def get_component_status(component: str) -> Dict[str, Any]:
+    """Get component promotion health: last build vs last promoted image, downstream nudges.
+
+    Returns source repo, branch, container image, last built commit,
+    last promoted image, and nudges from the Kubernetes cluster.
+
+    Args:
+        component: Component name
+    """
+    from clients.kubernetes import KubernetesClient
+    from openshift_auth import _ensure_k8s_config
+    _ensure_k8s_config()
+    kc = KubernetesClient(namespace=NAMESPACE)
+    meta = kc.get_component_metadata(component)
+    if not meta:
+        return {"error": "Component not found: {}".format(component)}
+    return {"component": component, **meta}
+
+
+@mcp.tool()
+@async_tool
+def get_component_prs(component: str, state: str = "open", limit: int = 10) -> Dict[str, Any]:
+    """Get GitHub PRs for a component's source repo and branch.
+
+    Looks up the component's repo/branch from the cluster, then queries GitHub
+    for PRs against that branch. Useful for finding fix PRs.
+
+    Args:
+        component: Component name
+        state: PR state filter: "open", "closed", or "all"
+        limit: Maximum PRs to return (default: 10)
+    """
+    import os
+    from clients.kubernetes import KubernetesClient
+    from clients.github_client import GitHubClient, parse_github_repo
+    from openshift_auth import _ensure_k8s_config
+    _ensure_k8s_config()
+    kc = KubernetesClient(namespace=NAMESPACE)
+    meta = kc.get_component_metadata(component)
+    if not meta or not meta.get('repository_url'):
+        return {"error": "Component not found or no repo URL: {}".format(component)}
+    parsed = parse_github_repo(meta['repository_url'])
+    if not parsed:
+        return {"error": "Cannot parse GitHub URL: {}".format(meta['repository_url'])}
+    owner, repo = parsed
+    token = os.environ.get('GITHUB_TOKEN', '')
+    gh = GitHubClient(token)
+    prs = gh.list_pull_requests(owner, repo, base=meta.get('branch'), state=state, limit=limit)
+    return {
+        "component": component,
+        "repository": "{}/{}".format(owner, repo),
+        "branch": meta.get('branch', ''),
+        "prs": prs,
+    }
+
+
+@mcp.tool()
+@async_tool
 def get_working(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
     """Get components currently working (last build = success).
 
@@ -441,13 +629,16 @@ def get_working(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
 
 @mcp.tool()
 @async_tool
-def get_resolved(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
+def get_resolved(application: str = DEFAULT_APPLICATION, days: Optional[int] = None, since: Optional[str] = None, to: Optional[str] = None) -> List[Dict[str, Any]]:
     """Get components that were resolved (previously failing, now fixed).
 
     Args:
         application: Which version to query
+        days: Only show components resolved in the last N days (default: all)
+        since: Only show components resolved since date (YYYY-MM-DD)
+        to: Upper bound date (YYYY-MM-DD), use with since for a range
     """
-    return _build_repo().get_resolved_components(application)
+    return _build_repo().get_resolved_components(application, days=days, since=since, to=to)
 
 
 @mcp.tool()
@@ -501,30 +692,6 @@ def get_health(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
     monitor = HealthMonitor(get_pool())
     summary = monitor.get_component_health_summary()
     return summary or []
-
-
-@mcp.tool()
-@async_tool
-def get_component_status(component: str) -> Dict[str, Any]:
-    """Get component promotion health: last build vs last promoted image, downstream nudges.
-
-    Args:
-        component: Component name
-    """
-    from clients.kubernetes import KubernetesClient
-    k8s = KubernetesClient(namespace=NAMESPACE)
-    metadata = k8s.get_component_metadata(component)
-    if not metadata:
-        return {'component': component, 'error': 'Component not found in cluster'}
-    return {
-        'component': component,
-        'repository': metadata.get('repository_url', ''),
-        'branch': metadata.get('branch', ''),
-        'last_promoted_image': metadata.get('last_promoted_image', ''),
-        'last_built_commit': metadata.get('last_built_commit', ''),
-        'container_image': metadata.get('container_image', ''),
-        'nudges_downstream': metadata.get('nudges', []),
-    }
 
 
 @mcp.tool()
@@ -1140,6 +1307,58 @@ def export_slack(
             text += f"Failed Step: `{failure['failed_step_name']}`\n"
         if failure.get('commit_sha') and failure.get('commit_url'):
             text += f"Commit: <{failure['commit_url']}|{failure['commit_sha'][:8]}> by {failure.get('commit_author')}\n"
+
+        if failure.get('repository_url'):
+            repo_name = failure['repository_url'].rstrip('/').split('/')[-1]
+            text += f"Repo: <{failure['repository_url']}|{repo_name}>"
+            if failure.get('branch'):
+                text += f" (`{failure['branch']}`)"
+            text += "\n"
+
+        first_detected = failure.get('first_detected_at')
+        if first_detected:
+            from datetime import datetime, timezone
+            first = first_detected
+            if hasattr(first, 'tzinfo') and (first.tzinfo is None):
+                first = first.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            days = (now - first).days
+            if days == 0:
+                text += "Failing since: today\n"
+            elif days == 1:
+                text += "Failing since: yesterday\n"
+            else:
+                text += "Failing since: {} ({} days)\n".format(first.strftime('%b %d'), days)
+
+        open_prs = []
+        if failure.get('repository_url'):
+            try:
+                import os
+                from clients.github_client import GitHubClient, parse_github_repo
+                parsed = parse_github_repo(failure['repository_url'])
+                token = os.environ.get('GITHUB_TOKEN', '')
+                if parsed and token:
+                    owner, repo = parsed
+                    gh = GitHubClient(token)
+                    open_prs = gh.list_pull_requests(owner, repo, base=failure.get('branch'),
+                                                    state='open', limit=3)
+            except Exception:
+                pass
+        if open_prs:
+            text += "\n:mag: *Open PRs:*\n"
+            for p in open_prs:
+                title = p['title'][:50] + ('...' if len(p['title']) > 50 else '')
+                text += "  <{}|#{}> {} ({})\n".format(p['url'], p['number'], title, p['author'])
+
+        contacts = set()
+        if failure.get('commit_author'):
+            contacts.add(failure['commit_author'])
+        for p in open_prs:
+            if p.get('author'):
+                contacts.add(p['author'])
+        if contacts:
+            text += ":bust_in_silhouette: Contacts: {}\n".format(', '.join(sorted(contacts)))
+
         if ai:
             text += f"\n:robot_face: *AI Analysis* ({int(ai.confidence_score * 100)}% confidence)\n"
             text += f"Category: `{ai.failure_category}`\n"
@@ -1163,6 +1382,71 @@ def export_slack(
         return text
 
     return f"No unresolved failures found for {component} in {application}"
+
+
+@mcp.tool()
+@async_tool
+def lookup_image(image_ref: str) -> Dict[str, Any]:
+    """Given a quay.io image URL or sha256 digest, find which component produced it.
+
+    Args:
+        image_ref: Image URL, sha256 digest, or partial digest
+    """
+    db_matches = _build_repo().find_by_image(image_ref)
+
+    cluster_matches = []
+    try:
+        from clients.kubernetes import KubernetesClient
+        kc = KubernetesClient(namespace=NAMESPACE)
+        all_comps = kc.list_components()
+        term = image_ref.lower()
+        cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+    except Exception:
+        pass
+
+    return {
+        'query': image_ref,
+        'db_matches': db_matches,
+        'cluster_matches': cluster_matches,
+        'total_matches': len(db_matches) + len(cluster_matches),
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_stale_components(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Detect components where the branch has commits that never triggered a build.
+
+    Compares each component's lastBuiltCommit (from cluster) against the GitHub
+    branch HEAD. Stale components may indicate webhook failures or build misconfigs.
+
+    Args:
+        application: Which version to query
+    """
+    from proactive.health_monitor import HealthMonitor
+    monitor = HealthMonitor(db=None)
+    return monitor.get_stale_components(application)
+
+
+@mcp.tool()
+@async_tool
+def get_nightly_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get nightly build status: FBC fragment health + what's blocking it.
+
+    Shows the FBC (Fully Bundled Catalog) fragment component status and
+    lists any failing components that block the nightly build.
+
+    Args:
+        application: Which version to query
+    """
+    from proactive.health_monitor import HealthMonitor
+    from repositories.connection import DatabaseConnection
+    from config import CollectorConfig
+
+    cfg = CollectorConfig.from_env()
+    db = DatabaseConnection(cfg.db)
+    monitor = HealthMonitor(db)
+    return monitor.get_nightly_status(application)
 
 
 # ---------------------------------------------------------------------------

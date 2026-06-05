@@ -134,6 +134,7 @@ SQL operations on PostgreSQL tables. Parameterized queries, no business logic. L
 - **ConformaRepository** — `conforma_results` table
 - **ComponentHealthRepository** — `component_health` table
 - **ErrorPatternRepository** — `error_patterns` table
+- **TriageRepository** — `triage_items` table (cross-session tracking of build/conforma investigations with Jira, Slack, and PR links)
 - **SyncStatusRepository** — `sync_status` cache table
 - **DatabaseSkillRegistry** — `skill_sources` + `skills` tables (dual-mode: PostgreSQL in cluster, JSON file locally)
 
@@ -226,12 +227,14 @@ Autonomous fix generation with safety gates.
 - Transports: stdio (Claude Code) and SSE (remote agents)
 - Each tool accepts `application` parameter for multi-version queries
 - Includes skill registry tools: `list_skills`, `get_skill_info`, `list_skill_sources`
+- Triage tracking tools: `get_triage_report`, `track_triage_item`, `update_triage_item`
 - Run: `python -m serve --mcp`
 
 **REST API** (FastAPI):
 - OpenAPI docs at `/docs`
 - API key auth via `IC_API_KEY` env var
 - Skill endpoints: `GET /api/v1/skills`, `GET /api/v1/skills/sources`, `GET /api/v1/skills/{name}`
+- Triage endpoints: `GET/POST /api/v1/applications/{app}/triage`, `PUT .../{id}`, `POST .../{id}/resolve`
 - Run: `python -m serve --api`
 
 **Combined:** `python -m serve --api --mcp-sse` runs both in one process.

@@ -1,0 +1,472 @@
+"""Triage subcommands: track, update, resolve, report, history."""
+
+import json as json_mod
+
+import click
+
+from cli import config as cfg
+
+
+@click.group(invoke_without_command=True)
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.pass_context
+def triage(ctx, output_json):
+    """Triage dashboard — track build failure investigations."""
+    ctx.ensure_object(dict)
+    ctx.obj['json'] = ctx.obj.get('json') or output_json
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(triage_show)
+
+
+@triage.command('show')
+@click.option('--all', 'show_all', is_flag=True, help='Include resolved items')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_show(ctx, show_all, output_json):
+    """Show current triage items and untracked failures."""
+    from cli.db import get_repo, require_db
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+    from repositories.build_failure_repository import BuildFailureRepository
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    app = cfg.APPLICATION_NAME
+    triage_repo = get_repo(TriageRepository)
+    build_repo = get_repo(BuildFailureRepository)
+
+    items = triage_repo.get_all(app) if show_all else triage_repo.get_active(app)
+    summary = triage_repo.get_summary(app)
+    build_triage = build_repo.get_triage_summary(app)
+
+    tracked_components = set()
+    for item in items:
+        tracked_components.update(item['components'])
+
+    untracked = [
+        c for c in build_triage['failing_components']
+        if c['component'] not in tracked_components
+    ]
+
+    if is_json:
+        print(json_mod.dumps({
+            'application': app,
+            'summary': summary,
+            'items': items,
+            'untracked_failures': untracked,
+        }, default=str, indent=2))
+        return
+
+    section_header('Triage Dashboard — {}'.format(app))
+    print()
+    print(bold('Overview:'))
+    print('  Active: {}  Monitoring: {}  Resolved: {}'.format(
+        red(str(summary['active'])) if summary['active'] else '0',
+        yellow(str(summary['monitoring'])) if summary['monitoring'] else '0',
+        green(str(summary['resolved'])),
+    ))
+    print('  Build failures (DB): {} failing, {} working'.format(
+        build_triage['failing'], build_triage['working']))
+    print()
+
+    if items:
+        print(bold('Tracked Items:'))
+        print()
+        for item in items:
+            _print_item_row(item)
+        print()
+
+    if untracked:
+        print(bold(red('Untracked Failures ({})'.format(len(untracked)))))
+        print()
+        for c in untracked:
+            print('  {} {}'.format(red('•'), c['component']))
+        print()
+        print(dim("  Track with: ic triage track <component> [--group 'label']"))
+        print()
+    elif not items:
+        print(green('  No active triage items or untracked failures.'))
+        print()
+
+    if items or untracked:
+        print(cyan('Commands:'))
+        print('  ic triage track <component>   Add to tracking')
+        print('  ic triage update <id> ...     Update links/notes')
+        print('  ic triage resolve <id>        Mark resolved')
+        print('  ic triage report              Status report table')
+        print()
+
+
+@triage.command('track')
+@click.argument('component')
+@click.option('--group', 'group_label', help='Group label (e.g., "Go 1.26 mismatch")')
+@click.option('--slack', 'slack_url', help='Slack thread URL')
+@click.option('--jira', 'jira_key', help='Jira ticket key (e.g., RHOAIENG-12345)')
+@click.option('--step', 'failed_step', help='Failed step (e.g., build-images)')
+@click.option('--cause', 'root_cause', help='Root cause description')
+@click.option('--notes', help='Additional notes')
+@click.option('--add-to', 'add_to_id', type=int,
+              help='Add component to existing triage item instead of creating new')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_track(ctx, component, group_label, slack_url, jira_key,
+                 failed_step, root_cause, notes, add_to_id, output_json):
+    """Track a component failure in triage."""
+    from cli.db import get_repo, require_db
+    from cli.formatting import cyan, green, yellow
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    app = cfg.APPLICATION_NAME
+    repo = get_repo(TriageRepository)
+
+    if add_to_id:
+        existing = repo.get_by_id(add_to_id)
+        if not existing:
+            _error('Triage item #{} not found'.format(add_to_id), is_json)
+            raise SystemExit(1)
+        components = list(existing['components'])
+        if component not in components:
+            components.append(component)
+        updates = {'components': components}
+        if slack_url:
+            updates['slack_thread_url'] = slack_url
+        if jira_key:
+            updates['jira_key'] = jira_key
+        if notes:
+            updates['notes'] = notes
+        repo.update_item(add_to_id, **updates)
+        if is_json:
+            print(json_mod.dumps({'action': 'added', 'item_id': add_to_id,
+                                  'component': component}, default=str))
+        else:
+            print(green('Added {} to triage item #{}'.format(
+                cyan(component), add_to_id)))
+        return
+
+    existing = repo.find_by_component(component, app)
+    if existing:
+        if is_json:
+            print(json_mod.dumps({'action': 'exists', 'item': existing}, default=str))
+        else:
+            print(yellow('Already tracked in item #{} ({})'.format(
+                existing['id'], existing['group_label'] or 'no group')))
+            print('  Use {} to update it'.format(
+                cyan('ic triage update {}'.format(existing['id']))))
+        return
+
+    item_id = repo.create_item(
+        application=app,
+        components=[component],
+        group_label=group_label,
+        root_cause=root_cause,
+        failed_step=failed_step,
+        slack_thread_url=slack_url,
+        jira_key=jira_key,
+        notes=notes,
+    )
+
+    if is_json:
+        print(json_mod.dumps({'action': 'created', 'item_id': item_id,
+                              'component': component}, default=str))
+    else:
+        label = group_label or component
+        print(green('Created triage item #{}: {}'.format(item_id, cyan(label))))
+        if slack_url:
+            print('  Slack: {}'.format(slack_url))
+        if jira_key:
+            print('  Jira: {}'.format(jira_key))
+
+
+@triage.command('update')
+@click.argument('item_id', type=int)
+@click.option('--slack', 'slack_url', help='Slack thread URL')
+@click.option('--jira', 'jira_key', help='Jira ticket key')
+@click.option('--notes', help='Update notes')
+@click.option('--cause', 'root_cause', help='Root cause')
+@click.option('--group', 'group_label', help='Group label')
+@click.option('--status', type=click.Choice(['active', 'monitoring', 'resolved']))
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_update(ctx, item_id, slack_url, jira_key, notes,
+                  root_cause, group_label, status, output_json):
+    """Update a triage item's tracking info."""
+    from cli.db import get_repo, require_db
+    from cli.formatting import cyan, green
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    repo = get_repo(TriageRepository)
+    existing = repo.get_by_id(item_id)
+    if not existing:
+        _error('Triage item #{} not found'.format(item_id), is_json)
+        raise SystemExit(1)
+
+    if status == 'resolved':
+        repo.resolve_item(item_id)
+        if is_json:
+            print(json_mod.dumps({'action': 'resolved', 'item_id': item_id}, default=str))
+        else:
+            print(green('Resolved triage item #{}'.format(item_id)))
+        return
+
+    updates = {}
+    if slack_url:
+        updates['slack_thread_url'] = slack_url
+    if jira_key:
+        updates['jira_key'] = jira_key
+    if notes:
+        updates['notes'] = notes
+    if root_cause:
+        updates['root_cause'] = root_cause
+    if group_label:
+        updates['group_label'] = group_label
+    if status:
+        updates['status'] = status
+
+    if not updates:
+        _error('No updates provided. Use --slack, --jira, --notes, etc.', is_json)
+        raise SystemExit(1)
+
+    repo.update_item(item_id, **updates)
+
+    if is_json:
+        print(json_mod.dumps({'action': 'updated', 'item_id': item_id,
+                              'updates': list(updates.keys())}, default=str))
+    else:
+        print(green('Updated triage item #{}'.format(item_id)))
+        for k, v in updates.items():
+            print('  {}: {}'.format(k, cyan(str(v))))
+
+
+@triage.command('resolve')
+@click.argument('target')
+@click.option('--resolution', '-r', help='How it was fixed')
+@click.option('--pr', 'pr_url', help='Fix PR URL')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_resolve(ctx, target, resolution, pr_url, output_json):
+    """Mark a triage item as resolved. TARGET is item ID or component name."""
+    from cli.db import get_repo, require_db
+    from cli.formatting import cyan, green
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    repo = get_repo(TriageRepository)
+
+    if target.isdigit():
+        item_id = int(target)
+        item = repo.get_by_id(item_id)
+    else:
+        item = repo.find_by_component(target, cfg.APPLICATION_NAME)
+        item_id = item['id'] if item else None
+
+    if not item:
+        _error('Triage item not found: {}'.format(target), is_json)
+        raise SystemExit(1)
+
+    repo.resolve_item(item_id, resolution=resolution, pr_url=pr_url)
+
+    if is_json:
+        print(json_mod.dumps({'action': 'resolved', 'item_id': item_id}, default=str))
+    else:
+        label = item.get('group_label') or ', '.join(item['components'][:2])
+        print(green('Resolved triage item #{}: {}'.format(item_id, cyan(label))))
+        if resolution:
+            print('  Resolution: {}'.format(resolution))
+        if pr_url:
+            print('  PR: {}'.format(pr_url))
+
+
+@triage.command('report')
+@click.option('--date', help='Report for specific date (YYYY-MM-DD)')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_report(ctx, date, output_json):
+    """Generate status report table."""
+    from cli.db import get_repo, print_table, require_db
+    from cli.formatting import bold, dim, section_header
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    app = cfg.APPLICATION_NAME
+    repo = get_repo(TriageRepository)
+    items = repo.get_report(app, date=date)
+    summary = repo.get_summary(app)
+
+    if is_json:
+        print(json_mod.dumps({
+            'application': app,
+            'date': date,
+            'summary': summary,
+            'items': items,
+        }, default=str, indent=2))
+        return
+
+    title = 'Triage Report — {}'.format(app)
+    if date:
+        title += ' ({})'.format(date)
+    section_header(title)
+    print()
+
+    if not items:
+        print('  No triage items found.')
+        print()
+        return
+
+    resolved = [i for i in items if i['status'] == 'resolved']
+    active = [i for i in items if i['status'] != 'resolved']
+
+    if active:
+        print(bold('Active / Monitoring'))
+        print()
+        headers = ['#', 'Root Cause', 'Components', 'Tracking', 'Status']
+        rows = []
+        for item in active:
+            comps = ', '.join(item['components'][:3])
+            if len(item['components']) > 3:
+                comps += ' +{}'.format(len(item['components']) - 3)
+            tracking = _tracking_str(item)
+            label = item['group_label'] or (item['root_cause'] or '')[:40]
+            status_str = item['status'].upper()
+            rows.append((item['id'], label, comps, tracking, status_str))
+        print_table(headers, rows)
+        print()
+
+    if resolved:
+        print(bold('Resolved'))
+        print()
+        headers = ['#', 'Root Cause', 'Components', 'Resolution', 'Resolved']
+        rows = []
+        for item in resolved:
+            comps = ', '.join(item['components'][:3])
+            if len(item['components']) > 3:
+                comps += ' +{}'.format(len(item['components']) - 3)
+            label = item['group_label'] or (item['root_cause'] or '')[:40]
+            res = (item['resolution'] or '')[:40]
+            resolved_date = str(item['resolved_at'])[:10] if item['resolved_at'] else ''
+            rows.append((item['id'], label, comps, res, resolved_date))
+        print_table(headers, rows)
+        print()
+
+    print(dim('Summary: {} active, {} monitoring, {} resolved'.format(
+        summary['active'], summary['monitoring'], summary['resolved'])))
+    print()
+
+
+@triage.command('history')
+@click.option('--days', type=int, default=7, help='Days to look back (default: 7)')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def triage_history(ctx, days, output_json):
+    """Show resolved triage items."""
+    from cli.db import get_repo, print_table, require_db
+    from cli.formatting import dim, section_header
+    from repositories.triage_repository import TriageRepository
+
+    is_json = output_json or ctx.obj.get('json')
+    if not require_db():
+        return
+
+    app = cfg.APPLICATION_NAME
+    repo = get_repo(TriageRepository)
+    items = repo.get_all(app, days=days)
+    resolved = [i for i in items if i['status'] == 'resolved']
+
+    if is_json:
+        print(json_mod.dumps({
+            'application': app,
+            'days': days,
+            'items': resolved,
+        }, default=str, indent=2))
+        return
+
+    section_header('Triage History — last {} days'.format(days))
+    print()
+    if not resolved:
+        print('  No resolved items in the last {} days.'.format(days))
+        print()
+        return
+
+    headers = ['#', 'Root Cause', 'Components', 'Resolution', 'Resolved']
+    rows = []
+    for item in resolved:
+        comps = ', '.join(item['components'][:3])
+        if len(item['components']) > 3:
+            comps += ' +{}'.format(len(item['components']) - 3)
+        label = item['group_label'] or (item['root_cause'] or '')[:40]
+        res = (item['resolution'] or '')[:40]
+        resolved_date = str(item['resolved_at'])[:10] if item['resolved_at'] else ''
+        rows.append((item['id'], label, comps, res, resolved_date))
+    print_table(headers, rows)
+    print()
+    print(dim('{} resolved item(s)'.format(len(resolved))))
+    print()
+
+
+def _tracking_str(item):
+    parts = []
+    if item.get('jira_key'):
+        parts.append(item['jira_key'])
+    if item.get('slack_thread_url'):
+        parts.append('Slack')
+    return ', '.join(parts) if parts else '—'
+
+
+def _print_item_row(item):
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+
+    status = item['status']
+    if status == 'active':
+        icon = red('•')
+        status_str = red('ACTIVE')
+    elif status == 'monitoring':
+        icon = yellow('•')
+        status_str = yellow('MONITORING')
+    else:
+        icon = green('✓')
+        status_str = green('RESOLVED')
+
+    label = item['group_label'] or ', '.join(item['components'][:2])
+    print('  {} #{} {} [{}]'.format(icon, item['id'], bold(label), status_str))
+
+    comps = ', '.join(item['components'])
+    print('    Components: {}'.format(cyan(comps)))
+
+    if item.get('root_cause'):
+        print('    Cause: {}'.format(item['root_cause'][:80]))
+
+    tracking = []
+    if item.get('jira_key'):
+        tracking.append('Jira: {}'.format(item['jira_key']))
+    if item.get('slack_thread_url'):
+        tracking.append('Slack: {}'.format(item['slack_thread_url']))
+    if tracking:
+        print('    {}'.format(dim('  '.join(tracking))))
+
+    if item.get('notes'):
+        print('    Notes: {}'.format(dim(item['notes'][:60])))
+
+    print()
+
+
+def _error(msg, is_json):
+    if is_json:
+        print(json_mod.dumps({'error': msg}))
+    else:
+        from cli.formatting import red
+        print(red('Error: {}'.format(msg)))

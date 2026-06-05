@@ -79,3 +79,32 @@ class KubernetesClient(PipelineRunSource):
             }
         except Exception:
             return None
+
+    def list_components(self, namespace=None, application=None):
+        """List all Component CRs in the namespace, optionally filtered by application."""
+        ns = namespace or self.namespace
+        try:
+            _ensure_k8s_config()
+            api = client.CustomObjectsApi()
+            result = api.list_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=ns, plural='components',
+            )
+            components = []
+            for item in result.get('items', []):
+                spec = item.get('spec', {})
+                status = item.get('status', {})
+                app = spec.get('application', '')
+                if application and app != application:
+                    continue
+                components.append({
+                    'name': item.get('metadata', {}).get('name', ''),
+                    'application': app,
+                    'container_image': spec.get('containerImage', ''),
+                    'repository_url': spec.get('source', {}).get('git', {}).get('url', ''),
+                    'branch': spec.get('source', {}).get('git', {}).get('revision', ''),
+                    'last_built_commit': status.get('lastBuiltCommit', ''),
+                })
+            return components
+        except Exception:
+            return []

@@ -473,6 +473,28 @@ class GitHubClient:
             'base_branch': data.get('base', {}).get('ref', ''),
         }
 
+    def list_pull_requests(self, owner, repo, base=None, state='open', limit=10):
+        """List PRs for a repo, optionally filtered by base branch."""
+        params = {'state': state, 'per_page': min(limit, 100), 'sort': 'updated', 'direction': 'desc'}
+        if base:
+            params['base'] = base
+        resp = self._get('/repos/{}/{}/pulls'.format(owner, repo), params=params)
+        if not resp:
+            return []
+        return [
+            {
+                'number': pr.get('number'),
+                'title': pr.get('title', ''),
+                'state': pr.get('state', ''),
+                'url': pr.get('html_url', ''),
+                'author': pr.get('user', {}).get('login', ''),
+                'base_branch': pr.get('base', {}).get('ref', ''),
+                'updated_at': pr.get('updated_at', ''),
+                'merged': pr.get('merged_at') is not None,
+            }
+            for pr in resp.json()[:limit]
+        ]
+
     def check_rate_limit(self):
         """Check remaining API rate limit."""
         resp = self._get('/rate_limit')

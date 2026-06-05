@@ -5,6 +5,7 @@ before failures fully manifest. CVE checks query the OCI registry for SARIF data
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -314,3 +315,194 @@ class HealthMonitor:
                 """)
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_nightly_status(self, application):
+        """Assemble nightly status: FBC fragment health + build blockers.
+
+        Returns a dict suitable for CLI, MCP, and API consumption.
+        """
+        fbc_name = _nightly_component_for_app(application)
+
+        fbc_health = None
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT component_name, last_successful_build, last_failed_build,
+                       current_status, health_score
+                FROM component_health
+                WHERE component_name = %s
+            """, (fbc_name,))
+            row = cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                fbc_health = dict(zip(cols, row))
+
+        fbc_image = None
+        try:
+            from clients.kubernetes import KubernetesClient
+            kc = KubernetesClient(namespace=os.environ.get('NAMESPACE', 'rhoai-tenant'))
+            meta = kc.get_component_metadata(fbc_name)
+            if meta:
+                fbc_image = meta.get('container_image') or meta.get('last_promoted_image')
+        except Exception:
+            pass
+
+        fbc_conforma = None
+        try:
+            from repositories.conforma_repository import ConformaRepository
+            conforma_repo = ConformaRepository(self.db)
+            violation = conforma_repo.get_violation_details(fbc_name, application)
+            if violation:
+                fbc_conforma = {
+                    'violations_count': violation.get('violations_count', 0),
+                    'warnings_count': violation.get('warnings_count', 0),
+                    'scenario': violation.get('scenario', ''),
+                    'violation_summary': violation.get('violation_summary', ''),
+                }
+        except Exception:
+            pass
+
+        from repositories.build_failure_repository import BuildFailureRepository
+        build_repo = BuildFailureRepository(self.db)
+        triage = build_repo.get_triage_summary(application)
+        failing = [c for c in triage.get('failing_components', [])
+                    if c['component'] != fbc_name]
+
+        comp_names = [c['component'] for c in failing]
+        last_success_map = {}
+        if comp_names:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT component_name, last_successful_build
+                    FROM component_health
+                    WHERE component_name = ANY(%s)
+                """, (comp_names,))
+                for row in cursor.fetchall():
+                    if row[1]:
+                        last_success_map[row[0]] = row[1]
+
+        blockers = []
+        for comp in failing:
+            comp_name = comp['component']
+
+            blocker = {
+                'component': comp_name,
+                'error_type': comp.get('error_type', ''),
+                'error_message': comp.get('error_message', ''),
+                'first_detected_at': comp.get('first_detected_at'),
+                'last_successful_build': last_success_map.get(comp_name),
+                'has_analysis': comp.get('ai_analyzed', False),
+            }
+
+            if comp.get('ai_analyzed'):
+                try:
+                    from repositories.ai_analysis_repository import AIAnalysisRepository
+                    ai_repo = AIAnalysisRepository(self.db)
+                    analysis = ai_repo.get_analysis_by_component(comp_name, application)
+                    if analysis:
+                        blocker['failure_category'] = analysis.get('failure_category', '')
+                        blocker['root_cause_summary'] = (analysis.get('root_cause') or '')[:150]
+                except Exception:
+                    pass
+
+            blockers.append(blocker)
+
+        return {
+            'application': application,
+            'fbc_component': fbc_name,
+            'fbc_health': fbc_health,
+            'fbc_image': fbc_image,
+            'fbc_conforma': fbc_conforma,
+            'blockers': blockers,
+            'blockers_count': len(blockers),
+        }
+
+    def get_stale_components(self, application=None):
+        """Detect components where branch HEAD is ahead of lastBuiltCommit.
+
+        Compares each component's last built commit (from cluster Component CR)
+        against the GitHub branch HEAD. Returns only components with a mismatch.
+        """
+        from clients.github_client import GitHubClient, parse_github_repo
+        from clients.kubernetes import KubernetesClient
+
+        namespace = os.environ.get('NAMESPACE', '')
+        app_name = application or os.environ.get('APPLICATION_NAME', '')
+        token = os.environ.get('GITHUB_TOKEN', '')
+        if not namespace:
+            return {'application': app_name, 'stale': [], 'skipped': 0,
+                    'error': 'NAMESPACE not set'}
+
+        kc = KubernetesClient(namespace=namespace)
+        all_comps = kc.list_components(application=app_name or None)
+
+        gh = GitHubClient(token)
+        candidates = []
+        skipped = 0
+        for comp in all_comps:
+            repo_url = comp.get('repository_url', '')
+            built = comp.get('last_built_commit', '')
+            branch = comp.get('branch', '')
+            parsed = parse_github_repo(repo_url)
+            if not parsed or not branch:
+                skipped += 1
+                continue
+            if not built:
+                skipped += 1
+                continue
+            candidates.append({**comp, '_owner': parsed[0], '_repo': parsed[1]})
+
+        unique_refs = {}
+        for c in candidates:
+            key = (c['_owner'], c['_repo'], c['branch'])
+            if key not in unique_refs:
+                unique_refs[key] = None
+
+        def _fetch_head(key):
+            owner, repo, branch = key
+            try:
+                sha = gh.get_ref_sha(owner, repo, branch)
+                return (key, sha)
+            except Exception:
+                return (key, None)
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            for key, sha in pool.map(lambda k: _fetch_head(k), unique_refs.keys()):
+                unique_refs[key] = sha
+
+        api_errors = sum(1 for v in unique_refs.values() if v is None)
+
+        stale = []
+        for comp in candidates:
+            key = (comp['_owner'], comp['_repo'], comp['branch'])
+            head = unique_refs.get(key)
+            if not head:
+                continue
+            if head == comp['last_built_commit']:
+                continue
+            stale.append({
+                'component': comp['name'],
+                'application': comp.get('application', ''),
+                'repository_url': comp.get('repository_url', ''),
+                'branch': comp['branch'],
+                'built_commit': comp['last_built_commit'][:12],
+                'head_commit': head[:12],
+                'built_commit_full': comp['last_built_commit'],
+                'head_commit_full': head,
+            })
+
+        stale.sort(key=lambda s: s['component'])
+        result = {
+            'application': app_name,
+            'stale': stale,
+            'stale_count': len(stale),
+            'checked': len(candidates),
+            'skipped': skipped,
+            'unique_refs': len(unique_refs),
+        }
+        if api_errors:
+            result['api_errors'] = api_errors
+            result['warning'] = '{} of {} unique refs failed GitHub API lookup (rate limit?)'.format(
+                api_errors, len(unique_refs))
+        return result

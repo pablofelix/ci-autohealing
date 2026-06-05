@@ -1,0 +1,127 @@
+"""Triage tracking endpoints."""
+
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from repositories.repository_factory import get_repository
+from repositories.triage_repository import TriageRepository
+
+router = APIRouter(tags=["triage"])
+
+
+def _triage_repo():
+    return get_repository(TriageRepository)
+
+
+class TrackRequest(BaseModel):
+    component: str
+    group_label: Optional[str] = None
+    root_cause: Optional[str] = None
+    failed_step: Optional[str] = None
+    slack_thread_url: Optional[str] = None
+    jira_key: Optional[str] = None
+    notes: Optional[str] = None
+    add_to_id: Optional[int] = None
+
+
+class UpdateRequest(BaseModel):
+    slack_thread_url: Optional[str] = None
+    jira_key: Optional[str] = None
+    notes: Optional[str] = None
+    root_cause: Optional[str] = None
+    group_label: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ResolveRequest(BaseModel):
+    resolution: Optional[str] = None
+    resolution_pr_url: Optional[str] = None
+
+
+@router.get("/applications/{application}/triage")
+def get_triage_report(application: str, date: Optional[str] = None) -> Dict[str, Any]:
+    """Get triage tracking report with active and resolved items."""
+    repo = _triage_repo()
+    items = repo.get_report(application, date=date)
+    summary = repo.get_summary(application)
+    return {"application": application, "summary": summary, "items": items}
+
+
+@router.get("/applications/{application}/triage/{item_id}")
+def get_triage_item(application: str, item_id: int) -> Dict[str, Any]:
+    """Get a single triage item by ID."""
+    repo = _triage_repo()
+    item = repo.get_by_id(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+    return item
+
+
+@router.post("/applications/{application}/triage")
+def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
+    """Track a build failure or violation in triage."""
+    repo = _triage_repo()
+
+    if req.add_to_id:
+        existing = repo.get_by_id(req.add_to_id)
+        if not existing:
+            raise HTTPException(status_code=404,
+                                detail=f"Triage item #{req.add_to_id} not found")
+        components = list(existing['components'])
+        if req.component not in components:
+            components.append(req.component)
+        updates = {'components': components}
+        if req.slack_thread_url:
+            updates['slack_thread_url'] = req.slack_thread_url
+        if req.jira_key:
+            updates['jira_key'] = req.jira_key
+        if req.notes:
+            updates['notes'] = req.notes
+        repo.update_item(req.add_to_id, **updates)
+        return {"action": "added", "item_id": req.add_to_id, "component": req.component}
+
+    existing = repo.find_by_component(req.component, application)
+    if existing:
+        return {"action": "exists", "item": existing}
+
+    item_id = repo.create_item(
+        application=application,
+        components=[req.component],
+        group_label=req.group_label,
+        root_cause=req.root_cause,
+        failed_step=req.failed_step,
+        slack_thread_url=req.slack_thread_url,
+        jira_key=req.jira_key,
+        notes=req.notes,
+    )
+    return {"action": "created", "item_id": item_id, "component": req.component}
+
+
+@router.put("/applications/{application}/triage/{item_id}")
+def update_triage_item(application: str, item_id: int, req: UpdateRequest) -> Dict[str, Any]:
+    """Update a triage item's tracking info."""
+    repo = _triage_repo()
+    existing = repo.get_by_id(item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    repo.update_item(item_id, **updates)
+    return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
+
+
+@router.post("/applications/{application}/triage/{item_id}/resolve")
+def resolve_triage_item(application: str, item_id: int, req: ResolveRequest) -> Dict[str, Any]:
+    """Mark a triage item as resolved."""
+    repo = _triage_repo()
+    existing = repo.get_by_id(item_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+
+    repo.resolve_item(item_id, resolution=req.resolution, pr_url=req.resolution_pr_url)
+    return {"action": "resolved", "item_id": item_id}

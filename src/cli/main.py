@@ -1035,56 +1035,154 @@ def ai_stats(fixes):
 
 # --- Top-level commands ---
 
+from cli.commands.triage import triage  # noqa: E402
+cli.add_command(triage)
+
+
 @cli.command()
-def triage():
-    """Currently failing components overview."""
-    from cli.db import get_repo, print_table, require_db
-    from cli.formatting import bold, cyan, green, red, section_header
-    from repositories.build_failure_repository import BuildFailureRepository
-    if not require_db():
+@click.argument('name')
+@click.option('--prs', is_flag=True, default=False, help='Also show open GitHub PRs')
+@click.pass_context
+def source(ctx, name, prs):
+    """Show component source info: repo, branch, image, and optionally open PRs."""
+    import os
+    from cli.formatting import bold, cyan, dim, red, section_header, yellow
+    from clients.kubernetes import KubernetesClient
+    from openshift_auth import _ensure_k8s_config
+
+    is_json = ctx.obj.get('json') if ctx.obj else False
+
+    _ensure_k8s_config()
+    kc = KubernetesClient(namespace=cfg.NAMESPACE)
+    meta = kc.get_component_metadata(name)
+
+    if not meta:
+        print(red('Component not found: {}'.format(name)))
         return
-    app = cfg.APPLICATION_NAME
-    data = get_repo(BuildFailureRepository).get_triage_summary(app)
-    section_header('Triage Dashboard')
+
+    if is_json and not prs:
+        print(json_mod.dumps({'component': name, **meta}, default=str, indent=2))
+        return
+
+    section_header('Component: {}'.format(name))
     print()
-    print(bold('Overview:'))
-    print('  Total build records: {}'.format(data['total']))
-    print('  Currently failing: {}'.format(red(str(data['failing']))))
-    print('  Currently working: {}'.format(green(str(data['working']))))
+    print('  {}  {}'.format(bold('Repo:'), cyan(meta.get('repository_url', '-'))))
+    print('  {}  {}'.format(bold('Branch:'), meta.get('branch', '-')))
+    print('  {}  {}'.format(bold('Image:'), meta.get('container_image', '-')[:80]))
+    last_commit = meta.get('last_built_commit', '')
+    if last_commit:
+        print('  {}  {}'.format(bold('Last built:'), last_commit[:12]))
+    promoted = meta.get('last_promoted_image', '')
+    if promoted:
+        print('  {}  {}'.format(bold('Promoted:'), promoted[:80]))
+    nudges = meta.get('nudges', [])
+    if nudges:
+        print('  {}  {}'.format(bold('Nudges:'), ', '.join(nudges[:5])))
     print()
-    print(bold(red('Currently Failing Components:')))
-    print_table(
-        ['Component', 'Last Failure', 'Has Logs'],
-        [(c['component'], c['last_failure'],
-          'Yes' if c['has_logs'] else 'No')
-         for c in data['failing_components']],
-    )
-    print()
-    print(cyan('Next Steps:'))
-    print('  1. Pick a component from above')
-    print('  2. Run: {} for full details'.format(bold('ic describe component <name>')))
-    print('  3. Run: {} for complete logs'.format(bold('ic describe component <name> --log')))
-    print('  4. Use: {} to see components that are currently working'.format(bold('ic working')))
+
+    if not prs:
+        print(dim("Tip: Use '--prs' to also show open GitHub PRs"))
+        print()
+        return
+
+    repo_url = meta.get('repository_url', '')
+    branch = meta.get('branch', '')
+    if not repo_url:
+        print(yellow('No repository URL — cannot check PRs'))
+        return
+
+    from clients.github_client import GitHubClient, parse_github_repo
+    parsed = parse_github_repo(repo_url)
+    if not parsed:
+        print(yellow('Cannot parse GitHub URL: {}'.format(repo_url)))
+        return
+    owner, repo = parsed
+
+    token = os.environ.get('GITHUB_TOKEN', '')
+    gh = GitHubClient(token)
+    open_prs = gh.list_pull_requests(owner, repo, base=branch, state='open', limit=10)
+
+    if is_json:
+        print(json_mod.dumps({
+            'component': name, **meta,
+            'open_prs': open_prs,
+        }, default=str, indent=2))
+        return
+
+    if not open_prs:
+        print(dim('  No open PRs against {}'.format(branch)))
+    else:
+        print(bold('  Open PRs against {}:'.format(branch)))
+        for p in open_prs:
+            print('    #{} {} ({})'.format(p['number'], p['title'][:60], cyan(p['author'])))
+            print('      {}'.format(dim(p['url'])))
     print()
 
 
 @cli.command()
-def resolved():
+@click.option('--days', type=int, default=None, help='Only show components resolved in the last N days')
+@click.option('--since', type=str, default=None, help='Only show components resolved since date (YYYY-MM-DD)')
+@click.option('--to', type=str, default=None, help='Upper bound date (YYYY-MM-DD), use with --since for a range')
+@click.pass_context
+def resolved(ctx, days, since, to):
     """Resolved components."""
+    import re
     from cli.db import get_repo, print_table, require_db
-    from cli.formatting import cyan, section_header
+    from cli.formatting import cyan, dim, red, section_header
     from repositories.build_failure_repository import BuildFailureRepository
+    date_re = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+    for label, val in [('--since', since), ('--to', to)]:
+        if val and not date_re.match(val):
+            print(red('Error:') + ' {} must be YYYY-MM-DD, got: {}'.format(label, val))
+            return
     if not require_db():
         return
-    rows = get_repo(BuildFailureRepository).get_resolved_components(cfg.APPLICATION_NAME)
-    section_header('Resolved Components')
-    print()
-    print_table(
-        ['Component', 'Resolved At', 'Failures Fixed'],
-        [(r['component'], r['resolved_at'], r['count']) for r in rows],
+    rows = get_repo(BuildFailureRepository).get_resolved_components(
+        cfg.APPLICATION_NAME, days=days, since=since, to=to,
     )
+
+    is_json = ctx.obj.get('json') if ctx.obj else False
+    if is_json:
+        print(json_mod.dumps({
+            'application': cfg.APPLICATION_NAME,
+            'days': days,
+            'since': since,
+            'to': to,
+            'items': rows,
+        }, default=str, indent=2))
+        return
+
+    title = 'Resolved Components'
+    if since and to:
+        title += ' — {} to {}'.format(since, to)
+    elif since:
+        title += ' — since {}'.format(since)
+    elif days:
+        title += ' — last {} day{}'.format(days, 's' if days != 1 else '')
+    section_header(title)
     print()
-    print(cyan('Tip:') + " Use 'ic history <component>' to see full history")
+    if not rows:
+        label = ''
+        if since:
+            label = ' since {}'.format(since)
+        elif days:
+            label = ' in the last {} day{}'.format(days, 's' if days != 1 else '')
+        print('  No resolved components{}.'.format(label))
+        print()
+        return
+    headers = ['Component', 'Resolved', 'Fixed', 'Commit', 'Build']
+    table_rows = []
+    for r in rows:
+        resolved_date = str(r['resolved_at'])[:16] if r['resolved_at'] else ''
+        sha = (r.get('commit_sha') or '')[:7]
+        url = r.get('resolution_url') or ''
+        pipelinerun = url.rsplit('/', 1)[-1] if url and 'retrigger-resolved' not in url else ''
+        table_rows.append((r['component'], resolved_date, r['count'], sha, pipelinerun))
+    print_table(headers, table_rows)
+    print()
+    print(dim('{} resolved component(s)'.format(len(rows))))
+    print()
+    print(cyan('Tip:') + " Use '--json' for full URLs or 'ic history <component>' for details")
     print()
 
 
@@ -1109,6 +1207,216 @@ def working():
     print('  Use: {} to see full build history'.format(bold('ic history <component>')))
     print('  Use: {} to see currently failing components'.format(bold('ic triage')))
     print()
+
+
+@cli.command()
+@click.argument('application', required=False)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def stale(ctx, application, output_json):
+    """Detect components with untriggered commits."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+    from proactive.health_monitor import HealthMonitor
+
+    output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
+    app = application or cfg.APPLICATION_NAME
+
+    monitor = HealthMonitor(db=None)
+    result = monitor.get_stale_components(app)
+
+    if output_json:
+        print(json_mod.dumps(result, indent=2, default=str))
+        return
+
+    if result.get('error'):
+        print(red('Error: {}'.format(result['error'])))
+        return
+
+    section_header('Stale Components: {}'.format(app))
+    print()
+
+    stale_list = result.get('stale', [])
+    if not stale_list:
+        if result.get('warning'):
+            print(yellow('Warning: ' + result['warning']))
+            print(dim('  Results may be incomplete — set GITHUB_TOKEN for reliable checks'))
+        else:
+            print(green('All components up to date'))
+        print(dim('  Checked {} components ({} skipped — {} unique refs queried)'.format(
+            result.get('checked', 0), result.get('skipped', 0), result.get('unique_refs', 0))))
+        print()
+        return
+
+    print(bold(yellow('{} component(s) with untriggered commits:'.format(len(stale_list)))))
+    print()
+    from cli.db import print_table
+    print_table(
+        ['Component', 'Branch', 'Built', 'HEAD', 'Repo'],
+        [(s['component'], s['branch'],
+          s['built_commit'], s['head_commit'],
+          s['repository_url'].rstrip('/').split('/')[-1])
+         for s in stale_list],
+    )
+    print()
+    print(dim('Checked {} components ({} skipped — {} unique refs queried)'.format(
+        result.get('checked', 0), result.get('skipped', 0), result.get('unique_refs', 0))))
+    if result.get('warning'):
+        print(yellow('Warning: ' + result['warning']))
+    print()
+    print(cyan('Tip:') + ' A stale component means a push to the branch did not trigger a build.')
+    print('  Use {} to see component details.'.format(bold('ic source <component>')))
+    print()
+
+
+@cli.command()
+@click.argument('application', required=False)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def nightly(ctx, application, output_json):
+    """Nightly build status: FBC fragment health + blockers."""
+    import json as json_mod
+    from cli.db import require_db
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+    from config import CollectorConfig
+    from proactive.health_monitor import HealthMonitor
+    from repositories.connection import DatabaseConnection
+
+    output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
+    app = application or cfg.APPLICATION_NAME
+
+    try:
+        conf = CollectorConfig.from_env()
+        db = DatabaseConnection(conf.db)
+    except Exception:
+        if not require_db():
+            return
+        return
+
+    monitor = HealthMonitor(db)
+    status = monitor.get_nightly_status(app)
+
+    if output_json:
+        print(json_mod.dumps(status, indent=2, default=str))
+        return
+
+    section_header('Nightly Status: {}'.format(app))
+    print()
+
+    fbc = status.get('fbc_health')
+    fbc_name = status.get('fbc_component', '')
+    if fbc:
+        score = fbc.get('health_score')
+        score_str = '{}%'.format(score) if score is not None else 'N/A'
+        st = fbc.get('current_status') or 'unknown'
+        color = green if st == 'Succeeded' else red if st == 'Failed' else yellow
+        print(bold('FBC Fragment: ') + fbc_name)
+        print('  Status: {}  Health: {}'.format(color(st), score_str))
+        last = fbc.get('last_successful_build')
+        if last:
+            print('  Last success: {}'.format(str(last)[:16]))
+    else:
+        print(bold('FBC Fragment: ') + fbc_name)
+        print('  ' + dim('No health data found'))
+
+    if status.get('fbc_image'):
+        print('  Image: {}'.format(status['fbc_image'][:80]))
+
+    conforma = status.get('fbc_conforma')
+    if conforma and (conforma.get('violations_count', 0) > 0 or conforma.get('warnings_count', 0) > 0):
+        print('  Conforma: {} violations, {} warnings'.format(
+            conforma['violations_count'], conforma['warnings_count']))
+
+    print()
+
+    blockers = status.get('blockers', [])
+    if blockers:
+        print(bold(red('{} blocker(s):'.format(len(blockers)))))
+        print()
+        for b in blockers:
+            err = b.get('error_type') or b.get('failure_category') or 'unknown'
+            print('  {} — {}'.format(bold(b['component']), err))
+            if b.get('root_cause_summary'):
+                print('    {}'.format(dim(b['root_cause_summary'])))
+            if b.get('last_successful_build'):
+                print('    Last success: {}'.format(str(b['last_successful_build'])[:16]))
+    else:
+        print(green('No build blockers'))
+
+    print()
+    print(cyan('Tip:') + ' Use {} for details on a blocker'.format(bold('ic describe <component>')))
+    print()
+
+
+@cli.command()
+@click.argument('image_ref')
+@click.pass_context
+def lookup(ctx, image_ref):
+    """Find which component produced a given image or digest."""
+    import json as json_mod
+    from cli.db import get_repo, print_table, require_db
+    from cli.formatting import bold, cyan, section_header
+    from repositories.build_failure_repository import BuildFailureRepository
+    output_json = ctx.obj.get('json') if ctx.obj else False
+
+    db_matches = []
+    try:
+        if require_db():
+            db_matches = get_repo(BuildFailureRepository).find_by_image(image_ref)
+    except SystemExit:
+        pass
+
+    cluster_matches = []
+    try:
+        from clients.kubernetes import KubernetesClient
+        kc = KubernetesClient(namespace=cfg.NAMESPACE)
+        all_comps = kc.list_components()
+        term = image_ref.lower()
+        cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+    except Exception:
+        pass
+
+    if output_json:
+        print(json_mod.dumps({
+            'query': image_ref,
+            'db_matches': db_matches,
+            'cluster_matches': cluster_matches,
+        }, indent=2, default=str))
+        return
+
+    section_header('Image Lookup: {}'.format(image_ref[:60]))
+    print()
+
+    if db_matches:
+        print(bold('Found in build records:'))
+        print_table(
+            ['Component', 'Application', 'Status', 'PipelineRun', 'Date'],
+            [(m['component_name'], m['application'],
+              'Resolved' if m['is_resolved'] else m['status'],
+              m['pipelinerun_name'], m.get('first_detected_at', ''))
+             for m in db_matches],
+        )
+        print()
+        for m in db_matches[:3]:
+            if m.get('repository_url'):
+                print('  Repo: {}  Branch: {}'.format(m['repository_url'], m.get('branch', '')))
+    else:
+        print('  No matches in build records.')
+
+    print()
+    if cluster_matches:
+        print(bold('Found in cluster components:'))
+        print_table(
+            ['Component', 'Application', 'Image'],
+            [(c['name'], c['application'], c['container_image'][:70]) for c in cluster_matches],
+        )
+    else:
+        print('  No matches in cluster components.')
+    print()
+
+    if not db_matches and not cluster_matches:
+        print(cyan('No matches found. Try a longer digest or full image URL.'))
+        print()
 
 
 @cli.command()

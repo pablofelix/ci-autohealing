@@ -166,3 +166,26 @@ def get_working(application: str) -> List[Dict[str, Any]]:
 def get_resolved(application: str) -> List[Dict[str, Any]]:
     """Components resolved (previously failing, now fixed)."""
     return _build_repo().get_resolved_components(application)
+
+
+@router.get("/lookup")
+def lookup_image(image: str) -> Dict[str, Any]:
+    """Find which component produced a given image or digest."""
+    db_matches = _build_repo().find_by_image(image)
+
+    cluster_matches = []
+    try:
+        from clients.kubernetes import KubernetesClient
+        kc = KubernetesClient(namespace=NAMESPACE)
+        all_comps = kc.list_components()
+        term = image.lower()
+        cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+    except Exception:
+        pass
+
+    return {
+        'query': image,
+        'db_matches': db_matches,
+        'cluster_matches': cluster_matches,
+        'total_matches': len(db_matches) + len(cluster_matches),
+    }

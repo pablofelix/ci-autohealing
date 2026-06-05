@@ -13,9 +13,15 @@ You are triaging Konflux CI/CD **build failures** for the RHOAI project. Your pr
 
 The working directory is: .
 
-### Step 1: Scan the current alert landscape
+### Step 1: Check triage state and scan alerts
 
-Run these two commands and parse their output:
+Start by checking what's already tracked and what the current alert landscape looks like.
+
+Run these commands in parallel:
+
+```bash
+./ic triage show 2>/dev/null
+```
 
 ```bash
 ./ic get alerts 2>/dev/null
@@ -25,20 +31,20 @@ Run these two commands and parse their output:
 ./ic get alerts --group 2>/dev/null
 ```
 
-If the user provided a specific component as `$ARGUMENTS`, skip this step and go directly to Step 2 for that component only.
+If the user provided a specific component as `$ARGUMENTS`, skip the full scan and go directly to Step 2 for that component only.
 
-From the output, focus on **build failures only** (ignore conforma violations):
-- Total build failures (count and component names)
+From the output:
+- **Already tracked**: which failures have triage items with Jira/Slack/PR links
+- **Untracked**: which build failures don't have triage items yet
 - Root cause groups (which failures share the same failed step / error type)
 - In-progress builds (components currently building)
-- Which failures already have Jira tickets linked
 
 Present a brief summary:
 ```
 ## Current Build Failures
-- X build failures
-- Y root cause groups (list the groups briefly)
-- Z failures already have Jira tickets
+- X build failures (Y already tracked, Z untracked)
+- N root cause groups (list the groups briefly)
+- Tracked items: [list with Jira keys if any]
 ```
 
 ### Step 2: Investigate each build failure in depth
@@ -58,7 +64,7 @@ For each build failure, gather data using ALL relevant `ic` commands. Run them i
 - How long it's been failing (build history timeline — is this new or chronic?)
 - Whether it was ever green (important for new components vs regressions)
 - Whether AI analysis exists
-- Whether it already has a Jira ticket
+- Whether it already has a Jira ticket (check triage items from Step 1)
 - What commit triggered the failure (look at the commit message for clues)
 
 **When you need more detail on the error:**
@@ -112,12 +118,14 @@ Show a summary table:
 ```
 ## Build Triage Assessment
 
-| # | Component | Failed Step | Root Cause | AI Conf. | Solution |
-|---|-----------|-------------|------------|----------|----------|
-| 1 | comp-a    | init-task  | SA missing | 90% | Create SA in namespace |
-| 2 | comp-b    | fips-check  | base image | 85% | Update base image digest |
+| # | Component | Failed Step | Root Cause | AI Conf. | Tracked | Solution |
+|---|-----------|-------------|------------|----------|---------|----------|
+| 1 | comp-a    | init-task   | SA missing | 90%      | #3      | Create SA in namespace |
+| 2 | comp-b    | fips-check  | base image | 85%      | —       | Update base image digest |
 | ...
 ```
+
+The "Tracked" column shows the triage item ID if the failure is already being tracked, or "—" if untracked.
 
 Then for each failure (or group), provide a **detailed diagnosis**:
 - What the root cause is (with evidence from logs/AI)
@@ -125,7 +133,22 @@ Then for each failure (or group), provide a **detailed diagnosis**:
 - Whether this is a regression (it used to work) or a new component issue
 - Whether a retry/retrigger might fix it (transient vs persistent)
 
-### Step 6: Ask user what to do
+### Step 6: Track untracked failures
+
+For any failures not yet tracked in triage, track them now:
+
+```bash
+./ic triage track <component> --group "root cause label" --cause "root cause description" --step "failed-step" 2>/dev/null
+```
+
+If multiple components share the same root cause, track the first one and add the rest to the same item:
+
+```bash
+./ic triage track <first-component> --group "shared label" --cause "description" 2>/dev/null
+./ic triage track <second-component> --add-to <item-id> 2>/dev/null
+```
+
+### Step 7: Ask user what to do
 
 Use AskUserQuestion to ask the user what actions to take. Group related failures when they share a root cause.
 
@@ -144,23 +167,37 @@ When the user selects "Create Jira ticket" or "Send Slack message":
 4. If edit: ask what to change, apply, show again, re-ask
 5. If send: show the formatted content for the user to copy
 
-### Step 7: Summary
+**After creating Jira or Slack messages, update the triage item:**
 
-After processing all failures, show:
+```bash
+./ic triage update <item-id> --jira RHOAIENG-XXXXX 2>/dev/null
+./ic triage update <item-id> --slack "https://slack-thread-url" 2>/dev/null
+```
+
+### Step 8: Summary
+
+After processing all failures, show a combined view using triage report:
+
+```bash
+./ic triage report 2>/dev/null
+```
+
+Then summarize:
 
 ```
 ## Build Triage Complete
 
 Diagnosed:
-- Group A (fips-check, 5 components): [root cause + solution]
-- Group B (build-images, 1 component): [root cause + solution]
+- Group A (fips-check, 5 components): [root cause + solution] — Triage #N
+- Group B (build-images, 1 component): [root cause + solution] — Triage #M
 
 Actions taken:
-- Jira content generated for: comp-a, comp-b
+- Jira content generated for: comp-a (RHOAIENG-XXXXX), comp-b (RHOAIENG-YYYYY)
 - Slack messages generated for: comp-c
+- Triage items created: #N, #M
 
 Still pending:
-- comp-e: needs manual investigation (reason)
+- comp-e: needs manual investigation (reason) — Triage #P
 
 Next steps:
 - [Specific actionable items based on the diagnosis]
@@ -175,3 +212,5 @@ Next steps:
 - When multiple failures share a root cause, investigate one deeply and apply findings to the group
 - Use `ic history <component>` to understand whether this is a regression or a chronic issue
 - Use the AI analysis `recommended_fix` field — it often contains the specific fix steps
+- ALWAYS track failures in `ic triage` — this is how we maintain state across sessions
+- Update triage items with Jira keys and Slack URLs as you create them

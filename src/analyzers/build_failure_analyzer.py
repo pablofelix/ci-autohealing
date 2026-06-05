@@ -200,11 +200,13 @@ class BuildFailureAnalyzer:
             from enrichment.sources.dependency_context import DependencyContextSource
             from enrichment.sources.related_failures import RelatedFailuresSource
             from enrichment.sources.build_history import BuildHistorySource
+            from enrichment.sources.open_prs import OpenPRsSource
 
             orchestrator = EnrichmentOrchestrator(self.config, self.db)
             orchestrator.register_source(DependencyContextSource(self.config))
             orchestrator.register_source(RelatedFailuresSource(self.config, self.db))
             orchestrator.register_source(BuildHistorySource(self.config, self._github_client))
+            orchestrator.register_source(OpenPRsSource(self.config, self._github_client))
 
             logger.info("Auto-enriching context for %s", failure.get('component_name'))
             result = orchestrator.enrich_failure(failure)
@@ -869,6 +871,22 @@ CRITICAL FORMATTING RULES:
                         sections.append("  Fix applied: {}".format(rx['recommended_fix'][:200]))
                     if rx.get('commit_url'):
                         sections.append("  Resolution commit: {}".format(rx['commit_url']))
+
+            open_prs = enriched_context.get('open_prs')
+            if open_prs:
+                sections.append("\n### Open PRs Against This Branch")
+                sections.append("These PRs are currently open against the component's branch:")
+                for pr in open_prs:
+                    merged_label = ' (merged)' if pr.get('merged') else ''
+                    sections.append(
+                        "- PR #{}: {} by {} {}{}".format(
+                            pr.get('number', '?'),
+                            pr.get('title', ''),
+                            pr.get('author', ''),
+                            pr.get('url', ''),
+                            merged_label,
+                        )
+                    )
 
         return '\n'.join(sections) + '\n'
 

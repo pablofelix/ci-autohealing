@@ -434,18 +434,33 @@ class BuildFailureRepository:
             ]
             return summary
 
-    def get_resolved_components(self, application):
+    def get_resolved_components(self, application, days=None, since=None, to=None):
         with self.db.connection() as conn:
             cursor = conn.cursor()
+            date_filter = ""
+            params = [application]
+            if since is not None:
+                date_filter = " AND resolved_at >= %s"
+                params.append(since)
+            elif days is not None:
+                date_filter = " AND resolved_at >= NOW() - INTERVAL '1 day' * %s"
+                params.append(days)
+            if to is not None:
+                date_filter += " AND resolved_at < %s::date + INTERVAL '1 day'"
+                params.append(to)
             cursor.execute("""
-                SELECT component_name, MAX(resolved_at), COUNT(*)
+                SELECT component_name, MAX(resolved_at), COUNT(*),
+                       MAX(resolution_pr_url), MAX(resolution_commit_sha)
                 FROM build_failures
-                WHERE is_resolved = TRUE AND application = %s
+                WHERE is_resolved = TRUE AND application = %s{}
                 GROUP BY component_name
                 ORDER BY MAX(resolved_at) DESC
-            """, (application,))
+            """.format(date_filter), params)
             return [
-                {'component': r[0], 'resolved_at': r[1], 'count': r[2]}
+                {
+                    'component': r[0], 'resolved_at': r[1], 'count': r[2],
+                    'resolution_url': r[3], 'commit_sha': r[4],
+                }
                 for r in cursor.fetchall()
             ]
 
@@ -469,6 +484,30 @@ class BuildFailureRepository:
                 {'component': r[0], 'commit': r[1], 'message': r[2], 'date': r[3]}
                 for r in cursor.fetchall()
             ]
+
+    def find_by_image(self, image_ref):
+        """Find build records matching an image URL or digest.
+
+        Accepts full quay.io URL, sha256 digest, or partial digest.
+        """
+        term = image_ref.strip()
+        if len(term) < 6:
+            return []
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT component_name, application, pipelinerun_name,
+                       status, output_image, image_digest,
+                       first_detected_at, is_resolved,
+                       repository_url, branch, commit_sha, commit_author
+                FROM build_failures
+                WHERE output_image ILIKE %s
+                   OR image_digest ILIKE %s
+                ORDER BY first_detected_at DESC
+                LIMIT 10
+            """, ('%{}%'.format(term), '%{}%'.format(term)))
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_component_history(self, component, application, limit=20):
         with self.db.connection() as conn:

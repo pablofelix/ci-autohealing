@@ -23,17 +23,18 @@ logger = setup_logger(__name__)
 # Cluster query functions
 # ---------------------------------------------------------------------------
 
-def get_failing_build_components(config, recent_days=None):
+def get_failing_build_components(config, recent_days=None, application_override=None):
     """Get failing components from KubeArchive + live cluster (push builds only).
 
     Groups by component, tracks latest push build and latest incoming build
     separately. Returns components whose latest push build failed, and
     identifies which ones have a successful incoming re-trigger.
     """
+    app = application_override or config.k8s.application_name
     label_selector = (
         'appstudio.openshift.io/application={},'
         'pipelines.appstudio.openshift.io/type=build'
-    ).format(config.k8s.application_name)
+    ).format(app)
 
     pipelineruns = query_pipelineruns(config.k8s.namespace, label_selector,
                                      recent_days=recent_days)

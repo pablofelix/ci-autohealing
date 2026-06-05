@@ -18,6 +18,20 @@ from logger import setup_logger
 logger = setup_logger(__name__)
 
 
+def _empty_status():
+    return {
+        'cluster_connected': False,
+        'in_sync': False,
+        'cluster_components': [],
+        'db_components': [],
+        'missing_in_db': [],
+        'extra_in_db': [],
+        'retriggered_components': [],
+        'running_builds': [],
+        'error': None
+    }
+
+
 def _batch_get_component_metadata(component_names, namespace):
     """Fetch repo URL and branch for components via K8s API (individual gets)."""
     result = {}
@@ -56,116 +70,121 @@ def main():
     db = DatabaseConnection(config.db)
     build_repo = BuildFailureRepository(db)
     sync_repo = SyncStatusRepository(db)
-    application_name = config.k8s.application_name
 
-    status = {
-        'cluster_connected': False,
-        'in_sync': False,
-        'cluster_components': [],
-        'db_components': [],
-        'missing_in_db': [],
-        'extra_in_db': [],
-        'retriggered_components': [],
-        'running_builds': [],
-        'error': None
-    }
+    applications = list(config.watcher.applications)
+    if not applications:
+        applications = [config.k8s.application_name]
 
     if not is_logged_in():
-        status['error'] = 'Not logged into OpenShift cluster'
-        sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
-        print(json.dumps(status))
+        for app in applications:
+            status = _empty_status()
+            status['error'] = 'Not logged into OpenShift cluster'
+            sync_repo.save_build_sync_status(app, status, time.time() - start_time)
+        print(json.dumps({'error': 'Not logged into OpenShift cluster', 'applications': applications}))
         sys.exit(0)
 
-    status['cluster_connected'] = True
-
-    db_components = build_repo.find_failing_component_names(application_name)
-    if db_components is None:
-        status['error'] = 'Database connection failed'
-        sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
-        print(json.dumps(status))
-        sys.exit(0)
-
-    cluster_result = get_failing_build_components(config, recent_days=args.recent_days)
-    cluster_components = cluster_result['failing']
-    retriggered = cluster_result['retriggered']
-    running = cluster_result.get('running', {})
-    cluster_details = cluster_result.get('details', {})
-
-    missing_in_db = cluster_components - db_components
-    extra_in_db = db_components - cluster_components
-
-    if missing_in_db and cluster_details:
-        component_metadata = _batch_get_component_metadata(
-            sorted(missing_in_db), config.k8s.namespace)
-        collected = 0
-        for comp in missing_in_db:
-            detail = cluster_details.get(comp)
-            if not detail:
-                continue
-            meta = component_metadata.get(comp, {})
-            try:
-                build_repo.upsert_failure(
-                    pr_name=detail['pipelinerun_name'],
-                    pr_uid=detail['pipelinerun_uid'],
-                    component_name=comp,
-                    application=application_name,
-                    namespace=config.k8s.namespace,
-                    repo_url=meta.get('repository_url', ''),
-                    branch=meta.get('branch', ''),
-                    status='Failed',
-                )
-                collected += 1
-            except Exception as e:
-                logger.debug("Failed to insert stub for %s: %s", comp, e)
-        if collected:
-            logger.info("Inserted %d missing component(s) into build_failures", collected)
+    all_results = {}
 
     try:
         tr = TektonResultsClient(namespace=config.k8s.namespace)
     except Exception:
         tr = None
 
-    for comp in extra_in_db:
-        should_resolve = False
-        if tr:
-            try:
-                history = tr.query_component_build_history(
-                    application=application_name, component=comp, page_size=5)
-                if history:
-                    newest = max(history,
-                                key=lambda p: p.get('metadata', {}).get('creationTimestamp', ''))
-                    conds = newest.get('status', {}).get('conditions', [])
-                    if conds and conds[-1].get('status') == 'True':
-                        pr_name = newest.get('metadata', {}).get('name', 'sync-resolved')
-                        annotations = newest.get('metadata', {}).get('annotations', {})
-                        commit_sha = (
-                            annotations.get('build.appstudio.redhat.com/commit_sha') or
-                            annotations.get('pipelinesascode.tekton.dev/sha')
-                        )
-                        should_resolve = True
-                        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, pr_name,
-                                                 resolution_commit_sha=commit_sha)
-            except Exception:
-                pass
-        if not should_resolve:
-            extra_in_db = extra_in_db - {comp}
+    for application_name in applications:
+        app_start = time.time()
+        logger.info("Syncing application: %s", application_name)
 
-    for comp in retriggered:
-        build_repo.mark_resolved(comp, application_name, config.k8s.namespace, 'retrigger-resolved')
+        status = _empty_status()
+        status['cluster_connected'] = True
 
-    status['cluster_components'] = sorted(cluster_components)
-    status['db_components'] = sorted(db_components)
-    status['missing_in_db'] = sorted(missing_in_db)
-    status['extra_in_db'] = sorted(extra_in_db)
-    status['retriggered_components'] = sorted(retriggered)
-    status['running_builds'] = [
-        {'component': comp, **info} for comp, info in sorted(running.items())
-    ]
-    status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
+        db_components = build_repo.find_failing_component_names(application_name)
+        if db_components is None:
+            status['error'] = 'Database connection failed'
+            sync_repo.save_build_sync_status(application_name, status, time.time() - app_start)
+            all_results[application_name] = status
+            continue
 
-    sync_repo.save_build_sync_status(application_name, status, time.time() - start_time)
+        cluster_result = get_failing_build_components(config, recent_days=args.recent_days,
+                                                       application_override=application_name)
+        cluster_components = cluster_result['failing']
+        retriggered = cluster_result['retriggered']
+        running = cluster_result.get('running', {})
+        cluster_details = cluster_result.get('details', {})
 
-    print(json.dumps(status))
+        missing_in_db = cluster_components - db_components
+        extra_in_db = db_components - cluster_components
+
+        if missing_in_db and cluster_details:
+            component_metadata = _batch_get_component_metadata(
+                sorted(missing_in_db), config.k8s.namespace)
+            collected = 0
+            for comp in missing_in_db:
+                detail = cluster_details.get(comp)
+                if not detail:
+                    continue
+                meta = component_metadata.get(comp, {})
+                try:
+                    build_repo.upsert_failure(
+                        pr_name=detail['pipelinerun_name'],
+                        pr_uid=detail['pipelinerun_uid'],
+                        component_name=comp,
+                        application=application_name,
+                        namespace=config.k8s.namespace,
+                        repo_url=meta.get('repository_url', ''),
+                        branch=meta.get('branch', ''),
+                        status='Failed',
+                    )
+                    collected += 1
+                except Exception as e:
+                    logger.debug("Failed to insert stub for %s: %s", comp, e)
+            if collected:
+                logger.info("Inserted %d missing component(s) into build_failures for %s",
+                            collected, application_name)
+
+        for comp in extra_in_db:
+            should_resolve = False
+            if tr:
+                try:
+                    history = tr.query_component_build_history(
+                        application=application_name, component=comp, page_size=5)
+                    if history:
+                        newest = max(history,
+                                    key=lambda p: p.get('metadata', {}).get('creationTimestamp', ''))
+                        conds = newest.get('status', {}).get('conditions', [])
+                        if conds and conds[-1].get('status') == 'True':
+                            pr_name = newest.get('metadata', {}).get('name', 'sync-resolved')
+                            annotations = newest.get('metadata', {}).get('annotations', {})
+                            commit_sha = (
+                                annotations.get('build.appstudio.redhat.com/commit_sha') or
+                                annotations.get('pipelinesascode.tekton.dev/sha')
+                            )
+                            should_resolve = True
+                            build_repo.mark_resolved(comp, application_name, config.k8s.namespace, pr_name,
+                                                     resolution_commit_sha=commit_sha)
+                except Exception:
+                    pass
+            if not should_resolve:
+                extra_in_db = extra_in_db - {comp}
+
+        for comp in retriggered:
+            build_repo.mark_resolved(comp, application_name, config.k8s.namespace, 'retrigger-resolved')
+
+        status['cluster_components'] = sorted(cluster_components)
+        status['db_components'] = sorted(db_components)
+        status['missing_in_db'] = sorted(missing_in_db)
+        status['extra_in_db'] = sorted(extra_in_db)
+        status['retriggered_components'] = sorted(retriggered)
+        status['running_builds'] = [
+            {'component': comp, **info} for comp, info in sorted(running.items())
+        ]
+        status['in_sync'] = len(missing_in_db) == 0 and len(extra_in_db) == 0
+
+        sync_repo.save_build_sync_status(application_name, status, time.time() - app_start)
+        all_results[application_name] = status
+        logger.info("Synced %s in %.1fs (in_sync=%s)", application_name,
+                     time.time() - app_start, status['in_sync'])
+
+    print(json.dumps(all_results))
 
 
 if __name__ == '__main__':

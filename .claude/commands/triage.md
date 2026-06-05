@@ -1,8 +1,8 @@
-Triage CI failures: choose build or conforma focus.
+Triage CI failures: choose build or conforma focus, with full tracking.
 
 Usage: /triage [component-name]
 
-- No argument: ask what type to triage
+- No argument: show triage dashboard, then ask what type to triage
 - With component: auto-detect type and investigate
 
 ---
@@ -10,6 +10,14 @@ Usage: /triage [component-name]
 ## Instructions
 
 The working directory is: .
+
+### Always start by showing the triage dashboard:
+
+```bash
+./ic triage show 2>/dev/null
+```
+
+This shows tracked items, untracked failures, and the overall triage state. Present this to the user first.
 
 ### If a specific component was provided as `$ARGUMENTS`:
 
@@ -36,3 +44,5 @@ Options:
 
 - Build triage: follow the exact steps in /triage-build
 - Conforma triage: follow the exact steps in /triage-conforma
+
+Both workflows integrate `ic triage` tracking to maintain state across sessions.
