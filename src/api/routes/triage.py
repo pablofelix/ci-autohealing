@@ -34,6 +34,11 @@ class UpdateRequest(BaseModel):
     group_label: Optional[str] = None
     status: Optional[str] = None
 
+    class Config:
+        json_schema_extra = {
+            "description": "slack_thread_url appends to the list (does not replace)"
+        }
+
 
 class ResolveRequest(BaseModel):
     resolution: Optional[str] = None
@@ -73,13 +78,13 @@ def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
         if req.component not in components:
             components.append(req.component)
         updates = {'components': components}
-        if req.slack_thread_url:
-            updates['slack_thread_url'] = req.slack_thread_url
         if req.jira_key:
             updates['jira_key'] = req.jira_key
         if req.notes:
             updates['notes'] = req.notes
         repo.update_item(req.add_to_id, **updates)
+        if req.slack_thread_url:
+            repo.add_slack_url(req.add_to_id, req.slack_thread_url)
         return {"action": "added", "item_id": req.add_to_id, "component": req.component}
 
     existing = repo.find_by_component(req.component, application)
@@ -92,7 +97,7 @@ def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
         group_label=req.group_label,
         root_cause=req.root_cause,
         failed_step=req.failed_step,
-        slack_thread_url=req.slack_thread_url,
+        slack_thread_urls=[req.slack_thread_url] if req.slack_thread_url else None,
         jira_key=req.jira_key,
         notes=req.notes,
     )
@@ -107,11 +112,16 @@ def update_triage_item(application: str, item_id: int, req: UpdateRequest) -> Di
     if not existing:
         raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
 
-    updates = {k: v for k, v in req.dict().items() if v is not None}
-    if not updates:
+    updates = {k: v for k, v in req.dict().items()
+               if v is not None and k != 'slack_thread_url'}
+    if not updates and not req.slack_thread_url:
         raise HTTPException(status_code=400, detail="No updates provided")
 
-    repo.update_item(item_id, **updates)
+    if updates:
+        repo.update_item(item_id, **updates)
+    if req.slack_thread_url:
+        repo.add_slack_url(item_id, req.slack_thread_url)
+        updates['slack_thread_urls'] = 'added'
     return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
 
 

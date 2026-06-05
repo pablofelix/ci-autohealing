@@ -116,12 +116,13 @@ ic describe conforma my-component-v3-4     # inspect a conforma violation
 ### Track
 
 ```bash
-ic triage                                  # triage dashboard: tracked + untracked failures
+ic triage                                  # triage dashboard: tracked + untracked + open Jiras
 ic triage track my-comp --group "OFED 404" # track a failure with root cause group
 ic triage track other-comp --add-to 3      # add component to existing triage item
 ic triage update 3 --jira RHOAIENG-12345   # link Jira ticket
-ic triage update 3 --slack "https://..."   # link Slack thread
-ic triage resolve 3 -r "PR merged"         # mark resolved
+ic triage update 3 --slack "https://..."   # add Slack thread (accumulates, never overwrites)
+ic triage resolve 3 -r "PR merged"         # mark resolved (prompts to update linked Jira)
+ic triage resolve RHOAIENG-12345           # resolve by Jira key
 ic triage report                           # status report table
 ic triage history                          # resolved items (last 7 days)
 ```
@@ -316,15 +317,16 @@ ic jira inbox refine <N>                   # refine draft interactively
 ### Triage Tracking
 
 ```bash
-ic triage                                  # dashboard: tracked + untracked failures
+ic triage                                  # dashboard: tracked + untracked + open Jiras
 ic triage track <component>                # start tracking a failure
 ic triage track <comp> --group "label"     # track with root cause group
 ic triage track <comp> --add-to <id>       # add component to existing item
 ic triage update <id> --jira KEY           # link Jira ticket
-ic triage update <id> --slack URL          # link Slack thread
+ic triage update <id> --slack URL          # add Slack thread (accumulates)
 ic triage update <id> --cause "desc"       # set root cause
-ic triage resolve <id|component>           # mark resolved
+ic triage resolve <id|component|JIRA-KEY>  # mark resolved + prompt Jira update
 ic triage resolve <id> -r "how" --pr URL   # resolve with details
+ic triage resolve <id> --no-jira           # resolve without Jira prompt
 ic triage report                           # status report table
 ic triage report --date 2026-06-03         # report for specific date
 ic triage history [--days N]               # resolved items

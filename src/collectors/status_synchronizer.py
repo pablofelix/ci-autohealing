@@ -311,6 +311,22 @@ class StatusSynchronizer:
                 logger.info("Marked as resolved (last build: %s, commit: %s)",
                             current['name'], (current.get('commit_sha') or 'unknown')[:8])
 
+            if result['now_resolved']:
+                try:
+                    from repositories.triage_repository import TriageRepository
+                    triage_repo = TriageRepository(self.build_repo.db)
+                    resolved_ids = triage_repo.auto_resolve_for_component(
+                        component.name, app,
+                        commit_sha=current.get('commit_sha'),
+                        pipelinerun=current.get('name'),
+                    )
+                    if resolved_ids:
+                        result['triage_auto_resolved'] = resolved_ids
+                        logger.info("Auto-resolved triage items: %s", resolved_ids)
+                except Exception:
+                    logger.warning("Triage auto-resolve failed for %s",
+                                   component.name, exc_info=True)
+
             if self.build_repo.record_successful_build(
                 component.name, current['name'], current['uid'],
                 app, ns, component.repository_url, component.branch
@@ -368,6 +384,7 @@ class StatusSynchronizer:
 
         total_resolved = 0
         total_successes = 0
+        total_triage_resolved = 0
         components_synced = 0
 
         for i, component in enumerate(components, 1):
@@ -383,6 +400,8 @@ class StatusSynchronizer:
                 total_resolved += 1
             if result['success_recorded']:
                 total_successes += 1
+            if result.get('triage_auto_resolved'):
+                total_triage_resolved += len(result['triage_auto_resolved'])
 
             if not result['now_resolved'] and not result['success_recorded']:
                 status = result['current_status']
@@ -396,12 +415,14 @@ class StatusSynchronizer:
         logger.info("=" * 70)
         logger.info("Components synced: %d", components_synced)
         logger.info("Failures resolved: %d", total_resolved)
+        logger.info("Triage items auto-resolved: %d", total_triage_resolved)
         logger.info("Successes recorded: %d", total_successes)
         logger.info("Duration: %.1fs", duration)
 
         return {
             'components_synced': components_synced,
             'resolved': total_resolved,
+            'triage_auto_resolved': total_triage_resolved,
             'successes': total_successes,
             'duration': duration
         }

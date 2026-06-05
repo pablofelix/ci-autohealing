@@ -115,6 +115,47 @@ class JiraClient:
             logger.warning("Jira GET %s: HTTP %d", path, resp.status_code)
         return None
 
+    def add_comment(self, jira_key, body):
+        """Add a comment to a Jira issue. Returns comment dict or None."""
+        try:
+            resp = self._session.post(
+                self._api('issue/{}/comment'.format(jira_key)),
+                json={'body': body},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            logger.error("Jira add comment failed: %s", str(e)[:100])
+            return None
+        if resp.status_code == 201:
+            logger.info("Added comment to %s", jira_key)
+            return resp.json()
+        logger.error("Jira add comment %s: HTTP %d", jira_key, resp.status_code)
+        return None
+
+    def get_transitions(self, jira_key):
+        """Get available transitions for a Jira issue."""
+        data = self._get('issue/{}/transitions'.format(jira_key))
+        if data is None:
+            return []
+        return data.get('transitions', [])
+
+    def transition_issue(self, jira_key, transition_id):
+        """Transition a Jira issue to a new status. Returns True on success."""
+        try:
+            resp = self._session.post(
+                self._api('issue/{}/transitions'.format(jira_key)),
+                json={'transition': {'id': str(transition_id)}},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            logger.error("Jira transition failed: %s", str(e)[:100])
+            return False
+        if resp.status_code == 204:
+            logger.info("Transitioned %s (transition_id=%s)", jira_key, transition_id)
+            return True
+        logger.error("Jira transition %s: HTTP %d", jira_key, resp.status_code)
+        return False
+
     def get_comments(self, jira_key):
         """Return all comments for a Jira issue, newest-last.
 
@@ -129,3 +170,16 @@ class JiraClient:
     def get_comment(self, jira_key, comment_id):
         """Return a single comment dict by ID, or None if not found."""
         return self._get('issue/{}/comment/{}'.format(jira_key, comment_id))
+
+    def get_issue_status(self, jira_key):
+        """Return the status category key for a Jira issue.
+
+        Returns 'done', 'indeterminate', 'new', or None on error.
+        """
+        data = self._get('issue/{}?fields=status'.format(jira_key))
+        if not data:
+            return None
+        try:
+            return data['fields']['status']['statusCategory']['key']
+        except (KeyError, TypeError):
+            return None

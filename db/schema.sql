@@ -670,7 +670,7 @@ CREATE TABLE IF NOT EXISTS triage_items (
     -- Status tracking
     status          VARCHAR(50) DEFAULT 'active'
                     CHECK (status IN ('active', 'resolved', 'monitoring')),
-    slack_thread_url TEXT,
+    slack_thread_urls TEXT[],
     jira_key        VARCHAR(50),
     notes           TEXT,
 

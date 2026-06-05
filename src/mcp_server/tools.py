@@ -466,6 +466,7 @@ def track_triage_item(component: str,
     """Track a build failure in triage. Creates or updates a triage item.
 
     Use add_to_id to add a component to an existing triage group.
+    Slack URLs accumulate — each call adds to the list.
 
     Args:
         component: Component name to track
@@ -473,7 +474,7 @@ def track_triage_item(component: str,
         group_label: Group label (e.g., "Go 1.26 mismatch")
         root_cause: Root cause description
         failed_step: Failed build step
-        slack_thread_url: Slack thread URL
+        slack_thread_url: Slack thread URL (appended to list)
         jira_key: Jira ticket key
         notes: Additional notes
         add_to_id: Add to existing triage item ID instead of creating new
@@ -488,13 +489,13 @@ def track_triage_item(component: str,
         if component not in components:
             components.append(component)
         updates = {'components': components}
-        if slack_thread_url:
-            updates['slack_thread_url'] = slack_thread_url
         if jira_key:
             updates['jira_key'] = jira_key
         if notes:
             updates['notes'] = notes
         repo.update_item(add_to_id, **updates)
+        if slack_thread_url:
+            repo.add_slack_url(add_to_id, slack_thread_url)
         return {"action": "added", "item_id": add_to_id, "component": component}
 
     existing = repo.find_by_component(component, application)
@@ -504,7 +505,8 @@ def track_triage_item(component: str,
     item_id = repo.create_item(
         application=application, components=[component],
         group_label=group_label, root_cause=root_cause,
-        failed_step=failed_step, slack_thread_url=slack_thread_url,
+        failed_step=failed_step,
+        slack_thread_urls=[slack_thread_url] if slack_thread_url else None,
         jira_key=jira_key, notes=notes,
     )
     return {"action": "created", "item_id": item_id, "component": component}
@@ -522,9 +524,11 @@ def update_triage_item(item_id: int,
                        resolution_pr_url: Optional[str] = None) -> Dict[str, Any]:
     """Update a triage item's tracking info or resolve it.
 
+    Slack URLs accumulate — each call appends to the list (does not replace).
+
     Args:
         item_id: Triage item ID
-        slack_thread_url: Slack thread URL
+        slack_thread_url: Slack thread URL (appended to list, not replaced)
         jira_key: Jira ticket key
         notes: Additional notes
         root_cause: Root cause description
@@ -542,8 +546,6 @@ def update_triage_item(item_id: int,
         return {"action": "resolved", "item_id": item_id}
 
     updates = {}
-    if slack_thread_url:
-        updates['slack_thread_url'] = slack_thread_url
     if jira_key:
         updates['jira_key'] = jira_key
     if notes:
@@ -552,9 +554,16 @@ def update_triage_item(item_id: int,
         updates['root_cause'] = root_cause
     if status:
         updates['status'] = status
-    if not updates:
+
+    if updates:
+        repo.update_item(item_id, **updates)
+
+    if slack_thread_url:
+        repo.add_slack_url(item_id, slack_thread_url)
+        updates['slack_thread_urls'] = 'added'
+
+    if not updates and not slack_thread_url:
         return {"error": "No updates provided"}
-    repo.update_item(item_id, **updates)
     return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
 
 
