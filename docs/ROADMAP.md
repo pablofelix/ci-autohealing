@@ -64,25 +64,28 @@ Goal: full visibility into the nightly build chain, and proactive detection of c
 - [x] TTL disk cache for GitHub ref SHAs (`~/.ic/cache/ref-shas.json`, 5 min default)
 
 **Nightly build chain tracking:**
+- [x] Add `ic nightly-history [app]` — timeline of recent nightly outcomes
+- [x] Alerting: surface broken nightly in `ic get alerts` and MCP `list_alerts()`
 - [ ] Monitor GitHub Actions trigger in `rhods-devops-infra` (nightly cron workflow status)
 - [ ] Track the full chain: GHA trigger → validator tests → operator build → FBC fragment
 - [ ] Parse `#rhoai-build-notifications` Slack messages for build success/failure signals
-- [ ] Add `ic nightly history [app]` — timeline of recent nightly outcomes
-- [ ] Alerting: surface broken nightly in `ic get alerts` and MCP `list_alerts()`
 
 ---
 
-## Phase 4: Skill Execution & Composition
+## Phase 4: Skill Execution & Composition (done)
 
 Goal: run skills as automated workflows, not just lookup/reference.
 
-- [ ] Sequential execution: `ic skills run --tag onboarding --sequential`
-- [ ] Parallel execution: run skills as subagents simultaneously
-- [ ] Dry-run mode: show what a skill would do without executing
-- [ ] Execution history: track which skills ran, when, and what they changed
-- [ ] Tag-based grouping for batch operations
-
-See memory: `project_skills-phase2-design.md` for design decisions.
+- [x] `ic skills run <name>` with dry-run, risk classification (low/medium/high), and confirmation
+- [x] Risk assessment with detailed reasons (write tools, secret env vars, security findings)
+- [x] MCP tool `run_skill()` — Claude can execute skills (dry_run=True by default)
+- [x] API endpoint `POST /skills/{name}/run` + `GET /skills/runs` history
+- [x] Container sandbox: high-risk skills execute in ephemeral K8s Jobs
+- [x] Execution history tracked in `skill_runs` table
+- [x] Worker pipeline auto-execution: skills tagged `auto-heal` run hourly
+- [x] Error pattern → skill linking: `ic patterns link-skill <pattern> <skill>`
+- [x] Code block extraction from SKILL.md with `# ic:skip` / `# example` markers
+- [x] 12 unit tests for executor, risk classification, code block parsing
 
 ---
 
@@ -107,6 +110,34 @@ Goal: dashboards and trends, not just point-in-time snapshots.
 - [ ] AI analysis accuracy tracking (was the diagnosis correct?)
 - [ ] Failure pattern frequency trends (are certain patterns increasing?)
 - [ ] Grafana dashboard or equivalent for oncall visibility
+
+---
+
+## Phase 7: CLI Cluster Mode Parity
+
+Goal: all CLI commands work identically in local and cluster mode.
+
+- [x] `ic get alerts` — enriched with violation counts, policy links, release countdown
+- [x] `ic get apps` — works via API
+- [x] `ic get component` — works via API
+- [ ] `ic get releases` — collect Release CRs from Konflux into DB, add API endpoint
+- [ ] `ic describe failure` / `ic describe conforma` — full detail via API
+- [ ] `ic export slack/jira` — generate exports from cluster data
+- [ ] `ic triage` dashboard via API
+- [ ] `ic stats` via API
+- [ ] `ic conforma report` via API
+
+---
+
+## Phase 8: CI/CD Pipeline
+
+Goal: automated image builds and deployments.
+
+- [ ] GitHub Actions or Tekton pipeline: build + push image on merge to develop
+- [ ] ArgoCD auto-sync from deploy repo
+- [ ] Kustomize overlays for dev/staging/prod
+- [ ] Vault integration: replace manual secrets with VaultStaticSecret CRs
+- [ ] Automated DB migrations on deploy (init container or Job)
 
 ---
 
