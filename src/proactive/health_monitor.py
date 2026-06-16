@@ -540,7 +540,8 @@ class HealthMonitor:
 
         try:
             pac_repos = kc.list_pac_repositories()
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to fetch PaC repositories: %s", exc)
             pac_repos = []
 
         all_names = {c['name'] for c in all_comps}
@@ -549,8 +550,9 @@ class HealthMonitor:
             recent_runs = []
             try:
                 recent_runs = kc.list_recent_pipelineruns(entry['component'])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to fetch PipelineRuns for %s: %s",
+                             entry['component'], exc)
 
             diagnosis = diagnose_stale_trigger(
                 component_name=entry['component'],

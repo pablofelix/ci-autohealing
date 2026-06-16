@@ -38,7 +38,8 @@ def diagnose_recent_build_failure(component_name, recent_pipelineruns, head_comm
     head_short = head_commit[:12]
     for pr in recent_pipelineruns:
         pr_commit = pr.get('commit_sha', '')
-        if pr_commit and pr_commit.startswith(head_short):
+        if pr_commit and (pr_commit.startswith(head_short)
+                          or head_commit.startswith(pr_commit[:12])):
             status = (pr.get('status') or '').lower()
             if status in ('failed', 'error'):
                 return TriggerDiagnosis(

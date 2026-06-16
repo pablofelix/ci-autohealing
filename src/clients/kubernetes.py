@@ -1,9 +1,13 @@
 """Kubernetes client for fetching live pipeline data via the Python API."""
 
+import re
+
 from kubernetes import client
 
 from clients.pipeline_source import PipelineRunSource
 from openshift_auth import _ensure_k8s_config
+
+_LABEL_VALUE_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$')
 
 
 class KubernetesClient(PipelineRunSource):
@@ -134,6 +138,9 @@ class KubernetesClient(PipelineRunSource):
 
     def list_recent_pipelineruns(self, component_name, namespace=None, limit=5):
         """List recent PipelineRuns for a component, newest first."""
+        if not _LABEL_VALUE_RE.match(component_name):
+            raise ValueError("Invalid component name for label selector: {!r}".format(
+                component_name))
         ns = namespace or self.namespace
         try:
             _ensure_k8s_config()
