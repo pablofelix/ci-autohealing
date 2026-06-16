@@ -356,6 +356,18 @@ class ErrorPatternRepository:
                 'avg_confidence': row[2], 'total_occurrences': row[3],
             }
 
+    def get_patterns_with_skills(self):
+        """Return error patterns that have a linked skill for auto-execution."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, failure_type, failure_category, pattern_name, skill_name
+                FROM error_patterns
+                WHERE skill_name IS NOT NULL AND skill_name != ''
+            """)
+            cols = ['id', 'failure_type', 'failure_category', 'pattern_name', 'skill_name']
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     @staticmethod
     def _row_to_dict(row):
         if row is None:

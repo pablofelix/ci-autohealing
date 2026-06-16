@@ -2164,6 +2164,44 @@ def patterns_show(name):
     print()
 
 
+@patterns.command('link-skill')
+@click.argument('pattern_name')
+@click.argument('skill_name')
+def patterns_link_skill(pattern_name, skill_name):
+    """Link an error pattern to a skill for auto-execution.
+
+    When the worker detects a failure matching this pattern and AUTONOMOUS_MODE
+    is enabled, it will auto-execute the linked skill.
+    """
+    from cli.db import get_repo, require_db
+    from cli.formatting import cyan, green, red
+    from repositories.error_pattern_repository import ErrorPatternRepository
+    if not require_db():
+        return
+    repo = get_repo(ErrorPatternRepository)
+    p = repo.get_by_name_or_category(pattern_name)
+    if not p:
+        print(red('Pattern not found: ') + cyan(pattern_name))
+        raise SystemExit(1)
+    from skills.db_registry import get_registry
+    registry = get_registry()
+    skill = registry.get_skill(skill_name)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == skill_name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(skill_name))
+        raise SystemExit(1)
+    with repo.db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE error_patterns SET skill_name = %s WHERE id = %s",
+            (skill.qualified_name, p['id']))
+    print(green('✓ Linked: ') + '{} → {}'.format(cyan(p['pattern_name']), cyan(skill.qualified_name)))
+
+
 # --- skills group ---
 
 @cli.group(invoke_without_command=True)

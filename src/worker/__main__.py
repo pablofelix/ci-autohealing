@@ -89,6 +89,34 @@ def _build_pipeline(config):
     pipeline.add_step(PipelineStep(
         'auto_fix', step_auto_fix, collect_interval,
         requires_env=['GITHUB_TOKEN', 'AUTONOMOUS_MODE']))
+
+    def step_skill_execute():
+        from skills.db_registry import get_registry
+        from skills.executor import SkillExecutor
+        registry = get_registry()
+        skills = registry.list_skills(tag='auto-heal')
+        if not skills:
+            return {'executed': 0, 'skipped': 'no auto-heal skills'}
+        results = []
+        for skill in skills:
+            if skill.status != 'active':
+                continue
+            executor = SkillExecutor(skill, triggered_by='worker')
+            risk = executor.classify()
+            if risk == 'high':
+                continue
+            result = executor.execute()
+            try:
+                registry.record_run(result)
+            except Exception:
+                pass
+            results.append({'skill': skill.name, 'status': result.status})
+        return {'executed': len(results), 'results': results}
+
+    skill_interval = int(os.environ.get('WORKER_SKILL_INTERVAL', '3600'))
+    pipeline.add_step(PipelineStep(
+        'skill_execute', step_skill_execute, skill_interval,
+        requires_env=['AUTONOMOUS_MODE']))
     pipeline.add_step(PipelineStep(
         'doc_context', step_doc_context, 3600))
     pipeline.add_step(PipelineStep(
