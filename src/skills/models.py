@@ -144,6 +144,7 @@ class ExecutionResult:
     started_at: str = ''
     steps_executed: int = 0
     steps_total: int = 0
+    triggered_by: str = 'cli'
     dry_run_steps: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -158,5 +159,6 @@ class ExecutionResult:
             'started_at': self.started_at,
             'steps_executed': self.steps_executed,
             'steps_total': self.steps_total,
+            'triggered_by': self.triggered_by,
             'dry_run_steps': self.dry_run_steps,
         }

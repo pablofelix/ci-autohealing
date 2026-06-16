@@ -1677,7 +1677,8 @@ def run_skill(
         return {'error': 'Skill not found: {}'.format(name)}
 
     from skills.executor import SkillExecutor
-    executor = SkillExecutor(entry, params=params or {}, dry_run=dry_run, timeout=timeout)
+    executor = SkillExecutor(entry, params=params or {}, dry_run=dry_run,
+                             timeout=timeout, triggered_by='mcp')
     assessment = executor.assess()
     result = executor.execute()
 

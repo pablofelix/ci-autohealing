@@ -169,6 +169,7 @@ def run_skill(name: str, request: SkillRunRequest) -> SkillRunResponse:
     executor = SkillExecutor(
         entry, params=request.params,
         dry_run=request.dry_run, timeout=request.timeout,
+        triggered_by='api',
     )
 
     assessment = executor.assess()

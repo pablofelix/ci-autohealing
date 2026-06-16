@@ -23,14 +23,19 @@ def _extract_code_blocks(skill_md_path):
 
     in_frontmatter = False
     in_block = False
+    in_skip = False
     lang = ''
     current = []
 
     for line in content.split('\n'):
-        if line.strip() == '---' and not in_block:
+        if line.strip() == '---' and not in_block and not in_skip:
             in_frontmatter = not in_frontmatter
             continue
         if in_frontmatter:
+            continue
+
+        if line.startswith('```') and in_skip:
+            in_skip = False
             continue
 
         if line.startswith('```') and not in_block:
@@ -38,12 +43,14 @@ def _extract_code_blocks(skill_md_path):
             if lang in ('bash', 'sh', 'shell', 'python', 'python3', ''):
                 in_block = True
                 current = []
+            else:
+                in_skip = True
             continue
 
         if line.startswith('```') and in_block:
             in_block = False
             code = '\n'.join(current).strip()
-            if code and not code.startswith('#'):
+            if code and not code.startswith('# ic:skip') and not code.startswith('# example'):
                 blocks.append({'lang': lang or 'bash', 'code': code})
             continue
 
@@ -56,12 +63,14 @@ def _extract_code_blocks(skill_md_path):
 class SkillExecutor:
     """Execute skills with risk-based sandboxing."""
 
-    def __init__(self, skill, params=None, dry_run=False, timeout=300, env_overrides=None):
+    def __init__(self, skill, params=None, dry_run=False, timeout=300,
+                 env_overrides=None, triggered_by='cli'):
         self.skill = skill
         self.params = params or {}
         self.dry_run = dry_run
         self.timeout = timeout
         self.env_overrides = env_overrides or {}
+        self.triggered_by = triggered_by
 
     def _skill_dir(self):
         return self.skill.path
@@ -85,6 +94,10 @@ class SkillExecutor:
         result = validator.validate(self._skill_dir(), self.skill.metadata)
         return assess_risk(self.skill.metadata, result)
 
+    def _result(self, **kwargs):
+        kwargs.setdefault('triggered_by', self.triggered_by)
+        return ExecutionResult(**kwargs)
+
     def execute(self):
         started = datetime.now(timezone.utc).isoformat()
         risk = self.classify()
@@ -92,7 +105,7 @@ class SkillExecutor:
         prereqs = self.check_prerequisites()
         if prereqs['status'] == 'fail':
             missing_tools = [t for t, ok in prereqs.get('tools', {}).items() if not ok]
-            return ExecutionResult(
+            return self._result(
                 skill_name=self.skill.qualified_name,
                 status='prereq_failed',
                 stderr='Missing tools: {}'.format(', '.join(missing_tools)),
@@ -102,7 +115,7 @@ class SkillExecutor:
 
         skill_md = self._skill_md_path()
         if not skill_md:
-            return ExecutionResult(
+            return self._result(
                 skill_name=self.skill.qualified_name,
                 status='failed',
                 stderr='No SKILL.md found',
@@ -112,7 +125,7 @@ class SkillExecutor:
 
         blocks = _extract_code_blocks(skill_md)
         if not blocks:
-            return ExecutionResult(
+            return self._result(
                 skill_name=self.skill.qualified_name,
                 status='failed',
                 stderr='No executable code blocks found in SKILL.md',
@@ -121,7 +134,7 @@ class SkillExecutor:
             )
 
         if self.dry_run:
-            return ExecutionResult(
+            return self._result(
                 skill_name=self.skill.qualified_name,
                 status='dry_run',
                 risk_level=risk,
@@ -159,7 +172,7 @@ class SkillExecutor:
                 steps_done += 1
 
                 if proc.returncode != 0:
-                    return ExecutionResult(
+                    return self._result(
                         skill_name=self.skill.qualified_name,
                         status='failed',
                         exit_code=proc.returncode,
@@ -174,7 +187,7 @@ class SkillExecutor:
 
             except subprocess.TimeoutExpired:
                 all_stderr.append('Step {} timed out after {}s'.format(i + 1, self.timeout))
-                return ExecutionResult(
+                return self._result(
                     skill_name=self.skill.qualified_name,
                     status='failed',
                     exit_code=-1,
@@ -187,7 +200,7 @@ class SkillExecutor:
                     steps_total=len(blocks),
                 )
 
-        return ExecutionResult(
+        return self._result(
             skill_name=self.skill.qualified_name,
             status='success',
             exit_code=0,

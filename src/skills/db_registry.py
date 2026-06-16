@@ -219,7 +219,7 @@ class DatabaseSkillRegistry:
                 result.stdout[:50000] if result.stdout else None,
                 result.stderr[:10000] if result.stderr else None,
                 json.dumps({}),
-                'cli',
+                getattr(result, 'triggered_by', 'cli'),
                 result.started_at or datetime.now(timezone.utc).isoformat(),
             ))
 
