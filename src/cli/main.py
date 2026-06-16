@@ -2534,11 +2534,19 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
             params[k] = v
 
     executor = SkillExecutor(skill, params=params, dry_run=dry_run, timeout=timeout)
-    risk = executor.classify()
+    assessment = executor.assess()
+    risk = assessment.level
 
     if not dry_run and risk in ('medium', 'high') and not yes:
         print(bold('Skill: ') + cyan(skill.qualified_name))
-        print(bold('Risk:  ') + (yellow(risk) if risk == 'medium' else red(risk)))
+        risk_color = yellow if risk == 'medium' else red
+        print(bold('Risk:  ') + risk_color(risk))
+        for reason in assessment.reasons:
+            print('  - {}'.format(reason))
+        if assessment.security_warnings:
+            print(bold('Security warnings:'))
+            for w in assessment.security_warnings:
+                print('  {} {}'.format(yellow('!'), w))
         prereqs = executor.check_prerequisites()
         if prereqs['tools']:
             print(bold('Tools: ') + ', '.join(prereqs['tools'].keys()))
@@ -2560,9 +2568,17 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         return
 
     status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
+    risk_color = green if risk == 'low' else yellow if risk == 'medium' else red
     print(bold('Skill:    ') + cyan(skill.qualified_name))
     print(bold('Status:   ') + status_color(result.status))
-    print(bold('Risk:     ') + risk)
+    print(bold('Risk:     ') + risk_color(risk))
+    if assessment.reasons:
+        for reason in assessment.reasons:
+            print('            - {}'.format(reason))
+    if assessment.security_warnings:
+        print(bold('Warnings: '))
+        for w in assessment.security_warnings:
+            print('            {} {}'.format(yellow('!'), w))
 
     if result.status == 'dry_run':
         print(bold('Steps:    ') + '{}'.format(result.steps_total))

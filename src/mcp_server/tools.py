@@ -1644,6 +1644,55 @@ def check_skill_prerequisites(
     return results
 
 
+@mcp.tool()
+def run_skill(
+    name: str,
+    dry_run: bool = True,
+    params: Optional[Dict[str, str]] = None,
+    timeout: int = 300,
+) -> Dict[str, Any]:
+    """Execute a registered skill.
+
+    IMPORTANT: dry_run defaults to True. Set dry_run=False to actually execute.
+    Low-risk skills (read-only) can be executed directly.
+    Medium/high-risk skills should be previewed first with dry_run=True.
+
+    Args:
+        name: Skill name or qualified name (e.g. 'validate-component-onboarding-jira')
+        dry_run: If True, show steps without executing. Default True for safety.
+        params: Key-value parameters passed as environment variables to the skill.
+        timeout: Max seconds per step (default 300).
+
+    Returns:
+        Execution result with status, output, risk assessment, and steps.
+    """
+    registry = _skill_registry()
+    entry = registry.get_skill(name)
+    if not entry:
+        for s in registry.list_skills():
+            if s.name == name:
+                entry = s
+                break
+    if not entry:
+        return {'error': 'Skill not found: {}'.format(name)}
+
+    from skills.executor import SkillExecutor
+    executor = SkillExecutor(entry, params=params or {}, dry_run=dry_run, timeout=timeout)
+    assessment = executor.assess()
+    result = executor.execute()
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    return {
+        **result.to_dict(),
+        'risk_reasons': assessment.reasons,
+        'security_warnings': assessment.security_warnings,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Jira formatting helpers
 # ---------------------------------------------------------------------------

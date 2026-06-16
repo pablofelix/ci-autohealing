@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 
 from skills.models import ExecutionResult
-from skills.validator import SkillValidator, check_prerequisites, classify_risk
+from skills.validator import SkillValidator, assess_risk, check_prerequisites, classify_risk
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,11 @@ class SkillExecutor:
         validator = SkillValidator()
         result = validator.validate(self._skill_dir(), self.skill.metadata)
         return classify_risk(self.skill.metadata, result)
+
+    def assess(self):
+        validator = SkillValidator()
+        result = validator.validate(self._skill_dir(), self.skill.metadata)
+        return assess_risk(self.skill.metadata, result)
 
     def execute(self):
         started = datetime.now(timezone.utc).isoformat()

@@ -268,33 +268,76 @@ _READ_TOOLS = {'jq', 'yq', 'grep', 'curl', 'wget', 'python3', 'cat', 'find'}
 _DESTRUCTIVE_TOOLS = {'rm', 'mkfs', 'dd'}
 
 
+@dataclass
+class RiskAssessment:
+    level: str  # 'low', 'medium', 'high'
+    reasons: List[str] = field(default_factory=list)
+    security_warnings: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {'level': self.level, 'reasons': self.reasons,
+                'security_warnings': self.security_warnings}
+
+
 def classify_risk(metadata, validation_result=None):
     """Classify skill risk level based on tools, env, and security findings.
 
-    Returns 'low', 'medium', or 'high'.
+    Returns RiskAssessment with level and reasons.
+    Also accepts calls expecting just a string (backward compat via .level).
     """
-    if validation_result and validation_result.critical_count > 0:
-        return 'high'
+    return _assess_risk(metadata, validation_result).level
+
+
+def assess_risk(metadata, validation_result=None):
+    """Full risk assessment with reasons. Use this for detailed output."""
+    return _assess_risk(metadata, validation_result)
+
+
+def _assess_risk(metadata, validation_result=None):
+    reasons = []
+    sec_warnings = []
+
+    if validation_result:
+        for f in validation_result.findings:
+            if f.severity == 'critical':
+                reasons.append('critical: {} ({})'.format(f.message, f.file))
+            elif f.severity == 'warning':
+                sec_warnings.append('{}:{} — {}'.format(f.file, f.line, f.message))
+
+        if validation_result.critical_count > 0:
+            reasons.insert(0, '{} critical security finding(s)'.format(
+                validation_result.critical_count))
+            return RiskAssessment('high', reasons, sec_warnings)
 
     tools = set()
     if metadata.ic_metadata:
         tools = set(metadata.ic_metadata.requires_tools)
 
-    if tools & _DESTRUCTIVE_TOOLS:
-        return 'high'
+    destructive = tools & _DESTRUCTIVE_TOOLS
+    if destructive:
+        reasons.append('destructive tools: {}'.format(', '.join(sorted(destructive))))
+        return RiskAssessment('high', reasons, sec_warnings)
 
-    needs_secrets = False
+    write_tools = tools & _WRITE_TOOLS
+    if write_tools:
+        reasons.append('write tools: {}'.format(', '.join(sorted(write_tools))))
+
+    secret_vars = set()
     if metadata.ic_metadata:
         env_vars = set(metadata.ic_metadata.requires_env)
         secret_vars = {v for v in env_vars
                        if any(k in v.upper() for k in ('TOKEN', 'SECRET', 'KEY', 'PASSWORD'))}
         if secret_vars:
-            needs_secrets = True
+            reasons.append('requires secrets: {}'.format(', '.join(sorted(secret_vars))))
 
-    if tools & _WRITE_TOOLS or needs_secrets:
-        return 'medium'
+    if write_tools or secret_vars:
+        return RiskAssessment('medium', reasons, sec_warnings)
 
     if tools and tools <= _READ_TOOLS:
-        return 'low'
+        reasons.append('read-only tools: {}'.format(', '.join(sorted(tools))))
+        return RiskAssessment('low', reasons, sec_warnings)
 
-    return 'medium'
+    if not tools:
+        reasons.append('no tools declared (defaulting to medium)')
+
+    return RiskAssessment('medium', reasons, sec_warnings)
