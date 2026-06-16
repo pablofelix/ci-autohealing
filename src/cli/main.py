@@ -59,11 +59,10 @@ def get_components(ctx, refresh, output_json):
 def get_component(ctx, name, output_json):
     """Get component summary."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.db import get_repo, require_db
-    from repositories.build_failure_repository import BuildFailureRepository
-    if not require_db():
+    from cli.data import require_data, get_component_summary
+    if not require_data():
         return
-    summary = get_repo(BuildFailureRepository).get_component_summary(name)
+    summary = get_component_summary(name)
     if not summary:
         if is_json:
             print(json_mod.dumps({"error": "Component not found", "component": name}))
@@ -192,32 +191,40 @@ def get_pipelinerun(ctx, name, output_json):
 def get_apps(ctx, output_json):
     """List available RHOAI applications."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.db import get_repo, require_db
-    from repositories.build_failure_repository import BuildFailureRepository
-    if not require_db():
+    from cli.data import require_data, get_applications
+    from cli import ic_config
+    if not require_data():
         return
-    build_repo = get_repo(BuildFailureRepository)
-    apps = []
-    try:
-        from openshift_auth import _ensure_k8s_config
-        from kubernetes import client as k8s
-        _ensure_k8s_config()
-        api = k8s.CustomObjectsApi()
-        result = api.list_namespaced_custom_object(
-            group='appstudio.redhat.com', version='v1alpha1',
-            namespace=cfg.NAMESPACE, plural='applications',
-        )
-        app_prefix = cfg.APPLICATION_NAME.rsplit('-v', 1)[0] if cfg.APPLICATION_NAME else ''
-        apps = sorted(
-            [item['metadata']['name'] for item in result.get('items', [])
-             if app_prefix and app_prefix in item['metadata']['name']],
-        )
-    except Exception:
-        if not is_json:
-            from cli.formatting import yellow
-            print(yellow('Warning: Cluster unreachable — showing applications from database'))
-            print()
-        apps = [a['application'] for a in build_repo.get_applications()]
+    if ic_config.get_mode() == 'cluster':
+        app_list = get_applications()
+        apps = [a.get('name', a.get('application', '')) for a in app_list]
+        app_counts = {a.get('name', a.get('application', '')): a.get('failure_count', a.get('count', 0)) for a in app_list}
+    else:
+        from cli.db import get_repo
+        from repositories.build_failure_repository import BuildFailureRepository
+        build_repo = get_repo(BuildFailureRepository)
+        apps = []
+        try:
+            from openshift_auth import _ensure_k8s_config
+            from kubernetes import client as k8s
+            _ensure_k8s_config()
+            api = k8s.CustomObjectsApi()
+            result = api.list_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=cfg.NAMESPACE, plural='applications',
+            )
+            app_prefix = cfg.APPLICATION_NAME.rsplit('-v', 1)[0] if cfg.APPLICATION_NAME else ''
+            apps = sorted(
+                [item['metadata']['name'] for item in result.get('items', [])
+                 if app_prefix and app_prefix in item['metadata']['name']],
+            )
+        except Exception:
+            if not is_json:
+                from cli.formatting import yellow
+                print(yellow('Warning: Cluster unreachable — showing applications from database'))
+                print()
+            apps = [a['application'] for a in build_repo.get_applications()]
+        app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     if not apps:
         if is_json:
             print(json_mod.dumps({"applications": [], "current": cfg.APPLICATION_NAME}))
@@ -225,7 +232,6 @@ def get_apps(ctx, output_json):
             from cli.formatting import yellow
             print(yellow('No applications found'))
         return
-    app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     current = cfg.APPLICATION_NAME
     if is_json:
         result = {
@@ -530,25 +536,39 @@ def describe_release(ctx, name, logs, output_json):
 def config(ctx):
     """Show or modify configuration."""
     if ctx.invoked_subcommand is None:
-        from cli.db import check_db, get_repo
-        from cli.formatting import bold, cyan, section_header
+        from cli import ic_config
+        from cli.formatting import bold, cyan, green, yellow, section_header
+        mode = ic_config.get_mode()
         section_header('Current Configuration')
+        print()
+        print(bold('Mode: ') + (green('cluster') if mode == 'cluster' else cyan('local')))
         print()
         print(bold('Environment:'))
         print('  Namespace: {}'.format(cyan(cfg.NAMESPACE)))
         print('  Application: {}'.format(cyan(cfg.APPLICATION_NAME)))
         print('  Config: {}/.env'.format(cfg.PROJECT_DIR))
         print()
-        if check_db():
-            from repositories.build_failure_repository import BuildFailureRepository
-            s = get_repo(BuildFailureRepository).get_overview_stats()
-            print(bold('Database:'))
-            print('  Failures: {}'.format(s['total']))
-            print('  Components: {}'.format(s['components']))
+        if mode == 'cluster':
+            api_url = ic_config.get_api_url() or ''
+            has_key = bool(ic_config.get_api_key())
+            print(bold('Cluster:'))
+            print('  API URL: {}'.format(cyan(api_url) if api_url else yellow('not set')))
+            print('  API Key: {}'.format(green('configured') if has_key else yellow('not set')))
             print()
+        else:
+            from cli.db import check_db, get_repo
+            if check_db():
+                from repositories.build_failure_repository import BuildFailureRepository
+                s = get_repo(BuildFailureRepository).get_overview_stats()
+                print(bold('Database:'))
+                print('  Failures: {}'.format(s['total']))
+                print('  Components: {}'.format(s['components']))
+                print()
         print(cyan('Commands:'))
-        print('  ic config set-app <app>  # Change application')
-        print('  ic get apps              # List applications')
+        print('  ic config set-app <app>      # Change application')
+        print('  ic config use-cluster <url>  # Switch to cluster API')
+        print('  ic config use-local          # Switch to local DB')
+        print('  ic get apps                  # List applications')
         print()
 
 
@@ -596,6 +616,59 @@ def config_set_app(app_name, force):
         else:
             print('  Cached sync data available. Run {} to view.'.format(cyan('ic get components')))
     print()
+
+
+@config.command('use-cluster')
+@click.argument('api_url', required=False)
+@click.option('--api-key', help='Bearer token for API auth')
+@click.option('--no-verify-tls', is_flag=True, help='Skip TLS certificate verification')
+def config_use_cluster(api_url, api_key, no_verify_tls):
+    """Switch to cluster API mode."""
+    from cli import ic_config
+    from cli.formatting import cyan, green, yellow
+    current = ic_config.load()
+    if api_url:
+        ic_config.set_cluster(api_url, api_key)
+        if no_verify_tls:
+            c = ic_config.load()
+            c['cluster']['verify_tls'] = False
+            ic_config._save(c)
+    elif current['cluster'].get('api_url'):
+        ic_config.set_mode('cluster')
+    else:
+        print(yellow('Usage: ic config use-cluster <api-url>'))
+        return
+    print(green('✓ Mode: cluster'))
+    print('  API: {}'.format(cyan(ic_config.get_api_url())))
+    try:
+        from cli.api_client import APIClient
+        url = ic_config.get_api_url()
+        verify = ic_config.load().get('cluster', {}).get('verify_tls', True)
+        client = APIClient(url, ic_config.get_api_key(), verify_tls=verify)
+        health = client.get('/health')
+        if health and health.get('status') == 'healthy':
+            print(green('  Connection: healthy'))
+        else:
+            print(yellow('  Connection: unknown response'))
+    except SystemExit:
+        pass
+    except Exception as e:
+        print(yellow('  Connection: failed ({})'.format(e)))
+
+
+@config.command('use-local')
+def config_use_local():
+    """Switch to local database mode."""
+    from cli import ic_config
+    from cli.formatting import cyan, green
+    ic_config.set_mode('local')
+    print(green('✓ Mode: local'))
+    from cli.db import check_db
+    if check_db():
+        print('  Database: {}'.format(cyan('connected')))
+    else:
+        from cli.formatting import yellow
+        print('  Database: {}'.format(yellow('not running')))
 
 
 # --- watch group ---
