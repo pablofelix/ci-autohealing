@@ -96,6 +96,59 @@ def get_component(ctx, name, output_json):
 @click.pass_context
 def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
     """Unified view: build failures + Conforma violations."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts as _get_alerts
+        from cli.formatting import bold, dim, green, red, section_header, yellow
+        if not require_data():
+            return
+        data = _get_alerts()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+
+        builds = data.get('build_failures', [])
+        conforma = data.get('conforma_violations', [])
+        nightlies = data.get('nightly_warnings', [])
+
+        section_header('Alerts: {}'.format(cfg.APPLICATION_NAME))
+        print()
+
+        if builds:
+            print(bold(red('{} build failure(s):'.format(len(builds)))))
+            for f in builds:
+                comp = f.get('component', f.get('component_name', '?'))
+                err = f.get('error_type', f.get('status', ''))
+                analyzed = green(' [AI]') if f.get('has_analysis') else ''
+                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+            print()
+
+        if conforma:
+            print(bold(yellow('{} conforma violation(s):'.format(len(conforma)))))
+            for v in conforma:
+                comp = v.get('component', v.get('component_name', '?'))
+                err = v.get('error_type', v.get('status', ''))
+                print('  {} — {}'.format(bold(comp), err))
+            print()
+
+        if nightlies:
+            print(bold(yellow('{} nightly warning(s):'.format(len(nightlies)))))
+            for w in nightlies:
+                print('  {} — {}'.format(w.get('component_name', '?'), w.get('message', '')))
+            print()
+
+        if not builds and not conforma and not nightlies:
+            print(green('No alerts'))
+            print()
+
+        total = len(builds) + len(conforma) + len(nightlies)
+        print(dim('{} total alert(s)'.format(total)))
+        print()
+        return
+
     args = ['get', 'alerts']
     if group:
         args.append('--group')
@@ -107,7 +160,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         args.extend(['--from', from_date])
     if to_date:
         args.extend(['--to', to_date])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
