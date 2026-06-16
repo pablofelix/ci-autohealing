@@ -133,6 +133,12 @@ class SkillExecutor:
                 started_at=started,
             )
 
+        if risk == 'high' and not self.dry_run:
+            from skills.sandbox import ContainerSandbox
+            sandbox = ContainerSandbox(timeout=self.timeout)
+            return sandbox.run(self.skill, blocks, params=self.params,
+                               triggered_by=self.triggered_by)
+
         if self.dry_run:
             return self._result(
                 skill_name=self.skill.qualified_name,
