@@ -36,6 +36,7 @@ class SkillMetadata:
     allowed_tools: str = 'Bash'
     user_invocable: bool = False
     category: str = ''
+    risk_level: str = 'medium'  # 'low', 'medium', 'high'
     ic_metadata: Optional[IcMetadata] = None
 
     def to_dict(self) -> dict:
@@ -44,6 +45,7 @@ class SkillMetadata:
             'description': self.description,
             'allowed_tools': self.allowed_tools,
             'user_invocable': self.user_invocable,
+            'risk_level': self.risk_level,
         }
         if self.category:
             d['category'] = self.category
@@ -62,6 +64,7 @@ class SkillMetadata:
             allowed_tools=data.get('allowed_tools', data.get('allowed-tools', 'Bash')),
             user_invocable=data.get('user_invocable', data.get('user-invocable', False)),
             category=data.get('category', ''),
+            risk_level=data.get('risk_level', data.get('risk-level', 'medium')),
             ic_metadata=ic_meta,
         )
 
@@ -125,3 +128,35 @@ class SkillEntry:
             metadata=SkillMetadata.from_dict(data.get('metadata', {'name': data['name'], 'description': ''})),
             tags=data.get('tags', []),
         )
+
+
+@dataclass
+class ExecutionResult:
+    """Result of a skill execution."""
+
+    skill_name: str
+    status: str  # 'success', 'failed', 'dry_run', 'cancelled', 'prereq_failed'
+    exit_code: int = 0
+    stdout: str = ''
+    stderr: str = ''
+    duration_seconds: float = 0.0
+    risk_level: str = 'medium'
+    started_at: str = ''
+    steps_executed: int = 0
+    steps_total: int = 0
+    dry_run_steps: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            'skill_name': self.skill_name,
+            'status': self.status,
+            'exit_code': self.exit_code,
+            'stdout': self.stdout,
+            'stderr': self.stderr,
+            'duration_seconds': self.duration_seconds,
+            'risk_level': self.risk_level,
+            'started_at': self.started_at,
+            'steps_executed': self.steps_executed,
+            'steps_total': self.steps_total,
+            'dry_run_steps': self.dry_run_steps,
+        }

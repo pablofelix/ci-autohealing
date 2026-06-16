@@ -261,3 +261,40 @@ def check_prerequisites(metadata: SkillMetadata) -> dict:
                 result['status'] = 'warn'
 
     return result
+
+
+_WRITE_TOOLS = {'git', 'gh', 'oc', 'kubectl', 'podman', 'docker', 'buildah'}
+_READ_TOOLS = {'jq', 'yq', 'grep', 'curl', 'wget', 'python3', 'cat', 'find'}
+_DESTRUCTIVE_TOOLS = {'rm', 'mkfs', 'dd'}
+
+
+def classify_risk(metadata, validation_result=None):
+    """Classify skill risk level based on tools, env, and security findings.
+
+    Returns 'low', 'medium', or 'high'.
+    """
+    if validation_result and validation_result.critical_count > 0:
+        return 'high'
+
+    tools = set()
+    if metadata.ic_metadata:
+        tools = set(metadata.ic_metadata.requires_tools)
+
+    if tools & _DESTRUCTIVE_TOOLS:
+        return 'high'
+
+    needs_secrets = False
+    if metadata.ic_metadata:
+        env_vars = set(metadata.ic_metadata.requires_env)
+        secret_vars = {v for v in env_vars
+                       if any(k in v.upper() for k in ('TOKEN', 'SECRET', 'KEY', 'PASSWORD'))}
+        if secret_vars:
+            needs_secrets = True
+
+    if tools & _WRITE_TOOLS or needs_secrets:
+        return 'medium'
+
+    if tools and tools <= _READ_TOOLS:
+        return 'low'
+
+    return 'medium'

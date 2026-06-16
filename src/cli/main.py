@@ -2501,6 +2501,137 @@ def skills_doctor(path):
         raise SystemExit(1)
 
 
+@skills.command('run')
+@click.argument('name')
+@click.option('--dry-run', is_flag=True, help='Show steps without executing')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation for medium-risk skills')
+@click.option('--timeout', type=int, default=300, help='Timeout in seconds per step')
+@click.option('--param', '-p', multiple=True, help='Parameters as key=value')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
+    """Run a skill."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.db_registry import get_registry
+    from skills.executor import SkillExecutor
+
+    registry = get_registry()
+    skill = registry.get_skill(name)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(name))
+        raise SystemExit(1)
+
+    params = {}
+    for p in param:
+        if '=' in p:
+            k, v = p.split('=', 1)
+            params[k] = v
+
+    executor = SkillExecutor(skill, params=params, dry_run=dry_run, timeout=timeout)
+    risk = executor.classify()
+
+    if not dry_run and risk in ('medium', 'high') and not yes:
+        print(bold('Skill: ') + cyan(skill.qualified_name))
+        print(bold('Risk:  ') + (yellow(risk) if risk == 'medium' else red(risk)))
+        prereqs = executor.check_prerequisites()
+        if prereqs['tools']:
+            print(bold('Tools: ') + ', '.join(prereqs['tools'].keys()))
+        print()
+        confirm = input('Execute? [y/N] ').strip().lower()
+        if confirm != 'y':
+            print(dim('Cancelled'))
+            return
+
+    result = executor.execute()
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(result.to_dict(), indent=2, default=str))
+        return
+
+    status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
+    print(bold('Skill:    ') + cyan(skill.qualified_name))
+    print(bold('Status:   ') + status_color(result.status))
+    print(bold('Risk:     ') + risk)
+
+    if result.status == 'dry_run':
+        print(bold('Steps:    ') + '{}'.format(result.steps_total))
+        print()
+        for i, step in enumerate(result.dry_run_steps, 1):
+            print(dim('--- step {} ---'.format(i)))
+            print(step[:500])
+            print()
+    elif result.status in ('success', 'failed'):
+        print(bold('Steps:    ') + '{}/{}'.format(result.steps_executed, result.steps_total))
+        print(bold('Duration: ') + '{:.1f}s'.format(result.duration_seconds))
+        if result.stdout and result.stdout.strip():
+            print()
+            print(dim('--- stdout ---'))
+            print(result.stdout[:2000])
+        if result.stderr and result.stderr.strip():
+            print()
+            print(dim('--- stderr ---'))
+            print(result.stderr[:1000])
+    elif result.status == 'prereq_failed':
+        print()
+        print(red(result.stderr))
+
+    if result.status == 'failed':
+        raise SystemExit(1)
+
+
+@skills.command('runs')
+@click.option('--skill', 'skill_name', help='Filter by skill name')
+@click.option('--limit', type=int, default=10)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def skills_runs(ctx, skill_name, limit, output_json):
+    """Show skill execution history."""
+    import json as json_mod
+    from cli.db import print_table
+    from cli.formatting import green, red, section_header, yellow
+    from skills.db_registry import get_registry
+
+    registry = get_registry()
+    try:
+        history = registry.get_run_history(skill_name=skill_name, limit=limit)
+    except Exception:
+        print('No execution history (skill_runs table may not exist)')
+        return
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(history, indent=2, default=str))
+        return
+
+    section_header('Skill Execution History')
+    if not history:
+        print('  (no runs)')
+        return
+
+    rows = []
+    for r in history:
+        st = r['status']
+        color = green if st == 'success' else red if st == 'failed' else yellow
+        rows.append((
+            str(r.get('started_at', ''))[:16],
+            r['skill_name'],
+            color(st),
+            '{:.1f}s'.format(r['duration_seconds']) if r.get('duration_seconds') else '-',
+            r.get('triggered_by', '-'),
+        ))
+    print_table(['Started', 'Skill', 'Status', 'Duration', 'By'], rows)
+
+
 # --- components group ---
 
 @cli.group()
