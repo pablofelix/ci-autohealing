@@ -113,26 +113,71 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         builds = data.get('build_failures', [])
         conforma = data.get('conforma_violations', [])
         nightlies = data.get('nightly_warnings', [])
+        schedule = data.get('release_schedule')
+        last_sync = data.get('last_sync', '')
 
-        section_header('Alerts: {}'.format(cfg.APPLICATION_NAME))
+        section_header('Alerts — {}'.format(cfg.APPLICATION_NAME))
         print()
 
-        if builds:
-            print(bold(red('{} build failure(s):'.format(len(builds)))))
-            for f in builds:
-                comp = f.get('component', f.get('component_name', '?'))
-                err = f.get('error_type', f.get('status', ''))
-                analyzed = green(' [AI]') if f.get('has_analysis') else ''
-                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+        if last_sync:
+            sync_str = str(last_sync)[:19]
+            print('Last sync: {}'.format(sync_str))
             print()
 
+        if schedule:
+            parts = []
+            for key, label in [('code_freeze', 'Code Freeze'), ('initial_rc', 'RC'), ('release_date', 'GA')]:
+                days = schedule.get('{}_days'.format(key))
+                val = schedule.get(key)
+                if val and days is not None:
+                    from datetime import datetime as dt
+                    try:
+                        d = dt.strptime(val[:10], '%Y-%m-%d')
+                        date_str = d.strftime('%b %d')
+                    except Exception:
+                        date_str = val[:10]
+                    color = red if days <= 3 else yellow if days <= 7 else green
+                    parts.append('{}: {} ({})'.format(label, date_str, color('{}d'.format(days))))
+            if parts:
+                print(bold('Release:  ') + '  |  '.join(parts))
+                print()
+
+        print(bold('Build Failures ({})'.format(len(builds))) + ':')
+        if builds:
+            for f in builds:
+                comp = f.get('component', '?')
+                err = f.get('error_type') or f.get('possible_cause') or ''
+                analyzed = green(' [AI]') if f.get('has_analysis') else ''
+                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+        else:
+            print('  {} No build failures'.format(green('✓')))
+        print()
+
+        print(bold('Conforma Failures ({})'.format(len(conforma))) + ':')
         if conforma:
-            print(bold(yellow('{} conforma violation(s):'.format(len(conforma)))))
-            for v in conforma:
-                comp = v.get('component', v.get('component_name', '?'))
-                err = v.get('error_type', v.get('status', ''))
-                print('  {} — {}'.format(bold(comp), err))
-            print()
+            print('  {:<4} {:<45} {:>6} {:>6} {:>6}  {}'.format(
+                '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
+            print('  {}  {} {} {} {}  {}'.format(
+                '---', '-' * 45, '------', '------', '------', '--------'))
+            for i, v in enumerate(conforma, 1):
+                comp = v.get('component', '?')
+                if len(comp) > 45:
+                    comp = comp[:42] + '...'
+                viol = v.get('violations_count', 0) or 0
+                warn = v.get('warnings_count', 0) or 0
+                first = str(v.get('first_seen', ''))[:10]
+                if first and len(first) == 10:
+                    first = first[5:]
+                jira = v.get('jira_key') or '-'
+                viol_color = red if viol > 0 else green
+                print('  {:<4} {:<45} {} {:>6} {:>6}  {}'.format(
+                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira))
+                policy_url = v.get('policy_url')
+                if policy_url:
+                    print('       {} {}'.format(dim('↳'), dim(policy_url)))
+        else:
+            print('  {} No conforma violations'.format(green('✓')))
+        print()
 
         if nightlies:
             print(bold(yellow('{} nightly warning(s):'.format(len(nightlies)))))
@@ -140,13 +185,6 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
                 print('  {} — {}'.format(w.get('component_name', '?'), w.get('message', '')))
             print()
 
-        if not builds and not conforma and not nightlies:
-            print(green('No alerts'))
-            print()
-
-        total = len(builds) + len(conforma) + len(nightlies)
-        print(dim('{} total alert(s)'.format(total)))
-        print()
         return
 
     args = ['get', 'alerts']

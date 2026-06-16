@@ -1,5 +1,6 @@
 """Build failure endpoints."""
 
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -52,18 +53,32 @@ def list_alerts(application: str):
 
     conforma_violations = []
     conforma_failing = _conforma_repo().find_unresolved_component_names(application)
+    ec_policy_base = os.environ.get('GITLAB_EC_POLICY_URL', '')
     for comp_name in sorted(conforma_failing):
         details = _conforma_repo().get_violation_details(comp_name, application)
         if details:
+            scenario = details.get('scenario', '')
+            policy_url = None
+            if ec_policy_base and scenario:
+                import re
+                m = re.search(r'conforma-(.+)-single-component', scenario)
+                if m:
+                    policy_name = m.group(1)
+                    policy_url = '{}/{}.yaml'.format(ec_policy_base, policy_name)
             conforma_violations.append(FailureSummary(
                 component=comp_name,
                 status='Conforma Violation',
-                error_type=details.get('scenario'),
+                error_type=scenario,
                 first_seen=details.get('first_detected_at', datetime.utcnow()),
                 last_seen=details.get('last_updated_at', datetime.utcnow()),
                 occurrence_count=1,
                 has_logs=details.get('violation_summary') is not None,
                 has_analysis=details.get('ai_analyzed', False),
+                violations_count=details.get('violations_count', 0),
+                warnings_count=details.get('warnings_count', 0),
+                scenario=scenario,
+                policy_url=policy_url,
+                jira_key=details.get('jira_key'),
             ))
 
     nightly_warnings = []
@@ -85,6 +100,13 @@ def list_alerts(application: str):
                  [v.last_seen for v in conforma_violations])
     last_sync = max(all_dates) if all_dates else datetime.utcnow()
 
+    schedule = None
+    try:
+        from api.routes.releases import get_schedule
+        schedule = get_schedule(application)
+    except Exception:
+        pass
+
     return AlertsSummary(
         application=application,
         build_failures=build_failures,
@@ -92,6 +114,7 @@ def list_alerts(application: str):
         nightly_warnings=nightly_warnings,
         total_count=len(build_failures) + len(conforma_violations) + len(nightly_warnings),
         last_sync=last_sync,
+        release_schedule=schedule,
     )
 
 

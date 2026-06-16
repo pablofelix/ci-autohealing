@@ -27,6 +27,11 @@ class FailureSummary(BaseModel):
     has_context: bool = False
     has_analysis: bool
     possible_cause: Optional[str] = None
+    violations_count: Optional[int] = None
+    warnings_count: Optional[int] = None
+    scenario: Optional[str] = None
+    policy_url: Optional[str] = None
+    jira_key: Optional[str] = None
 
 
 class BuildFailureDetails(BaseModel):
@@ -92,6 +97,7 @@ class AlertsSummary(BaseModel):
     nightly_warnings: List[NightlyWarning] = []
     total_count: int
     last_sync: datetime
+    release_schedule: Optional[Dict[str, Any]] = None
 
 
 class StatsResponse(BaseModel):
