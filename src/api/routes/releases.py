@@ -144,6 +144,13 @@ def get_nightly(application: str) -> Dict[str, Any]:
     return monitor.get_nightly_status(application)
 
 
+@router.get("/applications/{application}/nightly/history")
+def get_nightly_history(application: str, days: int = 14) -> Dict[str, Any]:
+    """Nightly operator build history + FBC fragment freshness."""
+    repo = get_repository(BuildFailureRepository)
+    return repo.get_nightly_history(application, days=days)
+
+
 @router.get("/applications/{application}/readiness")
 def get_readiness(application: str) -> Dict[str, Any]:
     build_repo = get_repository(BuildFailureRepository)

@@ -1457,6 +1457,91 @@ def nightly(ctx, application, output_json):
     print()
 
 
+@cli.command('nightly-history')
+@click.argument('application', required=False)
+@click.option('--days', type=int, default=14, help='Number of days to show')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def nightly_history(ctx, application, days, output_json):
+    """Nightly build history: operator builds + FBC fragment freshness."""
+    import json as json_mod
+    from cli.data import require_data
+    from cli.formatting import bold, dim, green, red, section_header, yellow
+
+    output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
+    app = application or cfg.APPLICATION_NAME
+
+    if not require_data():
+        return
+
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.api_client import get_client
+        data = get_client().get('/api/v1/applications/{}/nightly/history'.format(app),
+                                params={'days': days})
+    else:
+        from config import CollectorConfig
+        from repositories.build_failure_repository import BuildFailureRepository
+        from repositories.connection import DatabaseConnection
+        conf = CollectorConfig.from_env()
+        db = DatabaseConnection(conf.db)
+        repo = BuildFailureRepository(db)
+        data = repo.get_nightly_history(app, days=days)
+
+    if not data:
+        from cli.formatting import yellow
+        print(yellow('No nightly history data found'))
+        return
+
+    if output_json:
+        print(json_mod.dumps(data, indent=2, default=str))
+        return
+
+    section_header('Nightly History: {} (last {} days)'.format(app, days))
+    print()
+
+    builds = data.get('nightly_builds', [])
+    fbc_list = data.get('fbc_fragments', [])
+
+    if not builds:
+        print(dim('  No nightly operator builds found'))
+        print()
+    else:
+        from cli.db import print_table
+        rows = []
+        for b in builds:
+            st = b.get('status', 'Unknown')
+            color_fn = green if st == 'Succeeded' else red
+            date_str = str(b.get('build_date', ''))[:10]
+            pr_short = (b.get('pipelinerun_name', '') or '')[-20:]
+            rows.append((date_str, pr_short, color_fn(st)))
+        print(bold('Operator Builds (trigger_type=nightly):'))
+        print_table(['Date', 'PipelineRun', 'Status'], rows)
+        print()
+
+    if fbc_list:
+        print(bold('FBC Fragment Status:'))
+        for fbc in fbc_list:
+            name = fbc.get('component_name', '')
+            last = fbc.get('last_successful_build')
+            st = fbc.get('current_status', 'unknown')
+            if last:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                if hasattr(last, 'tzinfo') and last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                elif isinstance(last, str):
+                    last = datetime.fromisoformat(last.replace('Z', '+00:00'))
+                hours_ago = (now - last).total_seconds() / 3600
+                freshness = green('fresh ({:.0f}h)'.format(hours_ago)) if hours_ago < 24 \
+                    else yellow('aging ({:.0f}h)'.format(hours_ago)) if hours_ago < 48 \
+                    else red('stale ({:.0f}h)'.format(hours_ago))
+            else:
+                freshness = red('no successful build')
+            print('  {} — {}'.format(name, freshness))
+        print()
+
+
 @cli.command()
 @click.argument('image_ref')
 @click.pass_context

@@ -10,10 +10,11 @@ from mcp_server.models import (
     BuildFailureDetails,
     ComponentHistoryResponse,
     FailureSummary,
+    NightlyWarning,
 )
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
-from repositories.repository_factory import get_repository
+from repositories.repository_factory import get_repository, get_pool
 
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
 
@@ -65,6 +66,21 @@ def list_alerts(application: str):
                 has_analysis=details.get('ai_analyzed', False),
             ))
 
+    nightly_warnings = []
+    try:
+        from proactive.health_monitor import HealthMonitor
+        from repositories.connection import PooledDatabaseConnection
+        db = PooledDatabaseConnection(get_pool())
+        monitor = HealthMonitor(db)
+        for w in monitor.get_stale_nightly_builds():
+            nightly_warnings.append(NightlyWarning(
+                component_name=w.component_name,
+                severity=w.severity,
+                message=w.message,
+            ))
+    except Exception:
+        pass
+
     all_dates = ([f.last_seen for f in build_failures] +
                  [v.last_seen for v in conforma_violations])
     last_sync = max(all_dates) if all_dates else datetime.utcnow()
@@ -73,7 +89,8 @@ def list_alerts(application: str):
         application=application,
         build_failures=build_failures,
         conforma_violations=conforma_violations,
-        total_count=len(build_failures) + len(conforma_violations),
+        nightly_warnings=nightly_warnings,
+        total_count=len(build_failures) + len(conforma_violations) + len(nightly_warnings),
         last_sync=last_sync,
     )
 

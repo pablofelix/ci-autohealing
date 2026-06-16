@@ -1458,6 +1458,20 @@ def get_nightly_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]
     return monitor.get_nightly_status(application)
 
 
+@mcp.tool()
+def get_nightly_history(application: str = DEFAULT_APPLICATION, days: int = 14) -> Dict[str, Any]:
+    """Get nightly operator build history and FBC fragment freshness.
+
+    Shows the last N days of nightly builds (operator builds tagged trigger_type='nightly')
+    and the current freshness of FBC fragment components.
+    """
+    from config import CollectorConfig
+    from repositories.build_failure_repository import BuildFailureRepository
+    from repositories.connection import DatabaseConnection
+    repo = BuildFailureRepository(DatabaseConnection(CollectorConfig.from_env().db))
+    return repo.get_nightly_history(application, days=days)
+
+
 # ---------------------------------------------------------------------------
 # Skill registry tools (read-only)
 # ---------------------------------------------------------------------------

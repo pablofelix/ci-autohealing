@@ -472,6 +472,13 @@ class BuildFailureCollector:
         else:
             logger.warning("Could not fetch metadata from any source, using partial data")
 
+        author = details.get('commit_author', '')
+        msg = details.get('commit_message', '')
+        if author == 'Openshift-AI DevOps' and 'Updating the operator repo' in msg:
+            details['trigger_type'] = 'nightly'
+        elif details.get('pr_number'):
+            details['trigger_type'] = 'pull_request'
+
         # Calculate duration first (needed for timeout messages)
         duration = None
         if details.get('start_time') and details.get('completion_time'):

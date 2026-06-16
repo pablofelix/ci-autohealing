@@ -80,10 +80,16 @@ class AnalysisDetails(BaseModel):
     cost_usd: float
 
 
+class NightlyWarning(BaseModel):
+    component_name: str
+    severity: str
+    message: str
+
 class AlertsSummary(BaseModel):
     application: str
     build_failures: List[FailureSummary]
     conforma_violations: List[FailureSummary]
+    nightly_warnings: List[NightlyWarning] = []
     total_count: int
     last_sync: datetime
 
