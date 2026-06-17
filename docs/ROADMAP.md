@@ -93,11 +93,29 @@ Goal: run skills as automated workflows, not just lookup/reference.
 
 Goal: close the loop from detection → diagnosis → fix → verification automatically for high-confidence failures.
 
+**5a — Fixer Sandbox**
+- [ ] Fixer runs in isolated environment (container or git worktree)
+- [ ] File allowlist: only modify permitted file types per repo
+- [ ] Diff size limits: max lines changed, max files
+- [ ] Never-modify list: `.github/workflows/`, `OWNERS`, `LICENSE`, CI config
+- [ ] Branch naming enforcement: `ci-autohealing/fix-*`
+
+**5b — Verification Agent**
+- [ ] Pre-merge checks: diff scope validation, file allowlist, size limits
+- [ ] Safety scoring (0-100): files scope + diff size + pattern match + CI status
+- [ ] Post-merge verification: monitor next build, detect regressions
+- [ ] Auto-revert: if next build fails AND the fix PR is the cause, revert automatically
+- [ ] Confidence calibration: adjust AI confidence based on actual fix outcomes
+
+**5c — Autonomous Mode (requires 5a + 5b)**
 - [ ] Auto-retrigger builds for transient failures (network timeouts, flaky infra)
-- [ ] Auto-generate fix PRs for high-confidence AI diagnoses (dependency bumps, base image updates)
-- [ ] Post-fix verification: monitor the next build after a fix PR merges
-- [ ] Confidence thresholds: only auto-act above configurable confidence (e.g., 90%+)
+- [ ] Auto-generate fix PRs for high-confidence diagnoses (dependency bumps, base image updates)
+- [ ] PRs created as drafts by default — auto-merge only if safety score > 90
+- [ ] Confidence thresholds: only auto-act above configurable confidence (e.g., 95%+)
+- [ ] Rate limits: max N PRs per hour, per repo
+- [ ] Repo allowlist: only repos explicitly enabled for auto-fix
 - [ ] Audit trail: log every automated action with reasoning for human review
+- [ ] Time-limited activation: AUTONOMOUS_MODE auto-deactivates after N hours
 
 ---
 
