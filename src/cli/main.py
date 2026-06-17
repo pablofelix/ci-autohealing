@@ -288,10 +288,32 @@ def get_policy_gap(ctx, output_json):
 @click.pass_context
 def get_pipelineruns(ctx, limit, output_json):
     """List PipelineRun failures."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failures
+        from cli.formatting import bold, dim, section_header
+        if not require_data():
+            return
+        data = get_failures()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Build Failures: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        items = data if isinstance(data, list) else []
+        for f in items[:limit or 50]:
+            comp = f.get('component_name', f.get('component', '?'))
+            status = f.get('status', '')
+            err = f.get('error_type') or f.get('error_message', '')
+            print('  {} — {} {}'.format(bold(comp), status, dim(err[:60]) if err else ''))
+        print()
+        return
     args = ['get', 'pipelineruns']
     if limit:
         args.extend(['--limit', str(limit)])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -302,8 +324,21 @@ def get_pipelineruns(ctx, limit, output_json):
 @click.pass_context
 def get_pipelinerun(ctx, name, output_json):
     """Get PipelineRun details."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if is_json or data:
+            print(json_mod.dumps(data, indent=2, default=str))
+        else:
+            print('PipelineRun not found: {}'.format(name))
+        return
     args = ['get', 'pipelinerun', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -391,6 +426,35 @@ def get_apps(ctx, output_json):
 @click.pass_context
 def get_releases(ctx, stage, prod, limit, output_json, name):
     """List Release CRs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_schedule
+        from cli.formatting import green, section_header, yellow
+        if not require_data():
+            return
+        schedule = get_schedule()
+        if is_json:
+            print(json_mod.dumps(schedule, indent=2, default=str))
+            return
+        section_header('Release Schedule: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        if not schedule:
+            print('  No release schedule data')
+        else:
+            for key in ('planning_freeze', 'code_freeze', 'initial_rc',
+                        'release_window_start', 'release_date', 'next_release'):
+                val = schedule.get(key)
+                days = schedule.get('{}_days'.format(key))
+                if val:
+                    days_str = ' ({}d)'.format(days) if days is not None else ''
+                    color = green
+                    if days is not None and days <= 3:
+                        color = yellow
+                    print('  {:<25} {}{}'.format(key + ':', val[:10], color(days_str)))
+        print()
+        return
     if name:
         args = ['get', 'releases', name]
     else:
@@ -401,7 +465,7 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
         args.append('--prod')
     if limit:
         args.extend(['--limit', str(limit)])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -412,10 +476,33 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
 @click.pass_context
 def get_jira(ctx, component, output_json):
     """Show Jira ticket links."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts
+        from cli.formatting import bold, cyan, section_header
+        if not require_data():
+            return
+        data = get_alerts()
+        all_items = data.get('build_failures', []) + data.get('conforma_violations', [])
+        jira_items = [i for i in all_items if i.get('jira_key')]
+        if is_json:
+            print(json_mod.dumps(jira_items, indent=2, default=str))
+            return
+        section_header('Jira Links')
+        print()
+        if not jira_items:
+            print('  No Jira tickets linked')
+        else:
+            for i in jira_items:
+                print('  {} → {}'.format(bold(i['component']), cyan(i['jira_key'])))
+        print()
+        return
     args = ['get', 'jira']
     if component:
         args.append(component)
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -427,12 +514,38 @@ def get_jira(ctx, component, output_json):
 @click.pass_context
 def get_fixes(ctx, show_all, output_json, component):
     """List fix attempts."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_fixes as _get_fixes
+        from cli.formatting import bold, dim, green, red, section_header
+        if not require_data():
+            return
+        data = _get_fixes(show_all=show_all)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Fix Attempts')
+        print()
+        items = data if isinstance(data, list) else []
+        if not items:
+            print('  No fix attempts')
+        for f in items:
+            status = f.get('status', '?')
+            color = green if status == 'success' else red
+            print('  {} — {} {}'.format(
+                bold(f.get('component_name', '?')),
+                color(status),
+                dim(f.get('pr_url', '') or '')))
+        print()
+        return
     args = ['get', 'fixes']
     if component:
         args.append(component)
     if show_all:
         args.append('--all')
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -679,8 +792,27 @@ def describe_conforma(ctx, name, output_json):
 @click.pass_context
 def describe_pipelinerun(ctx, name, output_json):
     """Full PipelineRun details + logs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        from cli.formatting import section_header
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if is_json or not data:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('PipelineRun: {}'.format(name))
+        print()
+        for k, v in data.items():
+            if v and k not in ('build_logs', 'raw_pipelinerun_yaml', 'blob_refs'):
+                print('  {:<22} {}'.format(k + ':', str(v)[:100]))
+        print()
+        return
     args = ['describe', 'pipelinerun', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -1919,7 +2051,24 @@ def fix(args):
 @cli.command('export')
 @click.argument('args', nargs=-1)
 def export_cmd(args):
-    """Export analysis to ticket format."""
+    """Export analysis to ticket format (e.g. ic export component-name slack)."""
+    import json as json_mod
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster' and len(args) >= 1:
+        from cli.data import require_data, get_export
+        if not require_data():
+            return
+        component = args[0]
+        fmt = args[1] if len(args) > 1 else 'slack'
+        data = get_export(component, fmt)
+        if data:
+            if isinstance(data, dict) and 'text' in data:
+                print(data['text'])
+            else:
+                print(json_mod.dumps(data, indent=2, default=str))
+        else:
+            print('No export data for: {}'.format(component))
+        return
     _bash_fallback(['export'] + list(args))
 
 
@@ -1937,6 +2086,33 @@ def conforma(ctx):
 @click.argument('args', nargs=-1)
 def conforma_report(args):
     """Daily Conforma violations report."""
+    import json as json_mod
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_report
+        from cli.formatting import dim, red, section_header, yellow
+        if not require_data():
+            return
+        data = get_conforma_report()
+        if isinstance(data, str):
+            print(data)
+        elif isinstance(data, dict):
+            print(json_mod.dumps(data, indent=2, default=str))
+        elif isinstance(data, list):
+            section_header('Conforma Report')
+            print()
+            for item in data:
+                comp = item.get('component_name', item.get('component', '?'))
+                viol = item.get('violations_count', 0) or 0
+                warn = item.get('warnings_count', 0) or 0
+                scenario = item.get('scenario', '')
+                viol_color = red if viol > 0 else yellow
+                print('  {:<45} {} viol  {} warn  {}'.format(
+                    comp[:45], viol_color(str(viol).rjust(3)), str(warn).rjust(3), dim(scenario[:30])))
+            print()
+        else:
+            print(data)
+        return
     _bash_fallback(['conforma', 'report'] + list(args))
 
 
