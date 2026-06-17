@@ -7,6 +7,7 @@ from api.routes import (
     applications,
     config,
     exports,
+    external,
     failures,
     fixes,
     health,
@@ -21,6 +22,7 @@ from api.routes import (
 def mount_routes(app: FastAPI) -> None:
     app.include_router(health.router)
     app.include_router(config.router, prefix="/api/v1")
+    app.include_router(external.router, prefix="/api/v1")
     app.include_router(applications.router, prefix="/api/v1")
     app.include_router(failures.router, prefix="/api/v1")
     app.include_router(violations.router, prefix="/api/v1")
