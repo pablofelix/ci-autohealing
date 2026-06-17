@@ -1563,7 +1563,7 @@ def ai_analyze(args):
         print(bold('Analyzing: ') + cyan(component))
         try:
             from config import CollectorConfig
-            from analyzers.build_failure_analyzer import BuildFailureAnalyzer
+            from analyzers.build_failure_analyzer import ANALYSIS_TOOL, BuildFailureAnalyzer
             config = CollectorConfig.from_env()
             if not config.llm:
                 print(red('No LLM provider configured'))
@@ -1571,27 +1571,34 @@ def ai_analyze(args):
                 return
 
             if is_cluster():
-                from llm.client import LLMClient
-                from repositories.ai_analysis_repository import AIAnalysisRepository
-                from repositories.error_pattern_repository import ErrorPatternRepository
-                from repositories.connection import DatabaseConnection
-                from services.pattern_confidence_service import PatternConfidenceService
-                from langfuse_client import LangfuseClient
+                failure.setdefault('component_name', failure.get('component', component))
+                failure.setdefault('id', 0)
+                failure.setdefault('failed_task_name', failure.get('failed_task', ''))
+                failure.setdefault('failed_step_name', failure.get('failed_step', ''))
+                failure.setdefault('application', cfg.APPLICATION_NAME)
+                failure.setdefault('namespace', cfg.NAMESPACE)
+                failure.setdefault('repository_url', failure.get('repository_url', ''))
+                failure.setdefault('commit_sha', failure.get('commit_sha', ''))
+                failure.setdefault('commit_context', failure.get('commit_context'))
 
-                llm = LLMClient.from_config(config.llm)
-                db = DatabaseConnection(config.db)
-                ai_repo = AIAnalysisRepository(db)
-                pattern_repo = ErrorPatternRepository(db)
-                langfuse = LangfuseClient()
-                pattern_svc = PatternConfidenceService(pattern_repo)
-
-                analyzer = BuildFailureAnalyzer(
-                    config=config, llm=llm, ai_repo=ai_repo,
-                    pattern_repo=pattern_repo, build_repo=None,
-                    langfuse=langfuse, pattern_service=pattern_svc,
+                from clients.llm_provider import create_llm_provider
+                llm = create_llm_provider(config.llm)
+                analyzer = BuildFailureAnalyzer(config=config, llm=llm)
+                analyzer._ensure_context(failure)
+                analyzer._ensure_enrichment(failure)
+                analyzer._ensure_logs(failure)
+                system_prompt, user_prompt = analyzer.build_analysis_prompt(failure)
+                import time as _time
+                t0 = _time.time()
+                response = llm.create_message(
+                    system=system_prompt, user_content=user_prompt,
+                    tools=[ANALYSIS_TOOL],
                 )
-
-                result = analyzer.analyze_failure(failure)
+                analysis_duration = _time.time() - t0
+                result = analyzer.parse_analysis_response(response)
+                result['tokens_used'] = response.input_tokens + response.output_tokens
+                result['cost_usd'] = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
+                result['model_used'] = llm.model_name()
 
                 print(green('  ✓ Analysis complete'))
                 print()
@@ -1600,6 +1607,7 @@ def ai_analyze(args):
                 print(bold('Confidence:  ') + '{}%'.format(
                     int(result.get('confidence_score', 0) * 100)))
                 print(bold('Fix:         ') + (result.get('recommended_fix', '?') or '?')[:100])
+                print(bold('Duration:    ') + '{:.1f}s'.format(analysis_duration))
                 print()
 
                 submission = {

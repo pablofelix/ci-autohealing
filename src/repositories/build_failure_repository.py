@@ -577,6 +577,7 @@ class BuildFailureRepository:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT
+                    id,
                     component_name, pipelinerun_name, error_message, error_type,
                     failed_task_name, failed_step_name,
                     build_logs,
@@ -595,6 +596,7 @@ class BuildFailureRepository:
             if not row:
                 return None
             cols = [
+                'id',
                 'component_name', 'pipelinerun_name', 'error_message', 'error_type',
                 'failed_task_name', 'failed_step_name', 'build_logs',
                 'commit_sha', 'commit_message', 'commit_author', 'commit_url',
