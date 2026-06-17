@@ -2218,6 +2218,14 @@ def nightly(ctx, application, output_json):
     else:
         print(green('No build blockers'))
 
+    gha = status.get('gha_validation')
+    if gha:
+        conclusion = gha.get('conclusion', 'unknown')
+        gha_color = green if conclusion == 'success' else red if conclusion == 'failure' else yellow
+        print(bold('GHA Validation:') + ' {} ({})'.format(
+            gha_color(conclusion), gha.get('created_at', '')[:10]))
+        if gha.get('url'):
+            print('  {}'.format(dim(gha['url'])))
     print()
     print(cyan('Tip:') + ' Use {} for details on a blocker'.format(bold('ic describe <component>')))
     print()

@@ -409,6 +409,24 @@ class HealthMonitor:
 
             blockers.append(blocker)
 
+        gha_validation = None
+        try:
+            from clients.github_client import GitHubClient
+            gh = GitHubClient(token=os.environ.get('GITHUB_TOKEN'))
+            runs = gh.get_workflow_runs(
+                'red-hat-data-services', 'rhods-devops-infra',
+                'trigger-nightlies.yaml', limit=3)
+            if runs:
+                latest = runs[0]
+                gha_validation = {
+                    'conclusion': latest.get('conclusion'),
+                    'status': latest.get('status'),
+                    'created_at': latest.get('created_at'),
+                    'url': latest.get('html_url'),
+                }
+        except Exception:
+            pass
+
         return {
             'application': application,
             'fbc_component': fbc_name,
@@ -417,6 +435,7 @@ class HealthMonitor:
             'fbc_conforma': fbc_conforma,
             'blockers': blockers,
             'blockers_count': len(blockers),
+            'gha_validation': gha_validation,
         }
 
     def get_stale_components(self, application=None, use_cache=True,
