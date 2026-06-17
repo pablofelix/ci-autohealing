@@ -236,7 +236,7 @@ class TestCLIWatchList(unittest.TestCase):
 
     def test_list_no_apps(self):
         runner = CliRunner()
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {'IC_MODE': 'local'}, clear=True):
             result = runner.invoke(cli, ['config', 'watch', 'list'])
             self.assertEqual(result.exit_code, 0)
             self.assertIn('none', result.output)

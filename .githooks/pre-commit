@@ -21,6 +21,10 @@ fi
 echo "=== pre-commit: lint ==="
 $PYTHON -m ruff check "$COLLECTORS/" --exclude='__pycache__'
 
+echo "=== pre-commit: style (STYLE.md) ==="
+cd "$ROOT"
+bash scripts/check-style.sh
+
 echo "=== pre-commit: tests ==="
 cd "$ROOT"
 $PYTHON -m pytest -q --tb=short 2>&1

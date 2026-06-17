@@ -568,6 +568,49 @@ def update_triage_item(item_id: int,
 
 
 @mcp.tool()
+def resolve_triage_item(
+    item_id: int,
+    resolution: str = '',
+    pr_url: str = '',
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Resolve a triage item (mark investigation as complete).
+
+    Args:
+        item_id: Triage item ID to resolve
+        resolution: Resolution description (e.g. "PR merged", "config fix applied")
+        pr_url: URL of the fix PR (optional)
+        application: Application name
+    """
+    repo = _triage_repo()
+    repo.resolve_item(item_id, resolution=resolution, pr_url=pr_url)
+    return {"action": "resolved", "item_id": item_id, "resolution": resolution}
+
+
+@mcp.tool()
+def get_conforma_categories(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get violation categories with counts across all failing components.
+
+    Returns a summary of which Conforma policy rules are failing and how many
+    components are affected by each.
+    """
+    from repositories.conforma_repository import ConformaRepository
+    repo = ConformaRepository(_db_connection())
+    comps = repo.find_unresolved_component_names(application)
+    categories = {}
+    for comp in comps:
+        details = repo.get_violation_details(comp, application)
+        if details:
+            scenario = details.get('scenario', 'unknown')
+            if scenario not in categories:
+                categories[scenario] = {'count': 0, 'components': [], 'total_violations': 0}
+            categories[scenario]['count'] += 1
+            categories[scenario]['components'].append(comp)
+            categories[scenario]['total_violations'] += details.get('violations_count', 0)
+    return {"application": application, "categories": categories}
+
+
+@mcp.tool()
 @async_tool
 def get_component_status(component: str) -> Dict[str, Any]:
     """Get component promotion health: last build vs last promoted image, downstream nudges.
