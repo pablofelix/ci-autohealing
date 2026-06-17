@@ -113,19 +113,24 @@ Goal: dashboards and trends, not just point-in-time snapshots.
 
 ---
 
-## Phase 7: CLI Cluster Mode Parity
+## Phase 7: CLI Cluster Mode Parity (mostly done)
 
 Goal: all CLI commands work identically in local and cluster mode.
 
 - [x] `ic get alerts` — enriched with violation counts, policy links, release countdown
 - [x] `ic get apps` — works via API
-- [x] `ic get component` — works via API
-- [ ] `ic get releases` — collect Release CRs from Konflux into DB, add API endpoint
-- [ ] `ic describe failure` / `ic describe conforma` — full detail via API
-- [ ] `ic export slack/jira` — generate exports from cluster data
-- [ ] `ic triage` dashboard via API
-- [ ] `ic stats` via API
-- [ ] `ic conforma report` via API
+- [x] `ic get component` / `ic describe component` — full detail + build history via API
+- [x] `ic get conforma` / `ic describe conforma` — violations with counts via API
+- [x] `ic get pipelineruns` / `ic get pipelinerun` — via API
+- [x] `ic get releases` — release schedule via API
+- [x] `ic get jira` — jira links via API
+- [x] `ic get fixes` — fix attempts via API
+- [x] `ic export` — slack/jira export via API
+- [x] `ic triage` — dashboard via API
+- [x] `ic stats` — overview stats via API
+- [x] `ic conforma report` — via API
+- [x] `ic config watch add/list` — runtime config via API + DB
+- [ ] Remaining 33 bash-only commands (see Phase 9c)
 
 ---
 
@@ -137,6 +142,42 @@ Goal: automated image builds and deployments.
 - [ ] ArgoCD auto-sync from deploy repo
 - [ ] Kustomize overlays for dev/staging/prod
 - [ ] Vault integration: replace manual secrets with VaultStaticSecret CRs
+
+---
+
+## Phase 9: ic as Pure API Client
+
+Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API client. Local mode = API on localhost:8000, cluster mode = API on remote URL.
+
+**9a — Error handling (done)**
+- [x] Structured API errors with error code, detail, suggestion
+- [x] CLI renders suggestions from API error responses
+- [x] FastAPI exception handler for ICError
+
+**9b — Input validation (done)**
+- [x] Validators for app names, component names, jira keys, skill names
+- [x] Rejects empty/invalid input with clear suggestions
+
+**9c — Eliminate bash fallback (33 commands)**
+- [ ] Migrate conforma report/categories/csv/scenarios/snapshot commands
+- [ ] Migrate jira create/link/status/inbox commands
+- [ ] Migrate ai analyze/batch/stats commands
+- [ ] Migrate release status/verify/diff commands
+- [ ] Migrate fix (interactive) command
+- [ ] Migrate report build/conforma commands
+- [ ] Local mode = `api_url: http://localhost:8000` (user runs `task serve`)
+- [ ] Remove `_bash_fallback()` function entirely
+
+**9d — MCP-CLI parity**
+- [ ] Every CLI command has an equivalent MCP tool
+- [ ] All MCP tools call the same API endpoints as CLI
+- [ ] Add missing: conforma_report(), triage_track/resolve(), release_readiness()
+
+**9e — Input sanitization and UX**
+- [ ] Fuzzy matching for component/app names ("did you mean X?")
+- [ ] Autocomplete suggestions from DB for invalid names
+- [ ] Consistent error formatting across all commands
+- [ ] Progress indicators for long operations
 - [ ] Automated DB migrations on deploy (init container or Job)
 
 ---
