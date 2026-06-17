@@ -235,13 +235,22 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 
 Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full analysis.
 
+**S1a — Log and output security**
 - [ ] Secret scanning/redaction in stored logs and AI output (T2)
 - [ ] Sanitize AI-generated content before Jira/Slack posting (T5)
-- [ ] Autonomous PR scope limits: repo allowlist, file allowlist, branch naming (T3, T8)
-- [ ] GitHub API call audit logging (T4)
-- [ ] AUTONOMOUS_MODE activation controls with confirmation (T6)
-- [ ] Skill execution: pin to SHA, sandbox by default (T7)
 - [ ] Strip ANSI escape codes from stored logs (T1)
+
+**S1b — Skill execution security**
+- [ ] Command audit log: wrap subprocess to log every command before execution (T7)
+- [ ] Secret masking: only pass env vars declared in requires-env, strip undeclared tokens (T7)
+- [ ] Execution budget: timeout + max output size per skill (T7)
+- [ ] Pin external skills to SHA — require approval before first run (T7)
+- [ ] Sandbox ALL skill execution by default (not just high-risk) (T7)
+
+**S1c — Autonomous action limits**
+- [ ] Autonomous PR scope limits: repo allowlist, file allowlist, branch naming (T3, T8)
+- [ ] AUTONOMOUS_MODE activation controls with confirmation (T6)
+- [ ] GitHub API call audit logging (T4)
 - [ ] Never-modify file list for auto-fix PRs (T8)
 
 ## Phase S2: Defense in Depth
@@ -249,14 +258,17 @@ Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full ana
 - [ ] Per-user API keys with RBAC (T9)
 - [ ] Token rotation via Vault (T4)
 - [ ] Rate limits on Jira/PR creation (T3, T5)
-- [ ] Network policies for sandbox pods (T7)
+- [ ] Network sandbox for skill pods: restrict egress to declared endpoints (T7)
+- [ ] Read-only filesystem for skills: can only write to /tmp (T7)
+- [ ] Skill approval workflow: `ic skills approve` required for external sources (T7)
+- [ ] Cost tracking: capture LLM API calls made by skills, attribute cost (T7)
 - [ ] Time-limited AUTONOMOUS_MODE (T6)
 - [ ] PR dry-run mode — draft PRs by default (T3)
 
 ## Phase S3: Long-term Hardening
 
 - [ ] OIDC integration for API auth (T9)
-- [ ] Skill content hash verification (T7)
+- [ ] Skill content hash verification: detect tampering (T7)
 - [ ] DB column encryption for sensitive data (T10)
 - [ ] Full API audit trail with user identity (T9)
 

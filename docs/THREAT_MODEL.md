@@ -174,11 +174,14 @@ Skills → Subprocess execution (user machine or K8s Job sandbox)
 
 ## T7: Skill Execution Security
 
-**Risk**: HIGH — Skills execute arbitrary code via subprocess. Even with risk classification:
+**Risk**: HIGH — Skills execute arbitrary code via subprocess. Anyone can `ic skills add https://random-repo.git` and run unaudited code. Not all users understand the security implications.
 
-- Medium-risk skills run with user's full permissions
-- Code blocks extracted from SKILL.md may be manipulated
-- Skills from external git repos could be backdoored
+**Attack vectors:**
+- Backdoored skill from external repo exfiltrates tokens from env
+- Skill makes network calls to attacker-controlled server
+- Skill modifies files outside its scope (repo configs, CI pipelines)
+- Skill uses LLM APIs incurring costs without tracking
+- User runs a skill without understanding what it does
 
 **Current mitigations:**
 - Risk classification (low/medium/high)
@@ -187,14 +190,27 @@ Skills → Subprocess execution (user machine or K8s Job sandbox)
 - Static security analysis (validator.py)
 - `# ic:skip` markers for non-executable blocks
 
+**Current gaps:**
+- No command-level audit (only final result logged, not individual commands)
+- No secret masking (all env vars passed to subprocess including tokens)
+- No network isolation (sandbox pods can egress anywhere)
+- No cost tracking for skills that call LLM APIs
+- No approval workflow for external skill sources
+- Filesystem is writable (skill can modify anything)
+
 **Needed mitigations:**
 
 | Phase | Mitigation | Priority |
 |-------|-----------|----------|
-| S1 | Skills from external repos: require signed commits or pinned SHA | HIGH |
-| S1 | Sandbox ALL skill execution (not just high-risk) — use container by default | HIGH |
-| S2 | Skill execution audit log: command, user, output, duration | MEDIUM |
-| S2 | Network policy for sandbox pods: restrict egress to specific endpoints | MEDIUM |
+| S1 | **Command audit log**: wrap subprocess to log every command before execution | CRITICAL |
+| S1 | **Secret masking**: only pass env vars declared in `requires-env`, strip undeclared tokens | CRITICAL |
+| S1 | Skills from external repos: require pinned SHA or approval before execution | HIGH |
+| S1 | **Execution budget**: timeout + max output size per skill, kill if exceeded | HIGH |
+| S1 | Sandbox ALL skill execution (not just high-risk) — container by default | HIGH |
+| S2 | **Network sandbox**: NetworkPolicy on K8s Job — only allow declared endpoints | MEDIUM |
+| S2 | **Read-only filesystem**: skill can only write to /tmp, not modify source | MEDIUM |
+| S2 | **Skill approval workflow**: external skills require `ic skills approve` before first run | MEDIUM |
+| S2 | **Cost tracking**: capture LLM API calls made by skills, attribute cost | MEDIUM |
 | S3 | Skill content hash verification: detect tampering between registration and execution | LOW |
 
 ---
