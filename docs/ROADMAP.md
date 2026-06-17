@@ -239,6 +239,7 @@ Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full ana
 - [ ] Secret scanning/redaction in stored logs and AI output (T2)
 - [ ] Sanitize AI-generated content before Jira/Slack posting (T5)
 - [ ] Strip ANSI escape codes from stored logs (T1)
+- [ ] LLM prompt injection protection: canary tokens + output validation (T15)
 
 **S1b — Skill execution security**
 - [ ] Command audit log: wrap subprocess to log every command before execution (T7)
@@ -253,17 +254,35 @@ Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full ana
 - [ ] GitHub API call audit logging (T4)
 - [ ] Never-modify file list for auto-fix PRs (T8)
 
+**S1d — API hardening**
+- [ ] Basic rate limiting: 100 req/min read, 10 req/min write (T11)
+- [ ] Config file permissions: ~/.ic/config.json mode 600 on creation (T12)
+
 ## Phase S2: Defense in Depth
 
+**S2a — Access control**
 - [ ] Per-user API keys with RBAC (T9)
+- [ ] MCP tool-level permissions: read vs write tools (T16)
 - [ ] Token rotation via Vault (T4)
-- [ ] Rate limits on Jira/PR creation (T3, T5)
+
+**S2b — Skill isolation**
 - [ ] Network sandbox for skill pods: restrict egress to declared endpoints (T7)
 - [ ] Read-only filesystem for skills: can only write to /tmp (T7)
-- [ ] Skill approval workflow: `ic skills approve` required for external sources (T7)
-- [ ] Cost tracking: capture LLM API calls made by skills, attribute cost (T7)
+- [ ] Skill approval workflow: `ic skills approve` for external sources (T7)
+- [ ] Cost tracking: capture LLM API calls made by skills (T7)
+
+**S2c — Operational safety**
+- [ ] Rate limits on Jira/PR creation (T3, T5)
 - [ ] Time-limited AUTONOMOUS_MODE (T6)
 - [ ] PR dry-run mode — draft PRs by default (T3)
+- [ ] Worker/watcher health alerts: notify if no heartbeat in 30 min (T13)
+- [ ] Stale data detection: alert if no scans in 2 hours (T13)
+- [ ] `ic health` command: system component status (T13)
+
+**S2d — Data management**
+- [ ] Retention policy: archive >90 days, purge >180 days (T14)
+- [ ] PostgreSQL backup CronJob to MinIO (T14)
+- [ ] `ic export-data` for backup/audit (T17)
 
 ## Phase S3: Long-term Hardening
 
@@ -271,6 +290,10 @@ Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full ana
 - [ ] Skill content hash verification: detect tampering (T7)
 - [ ] DB column encryption for sensitive data (T10)
 - [ ] Full API audit trail with user identity (T9)
+- [ ] Backup encryption + off-cluster storage (T14)
+- [ ] Multi-tenant data isolation (T18)
+- [ ] Per-agent MCP tool allowlists (T16)
+- [ ] `ic import-data` for migration between instances (T17)
 
 ---
 
