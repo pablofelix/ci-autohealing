@@ -189,6 +189,13 @@ def get_policy_bindings():
     return None
 
 
+def submit_analysis(component, analysis_data, application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().post(f'/api/v1/applications/{app}/analyses', analysis_data)
+    return None
+
+
 def get_watched_applications():
     if _is_cluster():
         data = _api().get('/api/v1/config/applications')

@@ -318,6 +318,77 @@ def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:
 
 
 @mcp.tool()
+def submit_analysis(
+    component: str,
+    root_cause: str,
+    failure_category: str,
+    confidence_score: float,
+    recommended_fix: str,
+    application: str = DEFAULT_APPLICATION,
+    analysis_type: str = 'build',
+    model_used: str = 'claude',
+    recommended_files: Optional[List[str]] = None,
+    can_auto_fix: bool = False,
+    tokens_used: int = 0,
+    cost_usd: float = 0.0,
+) -> Dict[str, Any]:
+    """Submit an AI analysis result for a component failure.
+
+    Use this to store analysis results when the LLM runs externally
+    (e.g., via Claude Code) rather than on the server. The result is
+    stored in the same database as server-side analyses.
+
+    Args:
+        component: Component name being analyzed
+        root_cause: Description of the root cause
+        failure_category: Category (dependency_issue, build_error, etc.)
+        confidence_score: 0.0-1.0 confidence in the diagnosis
+        recommended_fix: Suggested fix description
+        application: Application name
+        analysis_type: 'build' or 'conforma'
+        model_used: Model identifier
+        recommended_files: Files that need changes
+        can_auto_fix: Whether this can be auto-fixed
+        tokens_used: Tokens consumed
+        cost_usd: Cost of the analysis
+    """
+    repo = _ai_repo()
+    build_repo = _build_repo()
+
+    failure = build_repo.get_failure_details(component, application)
+    if not failure:
+        return {"error": "Component not found: {}".format(component)}
+
+    failure_id = failure.get('id')
+    if not failure_id:
+        return {"error": "Failure has no ID"}
+
+    analysis_id = repo.insert_analysis(
+        build_failure_id=failure_id if analysis_type == 'build' else None,
+        conforma_result_id=failure_id if analysis_type == 'conforma' else None,
+        model_used=model_used,
+        root_cause=root_cause,
+        failure_category=failure_category,
+        confidence_score=confidence_score,
+        recommended_fix=recommended_fix,
+        recommended_files=recommended_files or [],
+        can_auto_fix=can_auto_fix,
+        requires_human_review=not can_auto_fix,
+        tokens_used=tokens_used,
+        cost_usd=cost_usd,
+        analysis_duration=0,
+        analysis_json=None,
+    )
+
+    return {
+        "action": "stored",
+        "analysis_id": analysis_id,
+        "component": component,
+        "confidence": confidence_score,
+    }
+
+
+@mcp.tool()
 @async_tool
 def search_failures(
     application: str = DEFAULT_APPLICATION,
