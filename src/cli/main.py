@@ -1181,7 +1181,7 @@ def config_watch_list():
         if w == 'jira':
             wtype = 'Jira API poll'
         elif w == 'conforma':
-            wtype = 'K8s watch (not yet implemented)'
+            wtype = 'Worker poll'
         else:
             wtype = 'K8s watch'
         print('    {:<16s} {:<19s} {}'.format(w, status, dim(wtype)))
