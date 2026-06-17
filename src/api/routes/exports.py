@@ -2,11 +2,14 @@
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
+
+from security.redact import redact_secrets
 
 from mcp_server.models import AnalysisDetails
 from repositories.ai_analysis_repository import AIAnalysisRepository
@@ -15,6 +18,24 @@ from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
+
+
+def _sanitize_for_jira(text):
+    if not text:
+        return text
+    text = redact_secrets(text)
+    text = re.sub(r'\{[a-z]+[^}]*\}', '', text)
+    text = re.sub(r'\[~[^\]]+\]', '', text)
+    return text
+
+
+def _sanitize_for_slack(text):
+    if not text:
+        return text
+    text = redact_secrets(text)
+    text = text.replace('@here', '(at)here').replace('@channel', '(at)channel')
+    text = re.sub(r'<@[A-Z0-9]+>', '', text)
+    return text
 
 router = APIRouter(tags=["exports"])
 
@@ -72,6 +93,10 @@ def export_component(
         "json": _export_json,
     }
     text = handlers[format](component, application, include_logs)
+    if format == 'jira':
+        text = _sanitize_for_jira(text)
+    elif format == 'slack':
+        text = _sanitize_for_slack(text)
     media = "application/json" if format == "json" else "text/plain"
     return PlainTextResponse(content=text, media_type=media)
 
