@@ -33,6 +33,9 @@ def create_app() -> FastAPI:
     from api.errors import register_error_handlers
     register_error_handlers(app)
 
+    from api.rate_limit import setup_rate_limiter
+    setup_rate_limiter(app)
+
     from api.middleware import setup_middleware
     setup_middleware(app)
 
