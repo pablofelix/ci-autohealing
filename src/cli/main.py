@@ -781,14 +781,33 @@ def describe_component(ctx, name, log, output_json):
         print()
 
         if data.get('build_logs'):
+            from cli.log_filter import filter_error_context
+            raw_logs = data['build_logs']
+            failed = data.get('failed_step') or data.get('failed_task')
+
             if log:
-                section_header('Build Logs')
+                section_header('Build Logs (Full)')
                 print()
-                print(data['build_logs'][:10000])
+                print(raw_logs)
                 print()
             else:
-                print(dim('Logs available — use --log to display'))
+                filtered, stats = filter_error_context(raw_logs, failed_step=failed)
+                if stats.get('filtered'):
+                    header = 'Build Logs'
+                    if stats['match_count'] > 0:
+                        header += ' — {} error/warning lines + context (from {} total)'.format(
+                            stats['match_count'], stats['total_lines'])
+                    elif stats.get('note'):
+                        header += ' — {}'.format(stats['note'])
+                    section_header(header)
+                else:
+                    section_header('Build Logs')
                 print()
+                print(filtered)
+                print()
+                if stats['total_lines'] > 80:
+                    print(cyan('Tip: Add --log to see the complete build log'))
+                    print()
 
         history = data.get('build_history', [])
         if history:
@@ -1181,7 +1200,7 @@ def config_watch_list():
         if w == 'jira':
             wtype = 'Jira API poll'
         elif w == 'conforma':
-            wtype = 'K8s watch (not yet implemented)'
+            wtype = 'Worker poll'
         else:
             wtype = 'K8s watch'
         print('    {:<16s} {:<19s} {}'.format(w, status, dim(wtype)))
