@@ -1513,73 +1513,123 @@ def ai(ctx):
 def ai_analyze(args):
     """Analyze a failure with AI.
 
-    In cluster mode: runs LLM locally, uploads result to cluster API.
-    In local mode: runs analysis and stores in local DB.
+    Works the same in local and cluster mode:
+    - Reads failure data (from local DB or cluster API)
+    - Runs LLM analysis using YOUR credentials (Vertex AI / Anthropic)
+    - Saves result (to local DB or cluster API)
     """
-    from cli.mode import ensure_cluster
-    if ensure_cluster() and len(args) >= 2 and args[0] == 'component':
+    from cli.mode import is_cluster
+    if len(args) >= 2 and args[0] == 'component':
         component = args[1]
-        from cli.data import get_failure_details, submit_analysis
         from cli.formatting import bold, cyan, green, red, yellow
-        failure = get_failure_details(component)
-        if not failure:
-            print(red('No failure found for: {}'.format(component)))
-            return
-        print(bold('Analyzing: ') + cyan(component))
-        print('  Fetching failure data from cluster API...')
+
+        if is_cluster():
+            from cli.data import require_data, get_failure_details, submit_analysis
+            if not require_data():
+                return
+            failure = get_failure_details(component)
+            if not failure:
+                print(red('No failure found for: {}'.format(component)))
+                from cli.suggest import format_suggestion
+                from cli.data import get_alerts
+                try:
+                    alerts = get_alerts()
+                    comps = [f.get('component', '') for f in alerts.get('build_failures', [])]
+                    hint = format_suggestion(component, comps)
+                    if hint:
+                        print('  {}'.format(hint))
+                except Exception:
+                    pass
+                return
+        else:
+            from cli.db import require_db
+            if not require_db():
+                return
+            from repositories.build_failure_repository import BuildFailureRepository
+            from cli.db import get_repo
+            repo = get_repo(BuildFailureRepository)
+            failure = repo.get_failure_details(component, cfg.APPLICATION_NAME)
+            if not failure:
+                print(red('No unresolved failures found for component: {}'.format(component)))
+                return
+
         logs = failure.get('build_logs', '')
         error_msg = failure.get('error_message', '')
-        error_type = failure.get('error_type', '')
+
         if not logs and not error_msg:
             print(yellow('No logs or error info available for analysis'))
             return
-        print('  Running LLM analysis locally (Vertex AI / Anthropic)...')
+
+        print(bold('Analyzing: ') + cyan(component))
         try:
             from config import CollectorConfig
-            from services.ai_analyzer import AIAnalyzer
+            from analyzers.build_failure_analyzer import ANALYSIS_TOOL, BuildFailureAnalyzer
             config = CollectorConfig.from_env()
             if not config.llm:
                 print(red('No LLM provider configured'))
-                print(cyan('  Set LLM_PROVIDER and ANTHROPIC_API_KEY or VERTEX credentials'))
+                print(cyan('  Set LLM_PROVIDER + ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID'))
                 return
-            analyzer = AIAnalyzer(config)
-            result = analyzer.analyze_failure(
-                component_name=component,
-                error_message=error_msg,
-                build_logs=logs[:50000],
-                error_type=error_type,
-            )
-            print(green('  Analysis complete'))
-            print()
-            print(bold('Root cause:  ') + result.get('root_cause', '?'))
-            print(bold('Category:    ') + result.get('failure_category', '?'))
-            print(bold('Confidence:  ') + '{}%'.format(
-                int(result.get('confidence_score', 0) * 100)))
-            print(bold('Fix:         ') + result.get('recommended_fix', '?')[:100])
-            print()
-            print('  Uploading result to cluster...')
-            submission = {
-                'component': component,
-                'analysis_type': 'build',
-                'model_used': result.get('model_used', config.llm.model),
-                'root_cause': result.get('root_cause', ''),
-                'failure_category': result.get('failure_category', ''),
-                'confidence_score': result.get('confidence_score', 0),
-                'recommended_fix': result.get('recommended_fix', ''),
-                'recommended_files': result.get('recommended_files', []),
-                'can_auto_fix': result.get('can_auto_fix', False),
-                'tokens_used': result.get('tokens_used', 0),
-                'cost_usd': result.get('cost_usd', 0),
-                'analysis_json': result,
-            }
-            upload = submit_analysis(component, submission)
-            if upload and upload.get('action') == 'stored':
-                print(green('  ✓ Stored in cluster (analysis #{})'.format(upload.get('analysis_id'))))
+
+            if is_cluster():
+                failure.setdefault('component_name', failure.get('component', component))
+                failure.setdefault('id', 0)
+                failure.setdefault('failed_task_name', failure.get('failed_task', ''))
+                failure.setdefault('failed_step_name', failure.get('failed_step', ''))
+                failure.setdefault('application', cfg.APPLICATION_NAME)
+                failure.setdefault('namespace', cfg.NAMESPACE)
+                failure.setdefault('repository_url', failure.get('repository_url', ''))
+                failure.setdefault('commit_sha', failure.get('commit_sha', ''))
+                failure.setdefault('commit_context', failure.get('commit_context'))
+
+                from clients.llm_provider import create_llm_provider
+                llm = create_llm_provider(config.llm)
+                analyzer = BuildFailureAnalyzer(config=config, llm=llm)
+                analyzer._ensure_context(failure)
+                analyzer._ensure_enrichment(failure)
+                analyzer._ensure_logs(failure)
+                system_prompt, user_prompt = analyzer.build_analysis_prompt(failure)
+                import time as _time
+                t0 = _time.time()
+                response = llm.create_message(
+                    system=system_prompt, user_content=user_prompt,
+                    tools=[ANALYSIS_TOOL],
+                )
+                analysis_duration = _time.time() - t0
+                result = analyzer.parse_analysis_response(response)
+                result['tokens_used'] = response.input_tokens + response.output_tokens
+                result['cost_usd'] = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
+                result['model_used'] = llm.model_name()
+
+                print(green('  ✓ Analysis complete'))
+                print()
+                print(bold('Root cause:  ') + result.get('root_cause', '?'))
+                print(bold('Category:    ') + result.get('failure_category', '?'))
+                print(bold('Confidence:  ') + '{}%'.format(
+                    int(result.get('confidence_score', 0) * 100)))
+                print(bold('Fix:         ') + (result.get('recommended_fix', '?') or '?')[:100])
+                print(bold('Duration:    ') + '{:.1f}s'.format(analysis_duration))
+                print()
+
+                submission = {
+                    'component': component,
+                    'analysis_type': 'build',
+                    'model_used': result.get('model_used', config.llm.model),
+                    'root_cause': result.get('root_cause', ''),
+                    'failure_category': result.get('failure_category', ''),
+                    'confidence_score': result.get('confidence_score', 0),
+                    'recommended_fix': result.get('recommended_fix', ''),
+                    'recommended_files': result.get('recommended_files', []),
+                    'can_auto_fix': result.get('can_auto_fix', False),
+                    'tokens_used': result.get('tokens_used', 0),
+                    'cost_usd': result.get('cost_usd', 0),
+                    'analysis_json': result,
+                }
+                upload = submit_analysis(component, submission)
+                if upload and upload.get('action') == 'stored':
+                    print(green('  ✓ Stored in cluster'))
             else:
-                print(yellow('  Warning: failed to store in cluster'))
-        except ImportError as e:
-            print(red('LLM dependencies not available: {}'.format(e)))
-            print(cyan('  Install: pip install ic-tool[full]'))
+                _bash_fallback(['ai', 'analyze', 'component', component])
+
         except Exception as e:
             print(red('Analysis failed: {}'.format(e)))
         return
