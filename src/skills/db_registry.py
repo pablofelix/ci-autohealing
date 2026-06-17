@@ -203,6 +203,49 @@ class DatabaseSkillRegistry:
         )
 
 
+    def record_run(self, result):
+        """Record a skill execution result."""
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO skill_runs (
+                    skill_name, status, exit_code, risk_level,
+                    duration_seconds, stdout, stderr, params,
+                    triggered_by, started_at, completed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """, (
+                result.skill_name, result.status, result.exit_code,
+                result.risk_level, result.duration_seconds,
+                result.stdout[:50000] if result.stdout else None,
+                result.stderr[:10000] if result.stderr else None,
+                json.dumps({}),
+                getattr(result, 'triggered_by', 'cli'),
+                result.started_at or datetime.now(timezone.utc).isoformat(),
+            ))
+
+    def get_run_history(self, skill_name=None, limit=20):
+        """Get skill execution history."""
+        with self.db.connection() as conn:
+            cur = conn.cursor()
+            if skill_name:
+                cur.execute("""
+                    SELECT id, skill_name, status, exit_code, risk_level,
+                           duration_seconds, triggered_by, started_at, completed_at
+                    FROM skill_runs
+                    WHERE skill_name = %s
+                    ORDER BY started_at DESC LIMIT %s
+                """, (skill_name, limit))
+            else:
+                cur.execute("""
+                    SELECT id, skill_name, status, exit_code, risk_level,
+                           duration_seconds, triggered_by, started_at, completed_at
+                    FROM skill_runs
+                    ORDER BY started_at DESC LIMIT %s
+                """, (limit,))
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 def get_registry():
     """Return DB registry if skills tables exist, JSON file registry otherwise."""
     try:

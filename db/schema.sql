@@ -172,12 +172,13 @@ CREATE INDEX IF NOT EXISTS idx_ai_langfuse_trace ON ai_analysis(langfuse_trace_i
 
 -- ============================================================================
 -- 3. RESOLUTION ATTEMPTS - Track all fix attempts (AI or manual)
+--    Note: conforma_results FK added via ALTER TABLE after conforma_results is created
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS resolution_attempts (
     id SERIAL PRIMARY KEY,
     uuid UUID DEFAULT uuid_generate_v4() UNIQUE,
     build_failure_id INTEGER REFERENCES build_failures(id) ON DELETE CASCADE,
-    conforma_result_id INTEGER REFERENCES conforma_results(id) ON DELETE CASCADE,
+    conforma_result_id INTEGER,
     ai_analysis_id INTEGER REFERENCES ai_analysis(id) ON DELETE SET NULL,
 
     -- Attempt Info
@@ -421,6 +422,7 @@ DECLARE
     success_rate_30d DECIMAL;
     health_value INTEGER;
     status_value VARCHAR;
+    current_stat VARCHAR;
 BEGIN
     -- Get statistics
     SELECT MAX(build_completion_time) INTO last_success
@@ -495,7 +497,6 @@ BEGIN
     END IF;
 
     -- Determine current status
-    DECLARE current_stat VARCHAR;
     IF last_failure IS NULL THEN
         current_stat := 'healthy';
     ELSIF last_success IS NULL OR last_failure > last_success THEN
@@ -651,6 +652,14 @@ CREATE INDEX IF NOT EXISTS idx_conforma_unresolved ON conforma_results(applicati
 CREATE INDEX IF NOT EXISTS idx_conforma_ai_pending ON conforma_results(ai_analyzed, is_resolved)
     WHERE NOT ai_analyzed AND NOT is_resolved AND ai_skip_reason IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conforma_jira ON conforma_results(jira_key) WHERE jira_key IS NOT NULL;
+
+-- Add FK from resolution_attempts to conforma_results (deferred because of table order)
+DO $$ BEGIN
+    ALTER TABLE resolution_attempts
+        ADD CONSTRAINT fk_ra_conforma FOREIGN KEY (conforma_result_id)
+        REFERENCES conforma_results(id) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ============================================================================
 -- 10. TRIAGE ITEMS - Build failure investigation tracking

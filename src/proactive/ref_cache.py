@@ -6,6 +6,8 @@ after a configurable TTL (default 5 minutes).
 """
 
 import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,11 +25,10 @@ class CacheConfig:
 
     @classmethod
     def from_env(cls):
-        import os
+        from cli.config import REF_CACHE_DIR, REF_CACHE_TTL
         return cls(
-            cache_dir=Path(os.environ.get('IC_CACHE_DIR',
-                                          os.path.expanduser('~/.ic/cache'))),
-            ttl_seconds=int(os.environ.get('REF_CACHE_TTL', '300')),
+            cache_dir=Path(REF_CACHE_DIR),
+            ttl_seconds=REF_CACHE_TTL,
         )
 
 
@@ -54,7 +55,16 @@ class RefCache:
 
     def _save(self):
         self._config.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._file.write_text(json.dumps(self._data))
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=self._config.cache_dir, suffix='.tmp')
+            with os.fdopen(fd, 'w') as f:
+                json.dump(self._data, f)
+            os.replace(tmp, self._file)
+            tmp = None
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
 
     def get(self, key: str) -> Optional[str]:
         entry = self._data.get(key)

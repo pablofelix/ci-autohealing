@@ -3,7 +3,13 @@
 import os
 from pathlib import Path
 
-from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, KUBEARCHIVE_URL, NAMESPACE  # noqa: F401
+try:
+    from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, KUBEARCHIVE_URL, NAMESPACE  # noqa: F401
+except ImportError:
+    APPLICATION_NAME = os.environ.get('APPLICATION_NAME', '')
+    NAMESPACE = os.environ.get('NAMESPACE', '')
+    KONFLUX_UI_BASE = os.environ.get('KONFLUX_UI_BASE', '')
+    KUBEARCHIVE_URL = os.environ.get('KUBEARCHIVE_URL', '')
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 PYTHON_DIR = PROJECT_DIR / 'src'

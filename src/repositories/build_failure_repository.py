@@ -248,6 +248,7 @@ class BuildFailureRepository:
                             task_summary = COALESCE(%s, task_summary),
                             chains_git_url = COALESCE(%s, chains_git_url),
                             chains_git_commit = COALESCE(%s, chains_git_commit),
+                            trigger_type = COALESCE(%s, trigger_type),
                             last_updated_at = NOW()
                         WHERE pipelinerun_name = %s
                         """.format(unresolve=unresolve_clause),
@@ -261,6 +262,7 @@ class BuildFailureRepository:
                          d.get('output_image'), d.get('image_digest'),
                          d.get('task_summary'),
                          d.get('chains_git_url'), d.get('chains_git_commit'),
+                         d.get('trigger_type'),
                          pr_name)
                     )
                     if blob_refs:
@@ -284,10 +286,11 @@ class BuildFailureRepository:
                             failed_step_name, build_duration_seconds,
                             konflux_url, logs_full_url, build_logs,
                             output_image, image_digest, task_summary,
-                            chains_git_url, chains_git_commit, blob_refs
+                            chains_git_url, chains_git_commit, blob_refs,
+                            trigger_type
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         """,
                         (component_name, pr_name, pr_uid,
@@ -302,7 +305,7 @@ class BuildFailureRepository:
                          d.get('output_image'), d.get('image_digest'),
                          d.get('task_summary'),
                          d.get('chains_git_url'), d.get('chains_git_commit'),
-                         json.dumps(blob_refs))
+                         json.dumps(blob_refs), d.get('trigger_type', 'push'))
                     )
                     return True
         except Exception:
@@ -613,4 +616,41 @@ class BuildFailureRepository:
             """, (application,))
             row = cursor.fetchone()
             return {'pending': row[0], 'analyzed': row[1]}
+
+    def get_nightly_history(self, application, days=14):
+        """Get nightly operator build history with FBC fragment status."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    build_completion_time::date AS build_date,
+                    pipelinerun_name,
+                    component_name,
+                    status,
+                    build_completion_time,
+                    commit_sha
+                FROM build_failures
+                WHERE application = %s
+                  AND trigger_type = 'nightly'
+                  AND build_completion_time > NOW() - (%s || ' days')::INTERVAL
+                ORDER BY build_completion_time DESC
+            """, (application, str(days)))
+            cols = [d[0] for d in cursor.description]
+            nightly_builds = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+            cursor.execute("""
+                SELECT component_name, last_successful_build, current_status
+                FROM component_health
+                WHERE component_name LIKE '%%fbc-fragment%%'
+                  AND application = %s
+            """, (application,))
+            cols2 = [d[0] for d in cursor.description]
+            fbc_rows = [dict(zip(cols2, row)) for row in cursor.fetchall()]
+
+            return {
+                'application': application,
+                'nightly_builds': nightly_builds,
+                'fbc_fragments': fbc_rows,
+                'days': days,
+            }
 

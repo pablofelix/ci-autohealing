@@ -59,11 +59,10 @@ def get_components(ctx, refresh, output_json):
 def get_component(ctx, name, output_json):
     """Get component summary."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.db import get_repo, require_db
-    from repositories.build_failure_repository import BuildFailureRepository
-    if not require_db():
+    from cli.data import require_data, get_component_summary
+    if not require_data():
         return
-    summary = get_repo(BuildFailureRepository).get_component_summary(name)
+    summary = get_component_summary(name)
     if not summary:
         if is_json:
             print(json_mod.dumps({"error": "Component not found", "component": name}))
@@ -97,6 +96,97 @@ def get_component(ctx, name, output_json):
 @click.pass_context
 def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
     """Unified view: build failures + Conforma violations."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts as _get_alerts
+        from cli.formatting import bold, dim, green, red, section_header, yellow
+        if not require_data():
+            return
+        data = _get_alerts()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+
+        builds = data.get('build_failures', [])
+        conforma = data.get('conforma_violations', [])
+        nightlies = data.get('nightly_warnings', [])
+        schedule = data.get('release_schedule')
+        last_sync = data.get('last_sync', '')
+
+        section_header('Alerts — {}'.format(cfg.APPLICATION_NAME))
+        print()
+
+        if last_sync:
+            sync_str = str(last_sync)[:19]
+            print('Last sync: {}'.format(sync_str))
+            print()
+
+        if schedule:
+            parts = []
+            for key, label in [('code_freeze', 'Code Freeze'), ('initial_rc', 'RC'), ('release_date', 'GA')]:
+                days = schedule.get('{}_days'.format(key))
+                val = schedule.get(key)
+                if val and days is not None:
+                    from datetime import datetime as dt
+                    try:
+                        d = dt.strptime(val[:10], '%Y-%m-%d')
+                        date_str = d.strftime('%b %d')
+                    except Exception:
+                        date_str = val[:10]
+                    color = red if days <= 3 else yellow if days <= 7 else green
+                    parts.append('{}: {} ({})'.format(label, date_str, color('{}d'.format(days))))
+            if parts:
+                print(bold('Release:  ') + '  |  '.join(parts))
+                print()
+
+        print(bold('Build Failures ({})'.format(len(builds))) + ':')
+        if builds:
+            for f in builds:
+                comp = f.get('component', '?')
+                err = f.get('error_type') or f.get('possible_cause') or ''
+                analyzed = green(' [AI]') if f.get('has_analysis') else ''
+                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+        else:
+            print('  {} No build failures'.format(green('✓')))
+        print()
+
+        print(bold('Conforma Failures ({})'.format(len(conforma))) + ':')
+        if conforma:
+            print('  {:<4} {:<45} {:>6} {:>6} {:>6}  {}'.format(
+                '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
+            print('  {}  {} {} {} {}  {}'.format(
+                '---', '-' * 45, '------', '------', '------', '--------'))
+            for i, v in enumerate(conforma, 1):
+                comp = v.get('component', '?')
+                if len(comp) > 45:
+                    comp = comp[:42] + '...'
+                viol = v.get('violations_count', 0) or 0
+                warn = v.get('warnings_count', 0) or 0
+                first = str(v.get('first_seen', ''))[:10]
+                if first and len(first) == 10:
+                    first = first[5:]
+                jira = v.get('jira_key') or '-'
+                viol_color = red if viol > 0 else green
+                print('  {:<4} {:<45} {} {:>6} {:>6}  {}'.format(
+                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira))
+                policy_url = v.get('policy_url')
+                if policy_url:
+                    print('       {} {}'.format(dim('↳'), dim(policy_url)))
+        else:
+            print('  {} No conforma violations'.format(green('✓')))
+        print()
+
+        if nightlies:
+            print(bold(yellow('{} nightly warning(s):'.format(len(nightlies)))))
+            for w in nightlies:
+                print('  {} — {}'.format(w.get('component_name', '?'), w.get('message', '')))
+            print()
+
+        return
+
     args = ['get', 'alerts']
     if group:
         args.append('--group')
@@ -108,7 +198,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         args.extend(['--from', from_date])
     if to_date:
         args.extend(['--to', to_date])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -119,10 +209,42 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 @click.pass_context
 def get_conforma(ctx, filter, output_json):
     """Conforma test failures."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_violations
+        from cli.formatting import bold, dim, green, red, section_header
+        if not require_data():
+            return
+        data = get_conforma_violations()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Conforma Violations: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        if not data:
+            print(green('  No conforma violations'))
+            print()
+            return
+        if isinstance(data, list) and data and isinstance(data[0], str):
+            for comp in data:
+                print('  {}'.format(comp))
+        elif isinstance(data, list):
+            for v in data:
+                comp = v.get('component', v.get('component_name', '?'))
+                viol = v.get('violations_count', 0) or 0
+                warn = v.get('warnings_count', 0) or 0
+                scenario = v.get('scenario', v.get('error_type', ''))
+                viol_color = red if viol > 0 else green
+                print('  {} — {} viol, {} warn — {}'.format(
+                    bold(comp), viol_color(str(viol)), warn, dim(scenario)))
+        print()
+        return
     args = ['get', 'conforma']
     if filter:
         args.append(filter)
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -166,10 +288,32 @@ def get_policy_gap(ctx, output_json):
 @click.pass_context
 def get_pipelineruns(ctx, limit, output_json):
     """List PipelineRun failures."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failures
+        from cli.formatting import bold, dim, section_header
+        if not require_data():
+            return
+        data = get_failures()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Build Failures: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        items = data if isinstance(data, list) else []
+        for f in items[:limit or 50]:
+            comp = f.get('component_name', f.get('component', '?'))
+            status = f.get('status', '')
+            err = f.get('error_type') or f.get('error_message', '')
+            print('  {} — {} {}'.format(bold(comp), status, dim(err[:60]) if err else ''))
+        print()
+        return
     args = ['get', 'pipelineruns']
     if limit:
         args.extend(['--limit', str(limit)])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -180,8 +324,21 @@ def get_pipelineruns(ctx, limit, output_json):
 @click.pass_context
 def get_pipelinerun(ctx, name, output_json):
     """Get PipelineRun details."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if is_json or data:
+            print(json_mod.dumps(data, indent=2, default=str))
+        else:
+            print('PipelineRun not found: {}'.format(name))
+        return
     args = ['get', 'pipelinerun', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -192,32 +349,40 @@ def get_pipelinerun(ctx, name, output_json):
 def get_apps(ctx, output_json):
     """List available RHOAI applications."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.db import get_repo, require_db
-    from repositories.build_failure_repository import BuildFailureRepository
-    if not require_db():
+    from cli.data import require_data, get_applications
+    from cli import ic_config
+    if not require_data():
         return
-    build_repo = get_repo(BuildFailureRepository)
-    apps = []
-    try:
-        from openshift_auth import _ensure_k8s_config
-        from kubernetes import client as k8s
-        _ensure_k8s_config()
-        api = k8s.CustomObjectsApi()
-        result = api.list_namespaced_custom_object(
-            group='appstudio.redhat.com', version='v1alpha1',
-            namespace=cfg.NAMESPACE, plural='applications',
-        )
-        app_prefix = cfg.APPLICATION_NAME.rsplit('-v', 1)[0] if cfg.APPLICATION_NAME else ''
-        apps = sorted(
-            [item['metadata']['name'] for item in result.get('items', [])
-             if app_prefix and app_prefix in item['metadata']['name']],
-        )
-    except Exception:
-        if not is_json:
-            from cli.formatting import yellow
-            print(yellow('Warning: Cluster unreachable — showing applications from database'))
-            print()
-        apps = [a['application'] for a in build_repo.get_applications()]
+    if ic_config.get_mode() == 'cluster':
+        app_list = get_applications()
+        apps = [a.get('name', a.get('application', '')) for a in app_list]
+        app_counts = {a.get('name', a.get('application', '')): a.get('failure_count', a.get('count', 0)) for a in app_list}
+    else:
+        from cli.db import get_repo
+        from repositories.build_failure_repository import BuildFailureRepository
+        build_repo = get_repo(BuildFailureRepository)
+        apps = []
+        try:
+            from openshift_auth import _ensure_k8s_config
+            from kubernetes import client as k8s
+            _ensure_k8s_config()
+            api = k8s.CustomObjectsApi()
+            result = api.list_namespaced_custom_object(
+                group='appstudio.redhat.com', version='v1alpha1',
+                namespace=cfg.NAMESPACE, plural='applications',
+            )
+            app_prefix = cfg.APPLICATION_NAME.rsplit('-v', 1)[0] if cfg.APPLICATION_NAME else ''
+            apps = sorted(
+                [item['metadata']['name'] for item in result.get('items', [])
+                 if app_prefix and app_prefix in item['metadata']['name']],
+            )
+        except Exception:
+            if not is_json:
+                from cli.formatting import yellow
+                print(yellow('Warning: Cluster unreachable — showing applications from database'))
+                print()
+            apps = [a['application'] for a in build_repo.get_applications()]
+        app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     if not apps:
         if is_json:
             print(json_mod.dumps({"applications": [], "current": cfg.APPLICATION_NAME}))
@@ -225,7 +390,6 @@ def get_apps(ctx, output_json):
             from cli.formatting import yellow
             print(yellow('No applications found'))
         return
-    app_counts = {a['application']: a['count'] for a in build_repo.get_applications()}
     current = cfg.APPLICATION_NAME
     if is_json:
         result = {
@@ -262,6 +426,35 @@ def get_apps(ctx, output_json):
 @click.pass_context
 def get_releases(ctx, stage, prod, limit, output_json, name):
     """List Release CRs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_schedule
+        from cli.formatting import green, section_header, yellow
+        if not require_data():
+            return
+        schedule = get_schedule()
+        if is_json:
+            print(json_mod.dumps(schedule, indent=2, default=str))
+            return
+        section_header('Release Schedule: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        if not schedule:
+            print('  No release schedule data')
+        else:
+            for key in ('planning_freeze', 'code_freeze', 'initial_rc',
+                        'release_window_start', 'release_date', 'next_release'):
+                val = schedule.get(key)
+                days = schedule.get('{}_days'.format(key))
+                if val:
+                    days_str = ' ({}d)'.format(days) if days is not None else ''
+                    color = green
+                    if days is not None and days <= 3:
+                        color = yellow
+                    print('  {:<25} {}{}'.format(key + ':', val[:10], color(days_str)))
+        print()
+        return
     if name:
         args = ['get', 'releases', name]
     else:
@@ -272,7 +465,7 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
         args.append('--prod')
     if limit:
         args.extend(['--limit', str(limit)])
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -283,10 +476,33 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
 @click.pass_context
 def get_jira(ctx, component, output_json):
     """Show Jira ticket links."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts
+        from cli.formatting import bold, cyan, section_header
+        if not require_data():
+            return
+        data = get_alerts()
+        all_items = data.get('build_failures', []) + data.get('conforma_violations', [])
+        jira_items = [i for i in all_items if i.get('jira_key')]
+        if is_json:
+            print(json_mod.dumps(jira_items, indent=2, default=str))
+            return
+        section_header('Jira Links')
+        print()
+        if not jira_items:
+            print('  No Jira tickets linked')
+        else:
+            for i in jira_items:
+                print('  {} → {}'.format(bold(i['component']), cyan(i['jira_key'])))
+        print()
+        return
     args = ['get', 'jira']
     if component:
         args.append(component)
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -298,12 +514,38 @@ def get_jira(ctx, component, output_json):
 @click.pass_context
 def get_fixes(ctx, show_all, output_json, component):
     """List fix attempts."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_fixes as _get_fixes
+        from cli.formatting import bold, dim, green, red, section_header
+        if not require_data():
+            return
+        data = _get_fixes(show_all=show_all)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Fix Attempts')
+        print()
+        items = data if isinstance(data, list) else []
+        if not items:
+            print('  No fix attempts')
+        for f in items:
+            status = f.get('status', '?')
+            color = green if status == 'success' else red
+            print('  {} — {} {}'.format(
+                bold(f.get('component_name', '?')),
+                color(status),
+                dim(f.get('pr_url', '') or '')))
+        print()
+        return
     args = ['get', 'fixes']
     if component:
         args.append(component)
     if show_all:
         args.append('--all')
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -464,10 +706,110 @@ def describe(ctx, output_json):
 @click.pass_context
 def describe_component(ctx, name, log, output_json):
     """Full component details + logs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if not data:
+            print(red('Component not found: ') + cyan(name))
+            raise SystemExit(1)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+
+        section_header('Component: {}'.format(name))
+        print()
+
+        pr_name = data.get('pipelinerun_name', '')
+
+        section_header('Latest PipelineRun')
+        print()
+        print(bold('PipelineRun:') + ' {}'.format(pr_name))
+        print(bold('Status:') + '      {}'.format(red('Failed')))
+        if data.get('repository_url'):
+            print(bold('Repository:') + '  {}'.format(data['repository_url']))
+        if data.get('branch'):
+            print(bold('Branch:') + '      {}'.format(data['branch']))
+        if data.get('commit_sha'):
+            print(bold('Commit:') + '      {}'.format(data['commit_sha'][:8]))
+        if data.get('commit_author'):
+            print(bold('Author:') + '      {}'.format(data['commit_author']))
+        if data.get('commit_message'):
+            print(bold('Message:') + '     {}'.format(data['commit_message'][:80]))
+        if data.get('commit_url'):
+            print(bold('Commit URL:') + '  {}'.format(cyan(data['commit_url'])))
+        print()
+
+        if data.get('failed_step') or data.get('error_type') or data.get('error_message'):
+            print(bold('Failure Info:'))
+            if data.get('failed_step'):
+                print('  Failed Step: {}'.format(red(data['failed_step'])))
+            if data.get('error_type'):
+                print('  Error Type:  {}'.format(data['error_type']))
+            if data.get('error_message'):
+                msg = data['error_message']
+                for line in msg.split('\n')[:5]:
+                    print('  {}'.format(line[:120]))
+            if data.get('failed_task'):
+                print('  Task:        {}'.format(data['failed_task']))
+        print()
+
+        if data.get('jira_key'):
+            print(bold('JIRA:') + '        {}'.format(cyan(data['jira_key'])))
+        if data.get('konflux_url'):
+            print(bold('Konflux UI:') + ' {}'.format(cyan(data['konflux_url'])))
+        if data.get('output_image'):
+            print(bold('Image:') + '       {}'.format(data['output_image'][:80]))
+        print()
+
+        if data.get('build_logs'):
+            if log:
+                section_header('Build Logs')
+                print()
+                print(data['build_logs'][:10000])
+                print()
+            else:
+                print(dim('Logs available — use --log to display'))
+                print()
+
+        history = data.get('build_history', [])
+        if history:
+            section_header('Build History')
+            print()
+            for b in history:
+                st = b.get('status', '?')
+                color = green if st == 'Succeeded' else red
+                date_str = str(b.get('build_completion_time', ''))[:16]
+                commit = str(b.get('commit_short_sha', ''))[:8]
+                failed = b.get('failed_task_name', '')
+                extra = ', {}'.format(failed) if failed and st != 'Succeeded' else ''
+                print('  {}  {} {}{}'.format(
+                    date_str,
+                    color('✓ succeeded' if st == 'Succeeded' else '✗ failed'),
+                    dim('({}{})'.format(commit, extra)),
+                    ''))
+            resolved = history[0].get('status') == 'Succeeded' if history else False
+            print()
+            if resolved:
+                print(green('  Status: RESOLVED') + ' (latest build passed)')
+            print()
+
+        if data.get('ai_analyzed'):
+            print(dim('[AI analysis available]'))
+        else:
+            print(yellow('[!] AI analysis not available'))
+            print(cyan('[!] Run: ic ai analyze component {}'.format(name)))
+        print()
+        return
     args = ['describe', 'component', name]
     if log:
         args.append('--log')
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -478,8 +820,39 @@ def describe_component(ctx, name, log, output_json):
 @click.pass_context
 def describe_conforma(ctx, name, output_json):
     """Conforma violation details."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_details
+        from cli.formatting import bold, red, section_header
+        if not require_data():
+            return
+        data = get_conforma_details(name)
+        if not data:
+            print(red('Conforma violation not found: ') + name)
+            raise SystemExit(1)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Conforma: {}'.format(name))
+        print()
+        for key in ('scenario', 'violations_count', 'warnings_count', 'successes_count',
+                     'pipelinerun_name', 'snapshot_name', 'repository_url',
+                     'commit_sha', 'first_detected_at', 'last_updated_at',
+                     'jira_key', 'ai_analyzed'):
+            val = data.get(key)
+            if val is not None:
+                print('  {:<20} {}'.format(key + ':', val))
+        summary = data.get('violation_summary')
+        if summary:
+            print()
+            print(bold('Violation Summary:'))
+            print('  {}'.format(summary[:2000]))
+        print()
+        return
     args = ['describe', 'conforma', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -490,8 +863,27 @@ def describe_conforma(ctx, name, output_json):
 @click.pass_context
 def describe_pipelinerun(ctx, name, output_json):
     """Full PipelineRun details + logs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        from cli.formatting import section_header
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if is_json or not data:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('PipelineRun: {}'.format(name))
+        print()
+        for k, v in data.items():
+            if v and k not in ('build_logs', 'raw_pipelinerun_yaml', 'blob_refs'):
+                print('  {:<22} {}'.format(k + ':', str(v)[:100]))
+        print()
+        return
     args = ['describe', 'pipelinerun', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -530,25 +922,39 @@ def describe_release(ctx, name, logs, output_json):
 def config(ctx):
     """Show or modify configuration."""
     if ctx.invoked_subcommand is None:
-        from cli.db import check_db, get_repo
-        from cli.formatting import bold, cyan, section_header
+        from cli import ic_config
+        from cli.formatting import bold, cyan, green, yellow, section_header
+        mode = ic_config.get_mode()
         section_header('Current Configuration')
+        print()
+        print(bold('Mode: ') + (green('cluster') if mode == 'cluster' else cyan('local')))
         print()
         print(bold('Environment:'))
         print('  Namespace: {}'.format(cyan(cfg.NAMESPACE)))
         print('  Application: {}'.format(cyan(cfg.APPLICATION_NAME)))
         print('  Config: {}/.env'.format(cfg.PROJECT_DIR))
         print()
-        if check_db():
-            from repositories.build_failure_repository import BuildFailureRepository
-            s = get_repo(BuildFailureRepository).get_overview_stats()
-            print(bold('Database:'))
-            print('  Failures: {}'.format(s['total']))
-            print('  Components: {}'.format(s['components']))
+        if mode == 'cluster':
+            api_url = ic_config.get_api_url() or ''
+            has_key = bool(ic_config.get_api_key())
+            print(bold('Cluster:'))
+            print('  API URL: {}'.format(cyan(api_url) if api_url else yellow('not set')))
+            print('  API Key: {}'.format(green('configured') if has_key else yellow('not set')))
             print()
+        else:
+            from cli.db import check_db, get_repo
+            if check_db():
+                from repositories.build_failure_repository import BuildFailureRepository
+                s = get_repo(BuildFailureRepository).get_overview_stats()
+                print(bold('Database:'))
+                print('  Failures: {}'.format(s['total']))
+                print('  Components: {}'.format(s['components']))
+                print()
         print(cyan('Commands:'))
-        print('  ic config set-app <app>  # Change application')
-        print('  ic get apps              # List applications')
+        print('  ic config set-app <app>      # Change application')
+        print('  ic config use-cluster <url>  # Switch to cluster API')
+        print('  ic config use-local          # Switch to local DB')
+        print('  ic get apps                  # List applications')
         print()
 
 
@@ -596,6 +1002,59 @@ def config_set_app(app_name, force):
         else:
             print('  Cached sync data available. Run {} to view.'.format(cyan('ic get components')))
     print()
+
+
+@config.command('use-cluster')
+@click.argument('api_url', required=False)
+@click.option('--api-key', help='Bearer token for API auth')
+@click.option('--no-verify-tls', is_flag=True, help='Skip TLS certificate verification')
+def config_use_cluster(api_url, api_key, no_verify_tls):
+    """Switch to cluster API mode."""
+    from cli import ic_config
+    from cli.formatting import cyan, green, yellow
+    current = ic_config.load()
+    if api_url:
+        ic_config.set_cluster(api_url, api_key)
+        if no_verify_tls:
+            c = ic_config.load()
+            c['cluster']['verify_tls'] = False
+            ic_config._save(c)
+    elif current['cluster'].get('api_url'):
+        ic_config.set_mode('cluster')
+    else:
+        print(yellow('Usage: ic config use-cluster <api-url>'))
+        return
+    print(green('✓ Mode: cluster'))
+    print('  API: {}'.format(cyan(ic_config.get_api_url())))
+    try:
+        from cli.api_client import APIClient
+        url = ic_config.get_api_url()
+        verify = ic_config.load().get('cluster', {}).get('verify_tls', True)
+        client = APIClient(url, ic_config.get_api_key(), verify_tls=verify)
+        health = client.get('/health')
+        if health and health.get('status') == 'healthy':
+            print(green('  Connection: healthy'))
+        else:
+            print(yellow('  Connection: unknown response'))
+    except SystemExit:
+        pass
+    except Exception as e:
+        print(yellow('  Connection: failed ({})'.format(e)))
+
+
+@config.command('use-local')
+def config_use_local():
+    """Switch to local database mode."""
+    from cli import ic_config
+    from cli.formatting import cyan, green
+    ic_config.set_mode('local')
+    print(green('✓ Mode: local'))
+    from cli.db import check_db
+    if check_db():
+        print('  Database: {}'.format(cyan('connected')))
+    else:
+        from cli.formatting import yellow
+        print('  Database: {}'.format(yellow('not running')))
 
 
 # --- watch group ---
@@ -850,8 +1309,22 @@ def _update_env_var(var_name, value):
 def stats(ctx):
     """Statistics."""
     if ctx.invoked_subcommand is None:
-        from cli.db import get_repo, print_table, require_db
+        from cli import ic_config
         from cli.formatting import section_header
+        if ic_config.get_mode() == 'cluster':
+            from cli.data import require_data, get_overview_stats
+            if not require_data():
+                return
+            s = get_overview_stats()
+            section_header('Statistics')
+            print()
+            if isinstance(s, dict):
+                for k, v in s.items():
+                    if k not in ('application',):
+                        print('  {:<25} {}'.format(k + ':', v))
+            print()
+            return
+        from cli.db import get_repo, print_table, require_db
         from repositories.build_failure_repository import BuildFailureRepository
         if not require_db():
             return
@@ -1384,6 +1857,91 @@ def nightly(ctx, application, output_json):
     print()
 
 
+@cli.command('nightly-history')
+@click.argument('application', required=False)
+@click.option('--days', type=int, default=14, help='Number of days to show')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def nightly_history(ctx, application, days, output_json):
+    """Nightly build history: operator builds + FBC fragment freshness."""
+    import json as json_mod
+    from cli.data import require_data
+    from cli.formatting import bold, dim, green, red, section_header, yellow
+
+    output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
+    app = application or cfg.APPLICATION_NAME
+
+    if not require_data():
+        return
+
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.api_client import get_client
+        data = get_client().get('/api/v1/applications/{}/nightly/history'.format(app),
+                                params={'days': days})
+    else:
+        from config import CollectorConfig
+        from repositories.build_failure_repository import BuildFailureRepository
+        from repositories.connection import DatabaseConnection
+        conf = CollectorConfig.from_env()
+        db = DatabaseConnection(conf.db)
+        repo = BuildFailureRepository(db)
+        data = repo.get_nightly_history(app, days=days)
+
+    if not data:
+        from cli.formatting import yellow
+        print(yellow('No nightly history data found'))
+        return
+
+    if output_json:
+        print(json_mod.dumps(data, indent=2, default=str))
+        return
+
+    section_header('Nightly History: {} (last {} days)'.format(app, days))
+    print()
+
+    builds = data.get('nightly_builds', [])
+    fbc_list = data.get('fbc_fragments', [])
+
+    if not builds:
+        print(dim('  No nightly operator builds found'))
+        print()
+    else:
+        from cli.db import print_table
+        rows = []
+        for b in builds:
+            st = b.get('status', 'Unknown')
+            color_fn = green if st == 'Succeeded' else red
+            date_str = str(b.get('build_date', ''))[:10]
+            pr_short = (b.get('pipelinerun_name', '') or '')[-20:]
+            rows.append((date_str, pr_short, color_fn(st)))
+        print(bold('Operator Builds (trigger_type=nightly):'))
+        print_table(['Date', 'PipelineRun', 'Status'], rows)
+        print()
+
+    if fbc_list:
+        print(bold('FBC Fragment Status:'))
+        for fbc in fbc_list:
+            name = fbc.get('component_name', '')
+            last = fbc.get('last_successful_build')
+            st = fbc.get('current_status', 'unknown')
+            if last:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                if hasattr(last, 'tzinfo') and last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                elif isinstance(last, str):
+                    last = datetime.fromisoformat(last.replace('Z', '+00:00'))
+                hours_ago = (now - last).total_seconds() / 3600
+                freshness = green('fresh ({:.0f}h)'.format(hours_ago)) if hours_ago < 24 \
+                    else yellow('aging ({:.0f}h)'.format(hours_ago)) if hours_ago < 48 \
+                    else red('stale ({:.0f}h)'.format(hours_ago))
+            else:
+                freshness = red('no successful build')
+            print('  {} — {}'.format(name, freshness))
+        print()
+
+
 @cli.command()
 @click.argument('image_ref')
 @click.pass_context
@@ -1564,7 +2122,24 @@ def fix(args):
 @cli.command('export')
 @click.argument('args', nargs=-1)
 def export_cmd(args):
-    """Export analysis to ticket format."""
+    """Export analysis to ticket format (e.g. ic export component-name slack)."""
+    import json as json_mod
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster' and len(args) >= 1:
+        from cli.data import require_data, get_export
+        if not require_data():
+            return
+        component = args[0]
+        fmt = args[1] if len(args) > 1 else 'slack'
+        data = get_export(component, fmt)
+        if data:
+            if isinstance(data, dict) and 'text' in data:
+                print(data['text'])
+            else:
+                print(json_mod.dumps(data, indent=2, default=str))
+        else:
+            print('No export data for: {}'.format(component))
+        return
     _bash_fallback(['export'] + list(args))
 
 
@@ -1582,6 +2157,33 @@ def conforma(ctx):
 @click.argument('args', nargs=-1)
 def conforma_report(args):
     """Daily Conforma violations report."""
+    import json as json_mod
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_report
+        from cli.formatting import dim, red, section_header, yellow
+        if not require_data():
+            return
+        data = get_conforma_report()
+        if isinstance(data, str):
+            print(data)
+        elif isinstance(data, dict):
+            print(json_mod.dumps(data, indent=2, default=str))
+        elif isinstance(data, list):
+            section_header('Conforma Report')
+            print()
+            for item in data:
+                comp = item.get('component_name', item.get('component', '?'))
+                viol = item.get('violations_count', 0) or 0
+                warn = item.get('warnings_count', 0) or 0
+                scenario = item.get('scenario', '')
+                viol_color = red if viol > 0 else yellow
+                print('  {:<45} {} viol  {} warn  {}'.format(
+                    comp[:45], viol_color(str(viol).rjust(3)), str(warn).rjust(3), dim(scenario[:30])))
+            print()
+        else:
+            print(data)
+        return
     _bash_fallback(['conforma', 'report'] + list(args))
 
 
@@ -1913,6 +2515,44 @@ def patterns_show(name):
         if len(p['doc_context'].split('\n')) > 20:
             print('  ... (truncated)')
     print()
+
+
+@patterns.command('link-skill')
+@click.argument('pattern_name')
+@click.argument('skill_name')
+def patterns_link_skill(pattern_name, skill_name):
+    """Link an error pattern to a skill for auto-execution.
+
+    When the worker detects a failure matching this pattern and AUTONOMOUS_MODE
+    is enabled, it will auto-execute the linked skill.
+    """
+    from cli.db import get_repo, require_db
+    from cli.formatting import cyan, green, red
+    from repositories.error_pattern_repository import ErrorPatternRepository
+    if not require_db():
+        return
+    repo = get_repo(ErrorPatternRepository)
+    p = repo.get_by_name_or_category(pattern_name)
+    if not p:
+        print(red('Pattern not found: ') + cyan(pattern_name))
+        raise SystemExit(1)
+    from skills.db_registry import get_registry
+    registry = get_registry()
+    skill = registry.get_skill(skill_name)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == skill_name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(skill_name))
+        raise SystemExit(1)
+    with repo.db.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE error_patterns SET skill_name = %s WHERE id = %s",
+            (skill.qualified_name, p['id']))
+    print(green('✓ Linked: ') + '{} → {}'.format(cyan(p['pattern_name']), cyan(skill.qualified_name)))
 
 
 # --- skills group ---
@@ -2341,6 +2981,153 @@ def skills_doctor(path):
 
     if has_issues:
         raise SystemExit(1)
+
+
+@skills.command('run')
+@click.argument('name')
+@click.option('--dry-run', is_flag=True, help='Show steps without executing')
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation for medium-risk skills')
+@click.option('--timeout', type=int, default=300, help='Timeout in seconds per step')
+@click.option('--param', '-p', multiple=True, help='Parameters as key=value')
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
+    """Run a skill."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.db_registry import get_registry
+    from skills.executor import SkillExecutor
+
+    registry = get_registry()
+    skill = registry.get_skill(name)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(name))
+        raise SystemExit(1)
+
+    params = {}
+    for p in param:
+        if '=' in p:
+            k, v = p.split('=', 1)
+            params[k] = v
+
+    executor = SkillExecutor(skill, params=params, dry_run=dry_run, timeout=timeout)
+    assessment = executor.assess()
+    risk = assessment.level
+
+    if not dry_run and risk in ('medium', 'high') and not yes:
+        print(bold('Skill: ') + cyan(skill.qualified_name))
+        risk_color = yellow if risk == 'medium' else red
+        print(bold('Risk:  ') + risk_color(risk))
+        for reason in assessment.reasons:
+            print('  - {}'.format(reason))
+        if assessment.security_warnings:
+            print(bold('Security warnings:'))
+            for w in assessment.security_warnings:
+                print('  {} {}'.format(yellow('!'), w))
+        prereqs = executor.check_prerequisites()
+        if prereqs['tools']:
+            print(bold('Tools: ') + ', '.join(prereqs['tools'].keys()))
+        print()
+        confirm = input('Execute? [y/N] ').strip().lower()
+        if confirm != 'y':
+            print(dim('Cancelled'))
+            return
+
+    result = executor.execute()
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(result.to_dict(), indent=2, default=str))
+        return
+
+    status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
+    risk_color = green if risk == 'low' else yellow if risk == 'medium' else red
+    print(bold('Skill:    ') + cyan(skill.qualified_name))
+    print(bold('Status:   ') + status_color(result.status))
+    print(bold('Risk:     ') + risk_color(risk))
+    if assessment.reasons:
+        for reason in assessment.reasons:
+            print('            - {}'.format(reason))
+    if assessment.security_warnings:
+        print(bold('Warnings: '))
+        for w in assessment.security_warnings:
+            print('            {} {}'.format(yellow('!'), w))
+
+    if result.status == 'dry_run':
+        print(bold('Steps:    ') + '{}'.format(result.steps_total))
+        print()
+        for i, step in enumerate(result.dry_run_steps, 1):
+            print(dim('--- step {} ---'.format(i)))
+            print(step[:500])
+            print()
+    elif result.status in ('success', 'failed'):
+        print(bold('Steps:    ') + '{}/{}'.format(result.steps_executed, result.steps_total))
+        print(bold('Duration: ') + '{:.1f}s'.format(result.duration_seconds))
+        if result.stdout and result.stdout.strip():
+            print()
+            print(dim('--- stdout ---'))
+            print(result.stdout[:2000])
+        if result.stderr and result.stderr.strip():
+            print()
+            print(dim('--- stderr ---'))
+            print(result.stderr[:1000])
+    elif result.status == 'prereq_failed':
+        print()
+        print(red(result.stderr))
+
+    if result.status == 'failed':
+        raise SystemExit(1)
+
+
+@skills.command('runs')
+@click.option('--skill', 'skill_name', help='Filter by skill name')
+@click.option('--limit', type=int, default=10)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def skills_runs(ctx, skill_name, limit, output_json):
+    """Show skill execution history."""
+    import json as json_mod
+    from cli.db import print_table
+    from cli.formatting import green, red, section_header, yellow
+    from skills.db_registry import get_registry
+
+    registry = get_registry()
+    try:
+        history = registry.get_run_history(skill_name=skill_name, limit=limit)
+    except Exception:
+        print('No execution history (skill_runs table may not exist)')
+        return
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(history, indent=2, default=str))
+        return
+
+    section_header('Skill Execution History')
+    if not history:
+        print('  (no runs)')
+        return
+
+    rows = []
+    for r in history:
+        st = r['status']
+        color = green if st == 'success' else red if st == 'failed' else yellow
+        rows.append((
+            str(r.get('started_at', ''))[:16],
+            r['skill_name'],
+            color(st),
+            '{:.1f}s'.format(r['duration_seconds']) if r.get('duration_seconds') else '-',
+            r.get('triggered_by', '-'),
+        ))
+    print_table(['Started', 'Skill', 'Status', 'Duration', 'By'], rows)
 
 
 # --- components group ---

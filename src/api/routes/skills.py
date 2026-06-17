@@ -1,8 +1,9 @@
-"""Skill registry endpoints (read-only, with validation)."""
+"""Skill registry endpoints with execution support."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from mcp_server.models import (
     SkillInfo,
@@ -11,6 +12,27 @@ from mcp_server.models import (
     SkillValidationFinding,
     SkillValidationResult,
 )
+
+
+class SkillRunRequest(BaseModel):
+    dry_run: bool = True
+    params: Dict[str, str] = {}
+    timeout: int = 300
+
+
+class SkillRunResponse(BaseModel):
+    skill_name: str
+    status: str
+    exit_code: int = 0
+    stdout: str = ''
+    stderr: str = ''
+    duration_seconds: float = 0.0
+    risk_level: str = 'medium'
+    risk_reasons: List[str] = []
+    security_warnings: List[str] = []
+    steps_executed: int = 0
+    steps_total: int = 0
+    dry_run_steps: List[str] = []
 
 router = APIRouter(tags=["skills"])
 
@@ -130,3 +152,58 @@ def check_skill_prerequisites(name: str) -> SkillPrerequisiteResult:
         tools=prereqs['tools'],
         env=prereqs['env'],
     )
+
+
+@router.post("/skills/{name}/run")
+def run_skill(name: str, request: SkillRunRequest) -> SkillRunResponse:
+    """Execute a skill (dry_run=true by default for safety)."""
+    registry = _registry()
+    try:
+        entry = registry.get_skill(name)
+    except KeyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if not entry:
+        raise HTTPException(status_code=404, detail='Skill not found: {}'.format(name))
+
+    from skills.executor import SkillExecutor
+    executor = SkillExecutor(
+        entry, params=request.params,
+        dry_run=request.dry_run, timeout=request.timeout,
+        triggered_by='api',
+    )
+
+    assessment = executor.assess()
+    result = executor.execute()
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    return SkillRunResponse(
+        skill_name=result.skill_name,
+        status=result.status,
+        exit_code=result.exit_code,
+        stdout=result.stdout[:50000],
+        stderr=result.stderr[:10000],
+        duration_seconds=result.duration_seconds,
+        risk_level=assessment.level,
+        risk_reasons=assessment.reasons,
+        security_warnings=assessment.security_warnings,
+        steps_executed=result.steps_executed,
+        steps_total=result.steps_total,
+        dry_run_steps=result.dry_run_steps,
+    )
+
+
+@router.get("/skills/runs")
+def list_skill_runs(
+    skill: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """List skill execution history."""
+    registry = _registry()
+    try:
+        return registry.get_run_history(skill_name=skill, limit=limit)
+    except Exception:
+        return []
