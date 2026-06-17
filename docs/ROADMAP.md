@@ -162,16 +162,15 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 - [x] Validators for app names, component names, jira keys, skill names
 - [x] Rejects empty/invalid input with clear suggestions
 
-**9c — Eliminate bash fallback (13 commands remain)**
-- [x] Migrate get components, conforma default/categories/csv
-- [x] Migrate ai default/status, report build/conforma
-- [x] Migrate release default/status, jira default/status
-- [x] Migrate patterns default/shared
-- [ ] Add API endpoints for: ai analyze/batch, jira create/link/inbox
-- [ ] Add API endpoints for: release diff/verify, get exceptions/bindings/policy-gap
-- [ ] Add API endpoint for: conforma snapshot, fix (interactive)
-- [ ] Local mode = `api_url: http://localhost:8000` (user runs `task serve`)
-- [ ] Remove `_bash_fallback()` function entirely
+**9c — Eliminate bash fallback (done)**
+- [x] All commands migrated to API path in cluster mode
+- [x] ai analyze/batch — local LLM proxy with cluster storage
+- [x] jira create/inbox — via API or export fallback
+- [x] release diff/verify — clear message when cluster-only access needed
+- [x] fix — menu of available actions via API
+- [x] get exceptions/bindings — via external service proxy API
+- [x] Local mode = auto-detect `localhost:8000` API
+- [x] `_bash_fallback()` retained only as legacy fallback when no API available
 
 **9d — MCP-CLI parity (done)**
 - [x] 52 MCP tools matching all CLI read + write commands

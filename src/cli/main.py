@@ -1583,18 +1583,21 @@ def ai_analyze(args):
                 failure.setdefault('commit_context', failure.get('commit_context'))
 
                 from clients.llm_provider import create_llm_provider
+                from cli.progress import Spinner
                 llm = create_llm_provider(config.llm)
                 analyzer = BuildFailureAnalyzer(config=config, llm=llm)
-                analyzer._ensure_context(failure)
-                analyzer._ensure_enrichment(failure)
-                analyzer._ensure_logs(failure)
-                system_prompt, user_prompt = analyzer.build_analysis_prompt(failure)
+                with Spinner('Fetching context...'):
+                    analyzer._ensure_context(failure)
+                    analyzer._ensure_enrichment(failure)
+                    analyzer._ensure_logs(failure)
+                    system_prompt, user_prompt = analyzer.build_analysis_prompt(failure)
                 import time as _time
                 t0 = _time.time()
-                response = llm.create_message(
-                    system=system_prompt, user_content=user_prompt,
-                    tools=[ANALYSIS_TOOL],
-                )
+                with Spinner('Running AI analysis ({})...'.format(config.llm.model)):
+                    response = llm.create_message(
+                        system=system_prompt, user_content=user_prompt,
+                        tools=[ANALYSIS_TOOL],
+                    )
                 analysis_duration = _time.time() - t0
                 result = analyzer.parse_analysis_response(response)
                 result['tokens_used'] = response.input_tokens + response.output_tokens
@@ -2476,6 +2479,19 @@ def dashboard():
 @click.argument('args', nargs=-1)
 def fix(args):
     """Triage a failure: choose PR / Jira / Slack."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster() and args:
+        component = args[0]
+        from cli.formatting import cyan, section_header
+        section_header('Fix: {}'.format(component))
+        print()
+        print('  Available actions:')
+        print('    {} — analyze with AI'.format(cyan('ic ai analyze component {}'.format(component))))
+        print('    {} — create Jira ticket'.format(cyan('ic export {} jira'.format(component))))
+        print('    {} — generate Slack message'.format(cyan('ic export {} slack'.format(component))))
+        print('    {} — view failure details'.format(cyan('ic describe component {}'.format(component))))
+        print()
+        return
     _bash_fallback(['fix'] + list(args))
 
 
@@ -2657,6 +2673,12 @@ def release_status(args):
 @click.argument('args', nargs=-1)
 def release_diff(args):
     """Compare snapshots between releases."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.formatting import yellow
+        print(yellow('release diff requires direct cluster access'))
+        print('  Use local mode: ic config use-local')
+        return
     _bash_fallback(['release', 'diff'] + list(args))
 
 
@@ -2664,6 +2686,12 @@ def release_diff(args):
 @click.argument('args', nargs=-1)
 def release_verify(args):
     """Check image availability in Pyxis."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.formatting import yellow
+        print(yellow('release verify requires direct cluster + Pyxis access'))
+        print('  Use local mode: ic config use-local')
+        return
     _bash_fallback(['release', 'verify'] + list(args))
 
 
@@ -2808,7 +2836,24 @@ def jira(ctx):
 @jira.command('create')
 @click.argument('args', nargs=-1)
 def jira_create(args):
-    """Create Jira ticket."""
+    """Create Jira ticket for a component failure."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster() and args:
+        component = args[0]
+        from cli.data import get_export
+        from cli.formatting import green
+        data = get_export(component, 'jira')
+        if data:
+            if isinstance(data, dict) and 'text' in data:
+                print(data['text'])
+            else:
+                import json as json_mod
+                print(json_mod.dumps(data, indent=2, default=str))
+            print()
+            print(green('Copy the above to create a Jira ticket'))
+        else:
+            print('No data for: {}'.format(component))
+        return
     _bash_fallback(['jira', 'create'] + list(args))
 
 
@@ -2816,6 +2861,25 @@ def jira_create(args):
 @click.argument('args', nargs=-1)
 def jira_inbox(args):
     """Check Jira inbox for new comments."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_triage_items
+        from cli.formatting import bold, section_header
+        items = get_triage_items()
+        section_header('Jira Inbox')
+        print()
+        has_jira = False
+        all_items = items if isinstance(items, list) else items.get('items', [])
+        for item in all_items:
+            if item.get('jira_key'):
+                has_jira = True
+                print('  {} — {}'.format(
+                    bold(item['jira_key']),
+                    ', '.join(item.get('components', []))))
+        if not has_jira:
+            print('  No Jira tickets linked to triage items')
+        print()
+        return
     _bash_fallback(['jira', 'inbox'] + list(args))
 
 
