@@ -209,10 +209,42 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 @click.pass_context
 def get_conforma(ctx, filter, output_json):
     """Conforma test failures."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_violations
+        from cli.formatting import bold, dim, green, red, section_header
+        if not require_data():
+            return
+        data = get_conforma_violations()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Conforma Violations: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        if not data:
+            print(green('  No conforma violations'))
+            print()
+            return
+        if isinstance(data, list) and data and isinstance(data[0], str):
+            for comp in data:
+                print('  {}'.format(comp))
+        elif isinstance(data, list):
+            for v in data:
+                comp = v.get('component', v.get('component_name', '?'))
+                viol = v.get('violations_count', 0) or 0
+                warn = v.get('warnings_count', 0) or 0
+                scenario = v.get('scenario', v.get('error_type', ''))
+                viol_color = red if viol > 0 else green
+                print('  {} — {} viol, {} warn — {}'.format(
+                    bold(comp), viol_color(str(viol)), warn, dim(scenario)))
+        print()
+        return
     args = ['get', 'conforma']
     if filter:
         args.append(filter)
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -561,10 +593,39 @@ def describe(ctx, output_json):
 @click.pass_context
 def describe_component(ctx, name, log, output_json):
     """Full component details + logs."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failure_details
+        from cli.formatting import cyan, dim, red, section_header
+        if not require_data():
+            return
+        data = get_failure_details(name)
+        if not data:
+            print(red('Component not found: ') + cyan(name))
+            raise SystemExit(1)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Component: {}'.format(name))
+        print()
+        for key in ('status', 'error_type', 'error_message', 'failed_task',
+                     'failed_step', 'commit_sha', 'commit_message', 'commit_author',
+                     'repository_url', 'branch', 'pipelinerun_name', 'konflux_url'):
+            val = data.get(key)
+            if val:
+                print('  {:<18} {}'.format(key + ':', val))
+        if data.get('build_logs') and log:
+            print()
+            print(dim('--- logs ---'))
+            print(data['build_logs'][:5000])
+        print()
+        return
     args = ['describe', 'component', name]
     if log:
         args.append('--log')
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -575,8 +636,39 @@ def describe_component(ctx, name, log, output_json):
 @click.pass_context
 def describe_conforma(ctx, name, output_json):
     """Conforma violation details."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_details
+        from cli.formatting import bold, red, section_header
+        if not require_data():
+            return
+        data = get_conforma_details(name)
+        if not data:
+            print(red('Conforma violation not found: ') + name)
+            raise SystemExit(1)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Conforma: {}'.format(name))
+        print()
+        for key in ('scenario', 'violations_count', 'warnings_count', 'successes_count',
+                     'pipelinerun_name', 'snapshot_name', 'repository_url',
+                     'commit_sha', 'first_detected_at', 'last_updated_at',
+                     'jira_key', 'ai_analyzed'):
+            val = data.get(key)
+            if val is not None:
+                print('  {:<20} {}'.format(key + ':', val))
+        summary = data.get('violation_summary')
+        if summary:
+            print()
+            print(bold('Violation Summary:'))
+            print('  {}'.format(summary[:2000]))
+        print()
+        return
     args = ['describe', 'conforma', name]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -1014,8 +1106,22 @@ def _update_env_var(var_name, value):
 def stats(ctx):
     """Statistics."""
     if ctx.invoked_subcommand is None:
-        from cli.db import get_repo, print_table, require_db
+        from cli import ic_config
         from cli.formatting import section_header
+        if ic_config.get_mode() == 'cluster':
+            from cli.data import require_data, get_overview_stats
+            if not require_data():
+                return
+            s = get_overview_stats()
+            section_header('Statistics')
+            print()
+            if isinstance(s, dict):
+                for k, v in s.items():
+                    if k not in ('application',):
+                        print('  {:<25} {}'.format(k + ':', v))
+            print()
+            return
+        from cli.db import get_repo, print_table, require_db
         from repositories.build_failure_repository import BuildFailureRepository
         if not require_db():
             return

@@ -24,12 +24,45 @@ def triage(ctx, output_json):
 @click.pass_context
 def triage_show(ctx, show_all, output_json):
     """Show current triage items and untracked failures."""
-    from cli.db import get_repo, require_db
+    import json as json_mod
+    from cli import ic_config
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+
+    is_json = output_json or ctx.obj.get('json')
+
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_triage_items
+        if not require_data():
+            return
+        data = get_triage_items()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Triage: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        items = data if isinstance(data, list) else data.get('items', [])
+        if not items:
+            print(green('  No triage items'))
+            print()
+            return
+        for item in items:
+            status_color = green if item.get('status') == 'resolved' else yellow
+            print('  {} {} — {}'.format(
+                bold('#{}'.format(item.get('id', '?'))),
+                status_color(item.get('group_label', item.get('status', '?'))),
+                ', '.join(item.get('components', [])),
+            ))
+            if item.get('jira_key'):
+                print('       Jira: {}'.format(cyan(item['jira_key'])))
+            if item.get('root_cause'):
+                print('       {}'.format(dim(item['root_cause'][:80])))
+        print()
+        return
+
+    from cli.db import get_repo, require_db
     from repositories.build_failure_repository import BuildFailureRepository
     from repositories.triage_repository import TriageRepository
 
-    is_json = output_json or ctx.obj.get('json')
     if not require_db():
         return
 

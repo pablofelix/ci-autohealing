@@ -129,3 +129,43 @@ def get_fixes(application=None, show_all=False):
     from cli.db import get_repo
     from repositories.resolution_attempt_repository import ResolutionAttemptRepository
     return get_repo(ResolutionAttemptRepository).get_all()
+
+
+def get_conforma_report(application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().get(f'/api/v1/applications/{app}/violations/report') or {}
+    from cli.db import get_repo
+    from repositories.conforma_repository import ConformaRepository
+    return get_repo(ConformaRepository).get_standup_report(app)
+
+
+def get_failures(application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().get(f'/api/v1/applications/{app}/failures') or []
+    from cli.db import get_repo
+    from repositories.build_failure_repository import BuildFailureRepository
+    return get_repo(BuildFailureRepository).get_failing_components(app)
+
+
+def get_dashboard(application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().get(f'/api/v1/applications/{app}/dashboard') or {}
+    return {}
+
+
+def get_export(component, fmt='slack', application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().get(f'/api/v1/applications/{app}/export/{component}',
+                          params={'format': fmt})
+    return None
+
+
+def get_schedule(application=None):
+    app = application or _app()
+    if _is_cluster():
+        return _api().get(f'/api/v1/applications/{app}/schedule')
+    return None
