@@ -1144,17 +1144,17 @@ def config_use_cluster(api_url, api_key, no_verify_tls):
 
 @config.command('use-local')
 def config_use_local():
-    """Switch to local database mode."""
+    """Switch to local mode (API on localhost:8000)."""
     from cli import ic_config
-    from cli.formatting import cyan, green
+    from cli.formatting import dim, green, yellow
     ic_config.set_mode('local')
     print(green('✓ Mode: local'))
-    from cli.db import check_db
-    if check_db():
-        print('  Database: {}'.format(cyan('connected')))
+    from cli.mode import has_api
+    if has_api():
+        print('  API: {}'.format(green('localhost:8000 (running)')))
     else:
-        from cli.formatting import yellow
-        print('  Database: {}'.format(yellow('not running')))
+        print('  API: {}'.format(yellow('localhost:8000 (not running)')))
+        print('  {}'.format(dim("Start with: task serve")))
 
 
 # --- watch group ---
@@ -1243,9 +1243,10 @@ def config_watch_list():
         apps = get_watched_applications()
     else:
         apps = os.environ.get('WATCH_APPLICATIONS', '').split()
-        if not apps:
-            fallback = os.environ.get('APPLICATION_NAME', '')
-            apps = [fallback] if fallback else []
+
+    if not apps:
+        fallback = os.environ.get('APPLICATION_NAME', '')
+        apps = [fallback] if fallback else []
 
     from config import ALL_WATCHERS
 
@@ -1639,7 +1640,90 @@ def ai_analyze(args):
 @ai.command('batch')
 @click.argument('args', nargs=-1)
 def ai_batch(args):
-    """Batch AI analysis."""
+    """Batch AI analysis — analyze all pending failures."""
+    from cli.mode import is_cluster
+    if is_cluster():
+        from cli.data import require_data, get_alerts, get_failure_details, submit_analysis
+        from cli.formatting import bold, cyan, green, red, yellow
+        if not require_data():
+            return
+        alerts = get_alerts()
+        failures = alerts.get('build_failures', [])
+        pending = [f for f in failures if not f.get('has_analysis')]
+        if not pending:
+            print(green('No pending failures to analyze'))
+            return
+        print(bold('Batch analyzing {} failure(s)...'.format(len(pending))))
+        print()
+        try:
+            from config import CollectorConfig
+            from analyzers.build_failure_analyzer import ANALYSIS_TOOL, BuildFailureAnalyzer
+            from clients.llm_provider import create_llm_provider
+            config = CollectorConfig.from_env()
+            if not config.llm:
+                print(red('No LLM provider configured'))
+                print(cyan('  Set LLM_PROVIDER + ANTHROPIC_VERTEX_PROJECT_ID'))
+                return
+            llm = create_llm_provider(config.llm)
+            analyzer = BuildFailureAnalyzer(config=config, llm=llm)
+        except Exception as e:
+            print(red('Failed to initialize analyzer: {}'.format(e)))
+            return
+        success = 0
+        for i, f in enumerate(pending):
+            comp = f.get('component', '?')
+            print('[{}/{}] {}...'.format(i + 1, len(pending), bold(comp)), end=' ', flush=True)
+            try:
+                failure = get_failure_details(comp)
+                if not failure:
+                    print(yellow('not found'))
+                    continue
+                failure.setdefault('component_name', comp)
+                failure.setdefault('id', 0)
+                failure.setdefault('failed_task_name', failure.get('failed_task', ''))
+                failure.setdefault('failed_step_name', failure.get('failed_step', ''))
+                failure.setdefault('application', cfg.APPLICATION_NAME)
+                failure.setdefault('namespace', cfg.NAMESPACE)
+                analyzer._ensure_context(failure)
+                analyzer._ensure_logs(failure)
+                system_prompt, user_prompt = analyzer.build_analysis_prompt(failure)
+                import time as _time
+                t0 = _time.time()
+                response = llm.create_message(
+                    system=system_prompt, user_content=user_prompt,
+                    tools=[ANALYSIS_TOOL],
+                )
+                dur = _time.time() - t0
+                result = analyzer.parse_analysis_response(response)
+                result['tokens_used'] = response.input_tokens + response.output_tokens
+                result['cost_usd'] = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
+                result['model_used'] = llm.model_name()
+                submission = {
+                    'component': comp,
+                    'analysis_type': 'build',
+                    'model_used': result.get('model_used', ''),
+                    'root_cause': result.get('root_cause', ''),
+                    'failure_category': result.get('failure_category', ''),
+                    'confidence_score': result.get('confidence_score', 0),
+                    'recommended_fix': result.get('recommended_fix', ''),
+                    'recommended_files': result.get('recommended_files', []),
+                    'can_auto_fix': result.get('can_auto_fix', False),
+                    'tokens_used': result.get('tokens_used', 0),
+                    'cost_usd': result.get('cost_usd', 0),
+                    'analysis_json': result,
+                }
+                upload = submit_analysis(comp, submission)
+                if upload and upload.get('action') == 'stored':
+                    print(green('✓') + ' {}% {:.0f}s'.format(
+                        int(result.get('confidence_score', 0) * 100), dur))
+                    success += 1
+                else:
+                    print(yellow('analyzed but save failed'))
+            except Exception as e:
+                print(red('✗ {}'.format(str(e)[:60])))
+        print()
+        print(bold('Done: {}/{} analyzed'.format(success, len(pending))))
+        return
     _bash_fallback(['ai', 'batch'] + list(args))
 
 

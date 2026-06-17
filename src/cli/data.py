@@ -11,9 +11,20 @@ def _is_cluster():
     return ic_config.get_mode() == 'cluster'
 
 
+def _use_api():
+    """Check if we should use the API (cluster mode or local API running)."""
+    if _is_cluster():
+        return True
+    from cli.mode import has_api
+    return has_api()
+
+
 def _api():
-    from cli.api_client import get_client
-    return get_client()
+    from cli.api_client import get_client, APIClient
+    if _is_cluster():
+        return get_client()
+    url = ic_config.get_api_url() or 'http://localhost:8000'
+    return APIClient(url)
 
 
 def _app():
