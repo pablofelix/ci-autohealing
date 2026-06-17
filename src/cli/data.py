@@ -169,3 +169,25 @@ def get_schedule(application=None):
     if _is_cluster():
         return _api().get(f'/api/v1/applications/{app}/schedule')
     return None
+
+
+def get_watched_applications():
+    if _is_cluster():
+        data = _api().get('/api/v1/config/applications')
+        return data.get('applications', []) if data else []
+    import os
+    return os.environ.get('WATCH_APPLICATIONS', '').split()
+
+
+def add_watched_application(app):
+    if _is_cluster():
+        data = _api().post('/api/v1/config/applications', {'application': app})
+        return data.get('applications', []) if data else []
+    return None
+
+
+def remove_watched_application(app):
+    if _is_cluster():
+        data = _api().delete(f'/api/v1/config/applications/{app}')
+        return data.get('applications', []) if data else []
+    return None

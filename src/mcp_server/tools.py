@@ -1473,6 +1473,42 @@ def get_nightly_history(application: str = DEFAULT_APPLICATION, days: int = 14) 
 
 
 # ---------------------------------------------------------------------------
+# Runtime configuration tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_watched_applications() -> Dict[str, Any]:
+    """Get the list of applications being monitored by the worker and watcher."""
+    from config import CollectorConfig
+    from repositories.config_repository import ConfigRepository
+    from repositories.connection import DatabaseConnection
+    repo = ConfigRepository(DatabaseConnection(CollectorConfig.from_env().db))
+    return {'applications': repo.get_watched_applications()}
+
+
+@mcp.tool()
+def add_watch_application(application: str) -> Dict[str, Any]:
+    """Add an application to the watch list. The worker and watcher will start monitoring it."""
+    from config import CollectorConfig
+    from repositories.config_repository import ConfigRepository
+    from repositories.connection import DatabaseConnection
+    repo = ConfigRepository(DatabaseConnection(CollectorConfig.from_env().db))
+    apps = repo.add_watched_application(application, updated_by='mcp')
+    return {'applications': apps}
+
+
+@mcp.tool()
+def remove_watch_application(application: str) -> Dict[str, Any]:
+    """Remove an application from the watch list."""
+    from config import CollectorConfig
+    from repositories.config_repository import ConfigRepository
+    from repositories.connection import DatabaseConnection
+    repo = ConfigRepository(DatabaseConnection(CollectorConfig.from_env().db))
+    apps = repo.remove_watched_application(application, updated_by='mcp')
+    return {'applications': apps}
+
+
+# ---------------------------------------------------------------------------
 # Skill registry tools (read-only)
 # ---------------------------------------------------------------------------
 

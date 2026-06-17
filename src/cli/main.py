@@ -1134,13 +1134,19 @@ def config_watch(ctx):
 @config_watch.command('list')
 def config_watch_list():
     """Show watched applications and watcher status."""
-    from cli.formatting import bold, cyan, green, red, dim
-    from config import ALL_WATCHERS
+    from cli import ic_config
+    from cli.formatting import bold, cyan, dim, green, red
 
-    apps = os.environ.get('WATCH_APPLICATIONS', '').split()
-    if not apps:
-        fallback = os.environ.get('APPLICATION_NAME', '')
-        apps = [fallback] if fallback else []
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import get_watched_applications
+        apps = get_watched_applications()
+    else:
+        apps = os.environ.get('WATCH_APPLICATIONS', '').split()
+        if not apps:
+            fallback = os.environ.get('APPLICATION_NAME', '')
+            apps = [fallback] if fallback else []
+
+    from config import ALL_WATCHERS
 
     disabled = set(os.environ.get('WATCH_DISABLE', '').split())
 
@@ -1185,8 +1191,19 @@ def config_watch_list():
 @click.option('--force', '-f', is_flag=True, help='Add even if not in DB')
 def config_watch_add(app_name, force):
     """Add application to watch list."""
+    from cli import ic_config
+    from cli.formatting import cyan, green, yellow
+
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import add_watched_application
+        apps = add_watched_application(app_name)
+        if apps is not None:
+            print(green('✓ Added to watch list: ') + cyan(app_name))
+            print('  Now watching: {}'.format(', '.join(apps)))
+            return
+
     from cli.db import check_db, get_repo
-    from cli.formatting import cyan, green, red, yellow
+    from cli.formatting import red
 
     if check_db() and not force:
         from repositories.build_failure_repository import BuildFailureRepository

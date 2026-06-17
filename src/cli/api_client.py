@@ -37,6 +37,9 @@ class APIClient:
     def put(self, path, data=None):
         return self._request('PUT', path, json=data)
 
+    def delete(self, path):
+        return self._request('DELETE', path)
+
     def _request(self, method, path, **kwargs):
         url = f"{self.base_url}{path}"
         try:
