@@ -39,7 +39,9 @@ def register_error_handlers(app: FastAPI):
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError):
-        return JSONResponse(status_code=422, content={
-            'error': 'validation_error',
-            'detail': str(exc),
-        })
+        if request.url.path.startswith('/api/'):
+            return JSONResponse(status_code=422, content={
+                'error': 'validation_error',
+                'detail': str(exc),
+            })
+        raise exc

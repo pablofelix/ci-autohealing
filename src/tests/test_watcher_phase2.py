@@ -300,6 +300,7 @@ class TestCLIWatchAddRemove(unittest.TestCase):
 class TestCLIWatchEnableDisable(unittest.TestCase):
 
     def setUp(self):
+        os.environ['IC_MODE'] = 'local'
         self.tmpdir = tempfile.mkdtemp()
         self.env_file = os.path.join(self.tmpdir, '.env')
         with open(self.env_file, 'w') as f:

@@ -22,6 +22,15 @@ def validate_application_name(name):
     return name
 
 
+def ValidatedApp():
+    """FastAPI dependency for validating application path parameter."""
+    from fastapi import Path
+
+    async def _validate(application: str = Path(...)):
+        return validate_application_name(application)
+    return _validate
+
+
 def validate_component_name(name):
     if not name or not name.strip():
         from api.errors import validation_error
