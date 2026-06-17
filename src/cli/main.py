@@ -784,15 +784,14 @@ def describe_component(ctx, name, log, output_json):
             for b in history:
                 st = b.get('status', '?')
                 color = green if st == 'Succeeded' else red
-                date_str = str(b.get('build_completion_time', ''))[:16]
-                commit = str(b.get('commit_short_sha', ''))[:8]
-                failed = b.get('failed_task_name', '')
+                date_str = str(b.get('date', b.get('build_completion_time', '')))[:16]
+                commit = str(b.get('commit', b.get('commit_short_sha', '')))[:8]
+                failed = b.get('failed_task_name', b.get('failed_task', ''))
                 extra = ', {}'.format(failed) if failed and st != 'Succeeded' else ''
-                print('  {}  {} {}{}'.format(
+                print('  {}  {}  ({}{})'.format(
                     date_str,
                     color('✓ succeeded' if st == 'Succeeded' else '✗ failed'),
-                    dim('({}{})'.format(commit, extra)),
-                    ''))
+                    commit, extra))
             resolved = history[0].get('status') == 'Succeeded' if history else False
             print()
             if resolved:
@@ -1135,13 +1134,19 @@ def config_watch(ctx):
 @config_watch.command('list')
 def config_watch_list():
     """Show watched applications and watcher status."""
-    from cli.formatting import bold, cyan, green, red, dim
-    from config import ALL_WATCHERS
+    from cli import ic_config
+    from cli.formatting import bold, cyan, dim, green, red
 
-    apps = os.environ.get('WATCH_APPLICATIONS', '').split()
-    if not apps:
-        fallback = os.environ.get('APPLICATION_NAME', '')
-        apps = [fallback] if fallback else []
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import get_watched_applications
+        apps = get_watched_applications()
+    else:
+        apps = os.environ.get('WATCH_APPLICATIONS', '').split()
+        if not apps:
+            fallback = os.environ.get('APPLICATION_NAME', '')
+            apps = [fallback] if fallback else []
+
+    from config import ALL_WATCHERS
 
     disabled = set(os.environ.get('WATCH_DISABLE', '').split())
 
@@ -1186,8 +1191,19 @@ def config_watch_list():
 @click.option('--force', '-f', is_flag=True, help='Add even if not in DB')
 def config_watch_add(app_name, force):
     """Add application to watch list."""
+    from cli import ic_config
+    from cli.formatting import cyan, green, yellow
+
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import add_watched_application
+        apps = add_watched_application(app_name)
+        if apps is not None:
+            print(green('✓ Added to watch list: ') + cyan(app_name))
+            print('  Now watching: {}'.format(', '.join(apps)))
+            return
+
     from cli.db import check_db, get_repo
-    from cli.formatting import cyan, green, red, yellow
+    from cli.formatting import red
 
     if check_db() and not force:
         from repositories.build_failure_repository import BuildFailureRepository
@@ -1277,12 +1293,14 @@ def _update_env_var(var_name, value):
         with open(env_file) as f:
             for line in f:
                 if line.startswith('{}='.format(var_name)):
-                    lines.append('{}={}\n'.format(var_name, value))
+                    quoted = '"{}"'.format(value) if ' ' in value else value
+                    lines.append('{}={}\n'.format(var_name, quoted))
                     found = True
                 else:
                     lines.append(line)
     if not found:
-        lines.append('{}={}\n'.format(var_name, value))
+        quoted = '"{}"'.format(value) if ' ' in value else value
+        lines.append('{}={}\n'.format(var_name, quoted))
     env_dir = os.path.dirname(env_file)
     os.makedirs(env_dir, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(

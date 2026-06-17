@@ -37,6 +37,9 @@ class APIClient:
     def put(self, path, data=None):
         return self._request('PUT', path, json=data)
 
+    def delete(self, path):
+        return self._request('DELETE', path)
+
     def _request(self, method, path, **kwargs):
         url = f"{self.base_url}{path}"
         try:
@@ -54,15 +57,25 @@ class APIClient:
         if r.status_code == 403:
             raise APIError(403, "Invalid API key")
 
-        if r.status_code == 404:
-            return None
-
         if r.status_code >= 400:
             detail = r.text[:200]
+            suggestion = None
             try:
-                detail = r.json().get('detail', detail)
+                body = r.json()
+                detail = body.get('detail', detail)
+                suggestion = body.get('suggestion')
             except Exception:
                 pass
+
+            if r.status_code == 404:
+                print("Error: {}".format(detail), file=sys.stderr)
+                if suggestion:
+                    print("  {}".format(suggestion), file=sys.stderr)
+                return None
+
+            print("Error: {}".format(detail), file=sys.stderr)
+            if suggestion:
+                print("  {}".format(suggestion), file=sys.stderr)
             raise APIError(r.status_code, detail)
 
         return r.json()

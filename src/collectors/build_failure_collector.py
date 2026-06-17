@@ -755,14 +755,25 @@ class BuildFailureCollector:
             for comp_name in candidates:
                 resolution = self.check_resolution_via_history(comp_name)
                 if resolution:
+                    pr_name = resolution['resolution_pr_name']
+                    commit_sha = resolution.get('resolution_commit_sha')
+                    self.build_repo.upsert_failure(
+                        pr_name=pr_name, pr_uid='',
+                        component_name=comp_name,
+                        application=self.config.k8s.application_name,
+                        namespace=self.config.k8s.namespace,
+                        repo_url='', branch='', status='Succeeded',
+                        details={'commit_sha': commit_sha,
+                                 'commit_short_sha': commit_sha[:8] if commit_sha else ''},
+                    )
                     if self.build_repo.mark_resolved(
                         comp_name, self.config.k8s.application_name,
-                        self.config.k8s.namespace, resolution['resolution_pr_name'],
-                        resolution_commit_sha=resolution.get('resolution_commit_sha')
+                        self.config.k8s.namespace, pr_name,
+                        resolution_commit_sha=commit_sha,
                     ):
                         total_resolved += 1
                         logger.info("Auto-resolved %s (successful build: %s)",
-                                    comp_name, resolution['resolution_pr_name'])
+                                    comp_name, pr_name)
         except Exception as e:
             logger.debug("Resolution check phase failed: %s", e)
 

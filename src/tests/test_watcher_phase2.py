@@ -207,6 +207,12 @@ class TestJiraPollLoop(unittest.TestCase):
 
 class TestCLIWatchList(unittest.TestCase):
 
+    def setUp(self):
+        os.environ['IC_MODE'] = 'local'
+
+    def tearDown(self):
+        os.environ.pop('IC_MODE', None)
+
     def test_list_shows_applications(self):
         runner = CliRunner()
         with patch.dict(os.environ, {
@@ -237,7 +243,8 @@ class TestCLIWatchList(unittest.TestCase):
 
     def test_list_falls_back_to_application_name(self):
         runner = CliRunner()
-        with patch.dict(os.environ, {'APPLICATION_NAME': 'fallback-app'}, clear=True):
+        with patch.dict(os.environ, {'APPLICATION_NAME': 'fallback-app', 'IC_MODE': 'local'},
+                        clear=True):
             result = runner.invoke(cli, ['config', 'watch', 'list'])
             self.assertEqual(result.exit_code, 0)
             self.assertIn('fallback-app', result.output)
@@ -246,6 +253,7 @@ class TestCLIWatchList(unittest.TestCase):
 class TestCLIWatchAddRemove(unittest.TestCase):
 
     def setUp(self):
+        os.environ['IC_MODE'] = 'local'
         self.tmpdir = tempfile.mkdtemp()
         self.env_file = os.path.join(self.tmpdir, '.env')
         with open(self.env_file, 'w') as f:
@@ -262,7 +270,7 @@ class TestCLIWatchAddRemove(unittest.TestCase):
 
         with open(self.env_file) as f:
             content = f.read()
-        self.assertIn('WATCH_APPLICATIONS=app-1 app-2', content)
+        self.assertIn('WATCH_APPLICATIONS="app-1 app-2"', content)
         self.assertIn('OTHER_VAR=keep', content)
 
     def test_add_duplicate(self):
@@ -292,6 +300,7 @@ class TestCLIWatchAddRemove(unittest.TestCase):
 class TestCLIWatchEnableDisable(unittest.TestCase):
 
     def setUp(self):
+        os.environ['IC_MODE'] = 'local'
         self.tmpdir = tempfile.mkdtemp()
         self.env_file = os.path.join(self.tmpdir, '.env')
         with open(self.env_file, 'w') as f:
