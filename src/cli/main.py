@@ -281,8 +281,32 @@ def get_conforma(ctx, filter, output_json):
 @click.pass_context
 def get_exceptions(ctx, output_json):
     """Policy exceptions expiring/expired."""
+    import json as json_mod
+    from cli.mode import ensure_cluster
+    is_json = output_json or ctx.obj.get('json')
+    if ensure_cluster():
+        from cli.data import get_policy_exceptions
+        from cli.formatting import bold, dim, section_header, yellow
+        data = get_policy_exceptions()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Policy Exceptions')
+        print()
+        exceptions = data.get('exceptions', []) if data else []
+        if not exceptions:
+            print('  No exceptions found')
+        for exc in exceptions:
+            val = exc.get('value', '')
+            ref = exc.get('reference', '')
+            until = exc.get('effectiveUntil')
+            print('  {} — {}'.format(bold(val[:60]), dim(ref[:40])))
+            if until:
+                print('    Expires: {}'.format(yellow(until)))
+        print()
+        return
     args = ['get', 'exceptions']
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -292,8 +316,27 @@ def get_exceptions(ctx, output_json):
 @click.pass_context
 def get_bindings(ctx, output_json):
     """RPA -> EC policy mappings."""
+    import json as json_mod
+    from cli.mode import ensure_cluster
+    is_json = output_json or ctx.obj.get('json')
+    if ensure_cluster():
+        from cli.data import get_policy_bindings
+        from cli.formatting import bold, section_header
+        data = get_policy_bindings()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('RPA → EC Policy Bindings')
+        print()
+        bindings = data.get('bindings', []) if data else []
+        if not bindings:
+            print('  No bindings found')
+        for b in bindings:
+            print('  {} → {}'.format(bold(b.get('name', '?')[:40]), b.get('policy', '')))
+        print()
+        return
     args = ['get', 'bindings']
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -921,8 +964,38 @@ def describe_pipelinerun(ctx, name, output_json):
 @click.pass_context
 def describe_jira(ctx, key, output_json):
     """Show Jira ticket details."""
+    import json as json_mod
+    from cli.mode import ensure_cluster
+    is_json = output_json or ctx.obj.get('json')
+    if ensure_cluster():
+        from cli.data import get_jira_issue
+        from cli.formatting import bold, cyan, dim, section_header
+        data = get_jira_issue(key)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        if not data:
+            return
+        section_header('Jira: {}'.format(key))
+        print()
+        status = data.get('status', {})
+        if isinstance(status, dict):
+            for k, v in status.items():
+                print('  {:<20} {}'.format(k + ':', v))
+        else:
+            print('  Status: {}'.format(status))
+        comments = data.get('comments', [])
+        if comments:
+            print()
+            print(bold('{} comment(s):'.format(len(comments))))
+            for c in comments[-5:]:
+                author = c.get('author', {}).get('displayName', '?')
+                body = c.get('body', '')[:100]
+                print('  {} — {}'.format(cyan(author), dim(body)))
+        print()
+        return
     args = ['describe', 'jira', key]
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 

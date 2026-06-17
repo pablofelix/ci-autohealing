@@ -171,6 +171,24 @@ def get_schedule(application=None):
     return None
 
 
+def get_jira_issue(jira_key):
+    if _is_cluster():
+        return _api().get(f'/api/v1/jira/{jira_key}')
+    return None
+
+
+def get_policy_exceptions():
+    if _is_cluster():
+        return _api().get('/api/v1/policies/exceptions')
+    return None
+
+
+def get_policy_bindings():
+    if _is_cluster():
+        return _api().get('/api/v1/policies/bindings')
+    return None
+
+
 def get_watched_applications():
     if _is_cluster():
         data = _api().get('/api/v1/config/applications')
