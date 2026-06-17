@@ -508,3 +508,35 @@ class GitHubClient:
             'limit': core.get('limit', 0),
             'reset': core.get('reset', 0),
         }
+
+    def get_workflow_runs(self, owner, repo, workflow_file, limit=5):
+        """Get recent workflow runs for a GitHub Actions workflow.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            workflow_file: Workflow filename (e.g. 'trigger-nightlies.yaml')
+            limit: Max runs to return
+
+        Returns:
+            List of run dicts with: status, conclusion, created_at, html_url
+        """
+        path = '/repos/{}/{}/actions/workflows/{}/runs'.format(
+            owner, repo, workflow_file)
+        response = self._get(path, params={'per_page': limit})
+        if not response:
+            return []
+        data = response.json()
+        runs = []
+        for run in data.get('workflow_runs', [])[:limit]:
+            runs.append({
+                'id': run.get('id'),
+                'status': run.get('status'),
+                'conclusion': run.get('conclusion'),
+                'created_at': run.get('created_at'),
+                'updated_at': run.get('updated_at'),
+                'html_url': run.get('html_url'),
+                'head_branch': run.get('head_branch'),
+                'run_number': run.get('run_number'),
+            })
+        return runs
