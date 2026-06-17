@@ -105,11 +105,27 @@ Goal: close the loop from detection → diagnosis → fix → verification autom
 
 Goal: dashboards and trends, not just point-in-time snapshots.
 
+**6a — AI Quality Metrics (see `docs/design/ai-quality-metrics.md`)**
+- [ ] Human feedback loop: verdict on triage resolve (correct/partial/incorrect)
+- [ ] `human_verdict` column in ai_analysis table
+- [ ] classification_accuracy, auto_fix_precision, unsafe_auto_fix_rate
+- [ ] avg_cost_per_analysis, cost_per_correct_diagnosis
+- [ ] API endpoint: `/api/v1/metrics/ai-quality`
+- [ ] Weekly accuracy report command: `ic ai quality`
+- [ ] Confidence calibration analysis
+- [ ] Training data export: `ic ai export-training-data` (for future custom model)
+
+**6b — Operational Metrics**
 - [ ] Build health trends over time (success rate charts per component)
 - [ ] Mean time to resolution (MTTR) tracking per failure category
-- [ ] AI analysis accuracy tracking (was the diagnosis correct?)
 - [ ] Failure pattern frequency trends (are certain patterns increasing?)
 - [ ] Grafana dashboard or equivalent for oncall visibility
+
+**6c — Authentication (when >5 users)**
+- [ ] Per-user API keys generated via `ic config create-key <user>`
+- [ ] Read-only vs admin roles
+- [ ] API request logging with user identity
+- [ ] Later: OIDC with Red Hat SSO (when >20 users)
 
 ---
 
