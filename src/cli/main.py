@@ -1276,12 +1276,14 @@ def _update_env_var(var_name, value):
         with open(env_file) as f:
             for line in f:
                 if line.startswith('{}='.format(var_name)):
-                    lines.append('{}={}\n'.format(var_name, value))
+                    quoted = '"{}"'.format(value) if ' ' in value else value
+                    lines.append('{}={}\n'.format(var_name, quoted))
                     found = True
                 else:
                     lines.append(line)
     if not found:
-        lines.append('{}={}\n'.format(var_name, value))
+        quoted = '"{}"'.format(value) if ' ' in value else value
+        lines.append('{}={}\n'.format(var_name, quoted))
     env_dir = os.path.dirname(env_file)
     os.makedirs(env_dir, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(

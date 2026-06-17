@@ -262,7 +262,7 @@ class TestCLIWatchAddRemove(unittest.TestCase):
 
         with open(self.env_file) as f:
             content = f.read()
-        self.assertIn('WATCH_APPLICATIONS=app-1 app-2', content)
+        self.assertIn('WATCH_APPLICATIONS="app-1 app-2"', content)
         self.assertIn('OTHER_VAR=keep', content)
 
     def test_add_duplicate(self):
