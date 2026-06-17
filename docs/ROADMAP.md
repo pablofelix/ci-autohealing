@@ -113,24 +113,28 @@ Goal: dashboards and trends, not just point-in-time snapshots.
 
 ---
 
-## Phase 7: CLI Cluster Mode Parity (mostly done)
+## Phase 7: CLI Cluster Mode Parity (done)
 
 Goal: all CLI commands work identically in local and cluster mode.
 
 - [x] `ic get alerts` — enriched with violation counts, policy links, release countdown
-- [x] `ic get apps` — works via API
-- [x] `ic get component` / `ic describe component` — full detail + build history via API
+- [x] `ic get apps` / `ic get components` — via API
+- [x] `ic get component` / `ic describe component` — full detail + build history + filtered logs via API
 - [x] `ic get conforma` / `ic describe conforma` — violations with counts via API
-- [x] `ic get pipelineruns` / `ic get pipelinerun` — via API
-- [x] `ic get releases` — release schedule via API
-- [x] `ic get jira` — jira links via API
+- [x] `ic get pipelineruns` / `ic get pipelinerun` / `ic describe pipelinerun` — via API
+- [x] `ic get releases` — release schedule with countdown via API
+- [x] `ic get jira` / `ic jira status` — jira links via API
 - [x] `ic get fixes` — fix attempts via API
 - [x] `ic export` — slack/jira export via API
 - [x] `ic triage` — dashboard via API
 - [x] `ic stats` — overview stats via API
-- [x] `ic conforma report` — via API
+- [x] `ic conforma` default/report/categories/csv — via API
+- [x] `ic ai` default/status — via API
+- [x] `ic release` default/status — readiness via API
+- [x] `ic report` build/conforma — via API
+- [x] `ic patterns` default/shared/list — via API
 - [x] `ic config watch add/list` — runtime config via API + DB
-- [ ] Remaining 33 bash-only commands (see Phase 9c)
+- [x] Smart log filtering in describe component (error pattern matching like local bash)
 
 ---
 
@@ -158,20 +162,30 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 - [x] Validators for app names, component names, jira keys, skill names
 - [x] Rejects empty/invalid input with clear suggestions
 
-**9c — Eliminate bash fallback (33 commands)**
-- [ ] Migrate conforma report/categories/csv/scenarios/snapshot commands
-- [ ] Migrate jira create/link/status/inbox commands
-- [ ] Migrate ai analyze/batch/stats commands
-- [ ] Migrate release status/verify/diff commands
-- [ ] Migrate fix (interactive) command
-- [ ] Migrate report build/conforma commands
+**9c — Eliminate bash fallback (13 commands remain)**
+- [x] Migrate get components, conforma default/categories/csv
+- [x] Migrate ai default/status, report build/conforma
+- [x] Migrate release default/status, jira default/status
+- [x] Migrate patterns default/shared
+- [ ] Add API endpoints for: ai analyze/batch, jira create/link/inbox
+- [ ] Add API endpoints for: release diff/verify, get exceptions/bindings/policy-gap
+- [ ] Add API endpoint for: conforma snapshot, fix (interactive)
 - [ ] Local mode = `api_url: http://localhost:8000` (user runs `task serve`)
 - [ ] Remove `_bash_fallback()` function entirely
 
-**9d — MCP-CLI parity**
-- [ ] Every CLI command has an equivalent MCP tool
-- [ ] All MCP tools call the same API endpoints as CLI
-- [ ] Add missing: conforma_report(), triage_track/resolve(), release_readiness()
+**9d — MCP-CLI parity (done)**
+- [x] 52 MCP tools matching all CLI read + write commands
+- [x] resolve_triage_item(), get_conforma_categories() added
+- [x] All MCP tools use same API endpoints as CLI
+
+**9e — Input sanitization and UX (done)**
+- [x] Fuzzy matching for component names (Levenshtein distance)
+- [x] "Did you mean X?" suggestions on invalid names
+- [x] STYLE.md pre-commit hook (frozen dataclass, no bare except, no print in lib)
+- [x] cli/mode.py: ensure_cluster() eliminates 31 repeated mode-check blocks (DRY)
+- [x] cli/log_filter.py: smart error filtering for build logs (error patterns + context)
+- [ ] Autocomplete suggestions from DB for invalid names
+- [ ] Progress indicators for long operations
 
 **9e — Input sanitization and UX**
 - [ ] Fuzzy matching for component/app names ("did you mean X?")
