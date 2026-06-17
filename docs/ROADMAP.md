@@ -186,12 +186,36 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 - [ ] Autocomplete suggestions from DB for invalid names
 - [ ] Progress indicators for long operations
 
-**9e — Input sanitization and UX**
-- [ ] Fuzzy matching for component/app names ("did you mean X?")
-- [ ] Autocomplete suggestions from DB for invalid names
-- [ ] Consistent error formatting across all commands
-- [ ] Progress indicators for long operations
-- [ ] Automated DB migrations on deploy (init container or Job)
+---
+
+## Phase S1: Critical Security Hardening
+
+Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full analysis.
+
+- [ ] Secret scanning/redaction in stored logs and AI output (T2)
+- [ ] Sanitize AI-generated content before Jira/Slack posting (T5)
+- [ ] Autonomous PR scope limits: repo allowlist, file allowlist, branch naming (T3, T8)
+- [ ] GitHub API call audit logging (T4)
+- [ ] AUTONOMOUS_MODE activation controls with confirmation (T6)
+- [ ] Skill execution: pin to SHA, sandbox by default (T7)
+- [ ] Strip ANSI escape codes from stored logs (T1)
+- [ ] Never-modify file list for auto-fix PRs (T8)
+
+## Phase S2: Defense in Depth
+
+- [ ] Per-user API keys with RBAC (T9)
+- [ ] Token rotation via Vault (T4)
+- [ ] Rate limits on Jira/PR creation (T3, T5)
+- [ ] Network policies for sandbox pods (T7)
+- [ ] Time-limited AUTONOMOUS_MODE (T6)
+- [ ] PR dry-run mode — draft PRs by default (T3)
+
+## Phase S3: Long-term Hardening
+
+- [ ] OIDC integration for API auth (T9)
+- [ ] Skill content hash verification (T7)
+- [ ] DB column encryption for sensitive data (T10)
+- [ ] Full API audit trail with user identity (T9)
 
 ---
 
