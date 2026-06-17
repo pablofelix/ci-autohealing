@@ -14,7 +14,7 @@ CI AutoHealing monitors [Konflux](https://konflux-ci.dev/) CI/CD pipelines, dete
 - **CVE Scanning** — Parallel SARIF vulnerability scanning across all container images in a snapshot, surfacing critical and high CVEs before release.
 - **Jira Integration** — Create tickets, monitor comments, draft AI replies, and track resolution — all from the CLI.
 - **Skill Registry** — Load, validate, and manage external skills from Git repos. Dual-mode storage (PostgreSQL in cluster, JSON file locally) with read-only MCP/API access for AI agents.
-- **MCP Server** — 40+ tools accessible by Claude Code, GitHub Copilot, or any MCP-compatible AI agent for interactive triage sessions.
+- **MCP Server** — 53+ tools accessible by Claude Code, GitHub Copilot, or any MCP-compatible AI agent for interactive triage sessions.
 - **Pattern Learning** — An `error_patterns` table accumulates institutional knowledge from repeated analyses, improving diagnosis accuracy over time.
 - **Three Interfaces, One Data Layer** — CLI, MCP server, and REST API all share the same repositories and PostgreSQL database.
 
@@ -88,6 +88,16 @@ APPLICATION_NAME=your-app-name
 
 Everything else (AI, Jira, GitHub) is optional and will be skipped gracefully if not configured.
 
+### Install CLI Only (no cluster needed)
+
+```bash
+pip install ic-tool
+ic config use-cluster https://YOUR-API-URL --api-key YOUR_KEY --no-verify-tls
+ic get alerts
+```
+
+The standalone CLI (`ic-tool` on [PyPI](https://pypi.org/project/ic-tool/)) only needs `click` + `requests` — no database, no kubeconfig. It talks to the remote API server.
+
 ---
 
 ## Try It Without a Cluster
@@ -149,7 +159,7 @@ ic conforma report                         # Conforma standup table
 
 ### MCP Server
 
-The MCP server exposes 40+ tools for AI agents to query failures, run analysis, and generate exports programmatically.
+The MCP server exposes 53+ tools for AI agents to query failures, run analysis, and generate exports programmatically.
 
 ```bash
 task mcp:setup                # generate .mcp.json for Claude Code
@@ -222,7 +232,7 @@ Enable only after manual validation of at least 5 fixes.
 ## Taskfile Commands
 
 ```bash
-task test              # run 402 tests
+task test              # run 474 tests
 task lint              # ruff linter
 task check             # lint + tests
 
@@ -437,7 +447,7 @@ See `.env.example` for the full list with descriptions.
 ├── src/
 │   ├── cli/                  # CLI implementation (Click)
 │   ├── skills/               # Skill registry (models, loader, registry, validator)
-│   ├── mcp_server/           # MCP server (FastMCP, 40+ tools)
+│   ├── mcp_server/           # MCP server (FastMCP, 53+ tools)
 │   ├── api/                  # REST API (FastAPI, OpenAPI at /docs)
 │   ├── worker/               # Worker pipeline loop (replaces cron)
 │   ├── watcher/              # K8s watch daemon (event-driven monitoring)
@@ -448,7 +458,7 @@ See `.env.example` for the full list with descriptions.
 │   ├── repositories/         # Database repositories (SQL, incl. triage tracking)
 │   ├── proactive/            # Health monitoring, CVE warnings, nightly staleness
 │   ├── utils/                # Shared utilities (log filtering)
-│   ├── tests/                # Test suite (402 tests)
+│   ├── tests/                # Test suite (474 tests)
 │   └── serve.py              # Unified server entry point
 │
 ├── prompts/                  # LLM system prompts (editable without code changes)
