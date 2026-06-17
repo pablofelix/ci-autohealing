@@ -711,7 +711,7 @@ def describe_component(ctx, name, log, output_json):
     is_json = output_json or ctx.obj.get('json')
     if ic_config.get_mode() == 'cluster':
         from cli.data import require_data, get_failure_details
-        from cli.formatting import cyan, dim, red, section_header
+        from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
         if not require_data():
             return
         data = get_failure_details(name)
@@ -721,18 +721,89 @@ def describe_component(ctx, name, log, output_json):
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
             return
+
         section_header('Component: {}'.format(name))
         print()
-        for key in ('status', 'error_type', 'error_message', 'failed_task',
-                     'failed_step', 'commit_sha', 'commit_message', 'commit_author',
-                     'repository_url', 'branch', 'pipelinerun_name', 'konflux_url'):
-            val = data.get(key)
-            if val:
-                print('  {:<18} {}'.format(key + ':', val))
-        if data.get('build_logs') and log:
+
+        pr_name = data.get('pipelinerun_name', '')
+
+        section_header('Latest PipelineRun')
+        print()
+        print(bold('PipelineRun:') + ' {}'.format(pr_name))
+        print(bold('Status:') + '      {}'.format(red('Failed')))
+        if data.get('repository_url'):
+            print(bold('Repository:') + '  {}'.format(data['repository_url']))
+        if data.get('branch'):
+            print(bold('Branch:') + '      {}'.format(data['branch']))
+        if data.get('commit_sha'):
+            print(bold('Commit:') + '      {}'.format(data['commit_sha'][:8]))
+        if data.get('commit_author'):
+            print(bold('Author:') + '      {}'.format(data['commit_author']))
+        if data.get('commit_message'):
+            print(bold('Message:') + '     {}'.format(data['commit_message'][:80]))
+        if data.get('commit_url'):
+            print(bold('Commit URL:') + '  {}'.format(cyan(data['commit_url'])))
+        print()
+
+        if data.get('failed_step') or data.get('error_type') or data.get('error_message'):
+            print(bold('Failure Info:'))
+            if data.get('failed_step'):
+                print('  Failed Step: {}'.format(red(data['failed_step'])))
+            if data.get('error_type'):
+                print('  Error Type:  {}'.format(data['error_type']))
+            if data.get('error_message'):
+                msg = data['error_message']
+                for line in msg.split('\n')[:5]:
+                    print('  {}'.format(line[:120]))
+            if data.get('failed_task'):
+                print('  Task:        {}'.format(data['failed_task']))
+        print()
+
+        if data.get('jira_key'):
+            print(bold('JIRA:') + '        {}'.format(cyan(data['jira_key'])))
+        if data.get('konflux_url'):
+            print(bold('Konflux UI:') + ' {}'.format(cyan(data['konflux_url'])))
+        if data.get('output_image'):
+            print(bold('Image:') + '       {}'.format(data['output_image'][:80]))
+        print()
+
+        if data.get('build_logs'):
+            if log:
+                section_header('Build Logs')
+                print()
+                print(data['build_logs'][:10000])
+                print()
+            else:
+                print(dim('Logs available — use --log to display'))
+                print()
+
+        history = data.get('build_history', [])
+        if history:
+            section_header('Build History')
             print()
-            print(dim('--- logs ---'))
-            print(data['build_logs'][:5000])
+            for b in history:
+                st = b.get('status', '?')
+                color = green if st == 'Succeeded' else red
+                date_str = str(b.get('build_completion_time', ''))[:16]
+                commit = str(b.get('commit_short_sha', ''))[:8]
+                failed = b.get('failed_task_name', '')
+                extra = ', {}'.format(failed) if failed and st != 'Succeeded' else ''
+                print('  {}  {} {}{}'.format(
+                    date_str,
+                    color('✓ succeeded' if st == 'Succeeded' else '✗ failed'),
+                    dim('({}{})'.format(commit, extra)),
+                    ''))
+            resolved = history[0].get('status') == 'Succeeded' if history else False
+            print()
+            if resolved:
+                print(green('  Status: RESOLVED') + ' (latest build passed)')
+            print()
+
+        if data.get('ai_analyzed'):
+            print(dim('[AI analysis available]'))
+        else:
+            print(yellow('[!] AI analysis not available'))
+            print(cyan('[!] Run: ic ai analyze component {}'.format(name)))
         print()
         return
     args = ['describe', 'component', name]

@@ -37,10 +37,12 @@ class FailureSummary(BaseModel):
 class BuildFailureDetails(BaseModel):
     component: str
     pipelinerun_name: Optional[str] = None
+    status: Optional[str] = None
     error_message: Optional[str] = None
     error_type: Optional[str] = None
     failed_task: Optional[str] = None
     failed_step: Optional[str] = None
+    task_summary: Optional[str] = None
     build_logs: Optional[str] = Field(None, description="Truncated to 50K chars")
     commit_sha: Optional[str] = None
     commit_message: Optional[str] = None
@@ -48,9 +50,15 @@ class BuildFailureDetails(BaseModel):
     commit_url: Optional[str] = None
     repository_url: Optional[str] = None
     branch: Optional[str] = None
+    output_image: Optional[str] = None
+    jira_key: Optional[str] = None
+    build_duration_seconds: Optional[int] = None
+    ai_analyzed: Optional[bool] = None
+    is_resolved: Optional[bool] = None
     commit_context: Optional[Dict[str, Any]] = None
     konflux_url: Optional[str] = None
     first_detected_at: datetime
+    build_history: Optional[List[Dict[str, Any]]] = None
 
 
 class ConformaViolationDetails(BaseModel):

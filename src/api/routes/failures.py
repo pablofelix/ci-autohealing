@@ -163,13 +163,18 @@ def get_failure(
     logs = row.get('build_logs') if include_logs else None
     context = row.get('commit_context') if include_commit_context else None
 
+    history_data = _build_repo().get_component_history(component, application, limit=10)
+    builds = history_data.get('builds', [])
+
     return BuildFailureDetails(
         component=row['component_name'],
         pipelinerun_name=row.get('pipelinerun_name'),
+        status=row.get('status'),
         error_message=row.get('error_message'),
         error_type=row.get('error_type'),
         failed_task=row.get('failed_task_name'),
         failed_step=row.get('failed_step_name'),
+        task_summary=row.get('task_summary'),
         build_logs=logs,
         commit_sha=row.get('commit_sha'),
         commit_message=row.get('commit_message'),
@@ -177,9 +182,15 @@ def get_failure(
         commit_url=row.get('commit_url'),
         repository_url=row.get('repository_url'),
         branch=row.get('branch'),
+        output_image=row.get('output_image'),
+        jira_key=row.get('jira_key'),
+        build_duration_seconds=row.get('build_duration_seconds'),
+        ai_analyzed=row.get('ai_analyzed'),
+        is_resolved=row.get('is_resolved'),
         commit_context=context,
         konflux_url=konflux,
         first_detected_at=row.get('first_detected_at', datetime.utcnow()),
+        build_history=builds,
     )
 
 
