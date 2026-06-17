@@ -784,15 +784,14 @@ def describe_component(ctx, name, log, output_json):
             for b in history:
                 st = b.get('status', '?')
                 color = green if st == 'Succeeded' else red
-                date_str = str(b.get('build_completion_time', ''))[:16]
-                commit = str(b.get('commit_short_sha', ''))[:8]
-                failed = b.get('failed_task_name', '')
+                date_str = str(b.get('date', b.get('build_completion_time', '')))[:16]
+                commit = str(b.get('commit', b.get('commit_short_sha', '')))[:8]
+                failed = b.get('failed_task_name', b.get('failed_task', ''))
                 extra = ', {}'.format(failed) if failed and st != 'Succeeded' else ''
-                print('  {}  {} {}{}'.format(
+                print('  {}  {}  ({}{})'.format(
                     date_str,
                     color('✓ succeeded' if st == 'Succeeded' else '✗ failed'),
-                    dim('({}{})'.format(commit, extra)),
-                    ''))
+                    commit, extra))
             resolved = history[0].get('status') == 'Succeeded' if history else False
             print()
             if resolved:
