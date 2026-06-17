@@ -203,6 +203,12 @@ class BuildFailureRepository:
                        error_message=None, error_type=None, failed_step=None, duration=None):
         """Insert or update a build failure with comprehensive data. Returns True if inserted new."""
         try:
+            from security.redact import sanitize_for_storage
+            if logs:
+                logs = sanitize_for_storage(logs)
+            if error_message:
+                error_message = sanitize_for_storage(error_message)
+
             blob_refs = {}
             if logs and should_offload(logs):
                 key = make_blob_key('build-failures', component_name, pr_name, 'build_logs')

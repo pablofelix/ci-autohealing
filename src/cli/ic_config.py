@@ -37,6 +37,7 @@ def _save(cfg):
     with open(_CONFIG_FILE, 'w') as f:
         json.dump(cfg, f, indent=2)
         f.write('\n')
+    os.chmod(str(_CONFIG_FILE), 0o600)
 
 
 def get_mode():

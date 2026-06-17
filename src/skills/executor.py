@@ -149,7 +149,11 @@ class SkillExecutor:
                 dry_run_steps=[b['code'] for b in blocks],
             )
 
-        env = os.environ.copy()
+        from security.redact import get_safe_env
+        declared_env = []
+        if self.skill.metadata.ic_metadata:
+            declared_env = self.skill.metadata.ic_metadata.requires_env
+        env = get_safe_env(declared_vars=declared_env)
         env.update(self.env_overrides)
         for k, v in self.params.items():
             env[k] = str(v)
