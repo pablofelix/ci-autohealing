@@ -1542,6 +1542,21 @@ def ai_status():
 @click.option('--fixes', is_flag=True)
 def ai_stats(fixes):
     """Detailed AI statistics."""
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.api_client import get_client
+        from cli.formatting import bold, section_header
+        data = get_client().get('/api/v1/applications/{}/analyses/stats'.format(cfg.APPLICATION_NAME))
+        if data:
+            section_header('AI Analysis Statistics')
+            print()
+            for k, v in data.items():
+                if k != 'application':
+                    print('  {:<25} {}'.format(k + ':', v))
+            print()
+        else:
+            print('No AI analysis data')
+        return
     if fixes:
         _bash_fallback(['ai', 'stats', '--fixes'])
         return
