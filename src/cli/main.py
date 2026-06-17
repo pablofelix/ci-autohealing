@@ -44,10 +44,33 @@ def get(ctx, output_json):
 @click.pass_context
 def get_components(ctx, refresh, output_json):
     """List currently failing components."""
+    import json as json_mod
+    from cli import ic_config
+    is_json = output_json or ctx.obj.get('json')
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_failures
+        from cli.formatting import bold, green, red, section_header
+        if not require_data():
+            return
+        data = get_failures()
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Failing Components: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        items = data if isinstance(data, list) else []
+        if not items:
+            print(green('  No failing components'))
+        for f in items:
+            comp = f.get('component_name', f.get('component', '?'))
+            err = f.get('error_type') or ''
+            print('  {} {}'.format(red('✗'), '{} — {}'.format(bold(comp), err) if err else bold(comp)))
+        print()
+        return
     args = ['get', 'components']
     if refresh:
         args.append('--refresh')
-    if output_json or ctx.obj.get('json'):
+    if is_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -1402,7 +1425,11 @@ def stats_components():
 def ai(ctx):
     """AI analysis commands."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['ai'])
+        from cli import ic_config
+        if ic_config.get_mode() == 'cluster':
+            ctx.invoke(ai_status)
+        else:
+            _bash_fallback(['ai'])
 
 
 @ai.command('analyze')
@@ -1422,6 +1449,30 @@ def ai_batch(args):
 @ai.command('status')
 def ai_status():
     """Show AI analysis summary."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_overview_stats
+        from cli.formatting import bold, cyan, green, section_header
+        if not require_data():
+            return
+        data = get_overview_stats()
+        section_header('AI Analysis Status')
+        print()
+        bf = data.get('build_failures', {})
+        cv = data.get('conforma_violations', {})
+        print(bold('Build Failures:'))
+        print('  Pending:    {}'.format(bf.get('pending', 0)))
+        print('  Analyzed:   {}'.format(bf.get('analyzed', 0)))
+        print('  Fixable:    {}'.format(bf.get('autofixable', 0)))
+        print()
+        print(bold('Conforma Violations:'))
+        print('  Pending:    {}'.format(cv.get('pending', 0)))
+        print('  Analyzed:   {}'.format(cv.get('analyzed', 0)))
+        print()
+        cost = data.get('total_cost_30d', 0)
+        print(bold('Total cost:') + '   ${} (last 30 days)'.format(cost))
+        print()
+        return
     from cli.db import get_repo, print_table, require_db
     from cli.formatting import bold, cyan, green, section_header
     from repositories.ai_analysis_repository import AIAnalysisRepository
@@ -2168,7 +2219,11 @@ def export_cmd(args):
 def conforma(ctx):
     """Conforma (Enterprise Contract) commands."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['conforma'])
+        from cli import ic_config
+        if ic_config.get_mode() == 'cluster':
+            ctx.invoke(conforma_report)
+        else:
+            _bash_fallback(['conforma'])
 
 
 @conforma.command('report')
@@ -2209,6 +2264,24 @@ def conforma_report(args):
 @click.argument('args', nargs=-1)
 def conforma_categories(args):
     """Violation categories across components."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_violations
+        from cli.formatting import bold, section_header
+        if not require_data():
+            return
+        data = get_conforma_violations()
+        categories = {}
+        if isinstance(data, list):
+            for v in data:
+                cat = v.get('scenario', v.get('error_type', 'unknown'))
+                categories[cat] = categories.get(cat, 0) + 1
+        section_header('Conforma Categories')
+        print()
+        for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+            print('  {:<50} {}'.format(cat[:50], bold(str(count))))
+        print()
+        return
     _bash_fallback(['conforma', 'categories'] + list(args))
 
 
@@ -2216,6 +2289,24 @@ def conforma_categories(args):
 @click.argument('args', nargs=-1)
 def conforma_csv(args):
     """Export Conforma data as CSV."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_conforma_violations
+        if not require_data():
+            return
+        data = get_conforma_violations()
+        print('component,violations,warnings,scenario,first_seen')
+        if isinstance(data, list):
+            for v in data:
+                comp = v.get('component', v.get('component_name', ''))
+                print('{},{},{},{},{}'.format(
+                    comp,
+                    v.get('violations_count', 0),
+                    v.get('warnings_count', 0),
+                    v.get('scenario', v.get('error_type', '')),
+                    str(v.get('first_seen', ''))[:10],
+                ))
+        return
     _bash_fallback(['conforma', 'csv'] + list(args))
 
 
@@ -2240,13 +2331,45 @@ def conforma_scenarios(args):
 def release(ctx):
     """Release commands."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['release'])
+        from cli import ic_config
+        if ic_config.get_mode() == 'cluster':
+            ctx.invoke(release_status)
+        else:
+            _bash_fallback(['release'])
 
 
 @release.command('status')
 @click.argument('args', nargs=-1)
 def release_status(args):
     """Release process checklist."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data
+        from cli.api_client import get_client
+        from cli.formatting import green, red, section_header
+        if not require_data():
+            return
+        app = cfg.APPLICATION_NAME
+        data = get_client().get('/api/v1/applications/{}/readiness'.format(app))
+        if not data:
+            print('No readiness data available')
+            return
+        section_header('Release Readiness: {}'.format(app))
+        print()
+        for k, v in data.items():
+            if k == 'application':
+                continue
+            if isinstance(v, bool):
+                color = green if v else red
+                print('  {:<30} {}'.format(k + ':', color('✓' if v else '✗')))
+            elif isinstance(v, (int, float)):
+                print('  {:<30} {}'.format(k + ':', v))
+            elif isinstance(v, str):
+                print('  {:<30} {}'.format(k + ':', v[:60]))
+            elif isinstance(v, list):
+                print('  {:<30} {} items'.format(k + ':', len(v)))
+        print()
+        return
     _bash_fallback(['release', 'status'] + list(args))
 
 
@@ -2275,6 +2398,24 @@ def report():
 @click.argument('args', nargs=-1)
 def report_build(args):
     """Daily build failures standup table."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts
+        from cli.formatting import bold, section_header
+        if not require_data():
+            return
+        data = get_alerts()
+        section_header('Build Report: {}'.format(cfg.APPLICATION_NAME))
+        print()
+        builds = data.get('build_failures', [])
+        if not builds:
+            print('  No build failures')
+        for f in builds:
+            comp = f.get('component', '?')
+            err = f.get('error_type', '')
+            print('  {} — {}'.format(bold(comp), err))
+        print()
+        return
     _bash_fallback(['report', 'build'] + list(args))
 
 
@@ -2282,6 +2423,12 @@ def report_build(args):
 @click.argument('args', nargs=-1)
 def report_conforma(args):
     """Daily Conforma violations report."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from click import get_current_context
+        ctx = get_current_context()
+        ctx.invoke(conforma_report)
+        return
     _bash_fallback(['conforma', 'report'] + list(args))
 
 
@@ -2373,7 +2520,11 @@ def health_warnings():
 def jira(ctx):
     """Jira ticket commands."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['jira'])
+        from cli import ic_config
+        if ic_config.get_mode() == 'cluster':
+            ctx.invoke(jira_status)
+        else:
+            _bash_fallback(['jira'])
 
 
 @jira.command('create')
@@ -2400,6 +2551,27 @@ def jira_link(args):
 @jira.command('status')
 def jira_status():
     """Show Jira ticket links."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.data import require_data, get_alerts
+        from cli.formatting import bold, cyan, dim, section_header
+        if not require_data():
+            return
+        data = get_alerts()
+        all_items = data.get('build_failures', []) + data.get('conforma_violations', [])
+        section_header('Jira Status')
+        print()
+        has_jira = False
+        for item in all_items:
+            jira = item.get('jira_key')
+            if jira:
+                has_jira = True
+                comp = item.get('component', '?')
+                print('  {} → {}'.format(bold(comp), cyan(jira)))
+        if not has_jira:
+            print(dim('  No Jira tickets linked'))
+        print()
+        return
     _bash_fallback(['jira', 'status'])
 
 
@@ -2410,7 +2582,11 @@ def jira_status():
 def patterns(ctx):
     """Error pattern commands."""
     if ctx.invoked_subcommand is None:
-        _bash_fallback(['patterns'])
+        from cli import ic_config
+        if ic_config.get_mode() == 'cluster':
+            ctx.invoke(patterns_list)
+        else:
+            _bash_fallback(['patterns'])
 
 
 @patterns.command('learn')
@@ -2459,6 +2635,26 @@ def patterns_stale():
 @patterns.command('shared')
 def patterns_shared():
     """Shared patterns across components."""
+    from cli import ic_config
+    if ic_config.get_mode() == 'cluster':
+        from cli.api_client import get_client
+        from cli.data import require_data
+        from cli.formatting import bold, section_header
+        if not require_data():
+            return
+        data = get_client().get('/api/v1/patterns') or []
+        shared = [p for p in data if (p.get('occurrence_count') or 0) > 1]
+        section_header('Shared Patterns (seen in multiple failures)')
+        print()
+        if not shared:
+            print('  No shared patterns found')
+        for p in shared:
+            print('  {} — {} ({} occurrences)'.format(
+                bold(p.get('pattern_name', '?')),
+                p.get('failure_category', ''),
+                p.get('occurrence_count', 0)))
+        print()
+        return
     _bash_fallback(['patterns', 'shared'])
 
 
