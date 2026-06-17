@@ -86,8 +86,20 @@ def get_component(ctx, name, output_json):
         if is_json:
             print(json_mod.dumps({"error": "Component not found", "component": name}))
         else:
-            from cli.formatting import red
+            from cli.formatting import cyan, red
             print(red('Error: Component not found: {}'.format(name)))
+            from cli.suggest import format_suggestion
+            from cli.data import get_alerts
+            try:
+                alerts = get_alerts()
+                all_comps = [f.get('component', '') for f in
+                             alerts.get('build_failures', []) + alerts.get('conforma_violations', [])]
+                hint = format_suggestion(name, all_comps)
+                if hint:
+                    print('  {}'.format(hint))
+            except Exception:
+                pass
+            print('  Run {} to see current components'.format(cyan('ic get alerts')))
         raise SystemExit(1)
     if is_json:
         print(json_mod.dumps({"component": name, **summary}, default=str))
