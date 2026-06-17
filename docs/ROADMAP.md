@@ -174,12 +174,21 @@ Goal: all CLI commands work identically in local and cluster mode.
 
 ## Phase 8: CI/CD Pipeline
 
-Goal: automated image builds and deployments.
+Goal: automated image builds and deployments + consistency enforcement.
 
-- [ ] GitHub Actions or Tekton pipeline: build + push image on merge to develop
+**8a — Automated builds**
+- [ ] GitHub Actions: build + push image on merge to develop
 - [ ] ArgoCD auto-sync from deploy repo
 - [ ] Kustomize overlays for dev/staging/prod
 - [ ] Vault integration: replace manual secrets with VaultStaticSecret CRs
+- [ ] Auto-publish to PyPI on version tag
+
+**8b — Consistency enforcement (CI checks)**
+- [ ] MCP-API-CLI parity check: every API endpoint has an MCP tool and CLI command
+- [ ] Documentation sync: verify tool count, test count, env vars in README match reality
+- [ ] STYLE.md compliance as CI check (not just pre-commit)
+- [ ] Integration test suite runs against staging cluster on merge
+- [ ] Auto-update README numbers (tools, tests) on CI pass
 
 ---
 
