@@ -1144,17 +1144,17 @@ def config_use_cluster(api_url, api_key, no_verify_tls):
 
 @config.command('use-local')
 def config_use_local():
-    """Switch to local database mode."""
+    """Switch to local mode (API on localhost:8000)."""
     from cli import ic_config
-    from cli.formatting import cyan, green
+    from cli.formatting import dim, green, yellow
     ic_config.set_mode('local')
     print(green('✓ Mode: local'))
-    from cli.db import check_db
-    if check_db():
-        print('  Database: {}'.format(cyan('connected')))
+    from cli.mode import has_api
+    if has_api():
+        print('  API: {}'.format(green('localhost:8000 (running)')))
     else:
-        from cli.formatting import yellow
-        print('  Database: {}'.format(yellow('not running')))
+        print('  API: {}'.format(yellow('localhost:8000 (not running)')))
+        print('  {}'.format(dim("Start with: task serve")))
 
 
 # --- watch group ---
@@ -1243,9 +1243,10 @@ def config_watch_list():
         apps = get_watched_applications()
     else:
         apps = os.environ.get('WATCH_APPLICATIONS', '').split()
-        if not apps:
-            fallback = os.environ.get('APPLICATION_NAME', '')
-            apps = [fallback] if fallback else []
+
+    if not apps:
+        fallback = os.environ.get('APPLICATION_NAME', '')
+        apps = [fallback] if fallback else []
 
     from config import ALL_WATCHERS
 
