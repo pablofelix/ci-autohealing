@@ -37,6 +37,8 @@ def _konflux_url(pr_name: str) -> str:
 @router.get("/applications/{application}/alerts", response_model=AlertsSummary)
 def list_alerts(application: str):
     """All unresolved alerts (build failures + Conforma violations)."""
+    from api.validators import validate_application_name
+    application = validate_application_name(application)
     triage = _build_repo().get_triage_summary(application)
     build_failures = []
     for comp in triage.get('failing_components', []):
@@ -157,7 +159,9 @@ def get_failure(
     """Full build failure details for a component."""
     row = _build_repo().get_failure_details(component, application)
     if not row:
-        return None
+        from api.errors import not_found
+        not_found('Component', component,
+                  suggestion="Run 'ic get alerts' to see current failures")
 
     konflux = row.get('konflux_url') or _konflux_url(row.get('pipelinerun_name', ''))
     logs = row.get('build_logs') if include_logs else None

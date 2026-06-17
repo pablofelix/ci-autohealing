@@ -58,7 +58,9 @@ def get_violation(component: str, application: str, include_details: bool = True
     """Full Conforma policy violation details."""
     row = _conforma_repo().get_violation_details(component, application)
     if not row:
-        return None
+        from api.errors import not_found
+        not_found('Conforma violation', component,
+                  suggestion="Run 'ic get conforma' to see current violations")
 
     details = row.get('violation_details') if include_details else None
     konflux = _konflux_url(row.get('pipelinerun_name', ''))
