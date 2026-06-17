@@ -45,13 +45,11 @@ def get(ctx, output_json):
 def get_components(ctx, refresh, output_json):
     """List currently failing components."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_failures
+    if ensure_cluster():
+        from cli.data import get_failures
         from cli.formatting import bold, green, red, section_header
-        if not require_data():
-            return
         data = get_failures()
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -82,16 +80,26 @@ def get_components(ctx, refresh, output_json):
 def get_component(ctx, name, output_json):
     """Get component summary."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.data import require_data, get_component_summary
-    if not require_data():
-        return
+    from cli.data import get_component_summary
     summary = get_component_summary(name)
     if not summary:
         if is_json:
             print(json_mod.dumps({"error": "Component not found", "component": name}))
         else:
-            from cli.formatting import red
+            from cli.formatting import cyan, red
             print(red('Error: Component not found: {}'.format(name)))
+            from cli.suggest import format_suggestion
+            from cli.data import get_alerts
+            try:
+                alerts = get_alerts()
+                all_comps = [f.get('component', '') for f in
+                             alerts.get('build_failures', []) + alerts.get('conforma_violations', [])]
+                hint = format_suggestion(name, all_comps)
+                if hint:
+                    print('  {}'.format(hint))
+            except Exception:
+                pass
+            print('  Run {} to see current components'.format(cyan('ic get alerts')))
         raise SystemExit(1)
     if is_json:
         print(json_mod.dumps({"component": name, **summary}, default=str))
@@ -120,14 +128,12 @@ def get_component(ctx, name, output_json):
 def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
     """Unified view: build failures + Conforma violations."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
 
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_alerts as _get_alerts
+    if ensure_cluster():
+        from cli.data import get_alerts as _get_alerts
         from cli.formatting import bold, dim, green, red, section_header, yellow
-        if not require_data():
-            return
         data = _get_alerts()
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -233,13 +239,11 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 def get_conforma(ctx, filter, output_json):
     """Conforma test failures."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_conforma_violations
+    if ensure_cluster():
+        from cli.data import get_conforma_violations
         from cli.formatting import bold, dim, green, red, section_header
-        if not require_data():
-            return
         data = get_conforma_violations()
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -312,13 +316,11 @@ def get_policy_gap(ctx, output_json):
 def get_pipelineruns(ctx, limit, output_json):
     """List PipelineRun failures."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_failures
+    if ensure_cluster():
+        from cli.data import get_failures
         from cli.formatting import bold, dim, section_header
-        if not require_data():
-            return
         data = get_failures()
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -348,12 +350,10 @@ def get_pipelineruns(ctx, limit, output_json):
 def get_pipelinerun(ctx, name, output_json):
     """Get PipelineRun details."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_failure_details
-        if not require_data():
-            return
+    if ensure_cluster():
+        from cli.data import get_failure_details
         data = get_failure_details(name)
         if is_json or data:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -372,11 +372,9 @@ def get_pipelinerun(ctx, name, output_json):
 def get_apps(ctx, output_json):
     """List available RHOAI applications."""
     is_json = output_json or ctx.obj.get('json')
-    from cli.data import require_data, get_applications
-    from cli import ic_config
-    if not require_data():
-        return
-    if ic_config.get_mode() == 'cluster':
+    from cli.data import get_applications
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
         app_list = get_applications()
         apps = [a.get('name', a.get('application', '')) for a in app_list]
         app_counts = {a.get('name', a.get('application', '')): a.get('failure_count', a.get('count', 0)) for a in app_list}
@@ -450,13 +448,11 @@ def get_apps(ctx, output_json):
 def get_releases(ctx, stage, prod, limit, output_json, name):
     """List Release CRs."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_schedule
+    if ensure_cluster():
+        from cli.data import get_schedule
         from cli.formatting import green, section_header, yellow
-        if not require_data():
-            return
         schedule = get_schedule()
         if is_json:
             print(json_mod.dumps(schedule, indent=2, default=str))
@@ -500,13 +496,11 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
 def get_jira(ctx, component, output_json):
     """Show Jira ticket links."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_alerts
+    if ensure_cluster():
+        from cli.data import get_alerts
         from cli.formatting import bold, cyan, section_header
-        if not require_data():
-            return
         data = get_alerts()
         all_items = data.get('build_failures', []) + data.get('conforma_violations', [])
         jira_items = [i for i in all_items if i.get('jira_key')]
@@ -538,13 +532,11 @@ def get_jira(ctx, component, output_json):
 def get_fixes(ctx, show_all, output_json, component):
     """List fix attempts."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_fixes as _get_fixes
+    if ensure_cluster():
+        from cli.data import get_fixes as _get_fixes
         from cli.formatting import bold, dim, green, red, section_header
-        if not require_data():
-            return
         data = _get_fixes(show_all=show_all)
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -730,13 +722,11 @@ def describe(ctx, output_json):
 def describe_component(ctx, name, log, output_json):
     """Full component details + logs."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_failure_details
+    if ensure_cluster():
+        from cli.data import get_failure_details
         from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
-        if not require_data():
-            return
         data = get_failure_details(name)
         if not data:
             print(red('Component not found: ') + cyan(name))
@@ -843,13 +833,11 @@ def describe_component(ctx, name, log, output_json):
 def describe_conforma(ctx, name, output_json):
     """Conforma violation details."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_conforma_details
+    if ensure_cluster():
+        from cli.data import get_conforma_details
         from cli.formatting import bold, red, section_header
-        if not require_data():
-            return
         data = get_conforma_details(name)
         if not data:
             print(red('Conforma violation not found: ') + name)
@@ -886,13 +874,11 @@ def describe_conforma(ctx, name, output_json):
 def describe_pipelinerun(ctx, name, output_json):
     """Full PipelineRun details + logs."""
     import json as json_mod
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_failure_details
+    if ensure_cluster():
+        from cli.data import get_failure_details
         from cli.formatting import section_header
-        if not require_data():
-            return
         data = get_failure_details(name)
         if is_json or not data:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -1157,10 +1143,10 @@ def config_watch(ctx):
 @config_watch.command('list')
 def config_watch_list():
     """Show watched applications and watcher status."""
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     from cli.formatting import bold, cyan, dim, green, red
 
-    if ic_config.get_mode() == 'cluster':
+    if ensure_cluster():
         from cli.data import get_watched_applications
         apps = get_watched_applications()
     else:
@@ -1214,10 +1200,10 @@ def config_watch_list():
 @click.option('--force', '-f', is_flag=True, help='Add even if not in DB')
 def config_watch_add(app_name, force):
     """Add application to watch list."""
-    from cli import ic_config
+    from cli.mode import ensure_cluster
     from cli.formatting import cyan, green, yellow
 
-    if ic_config.get_mode() == 'cluster':
+    if ensure_cluster():
         from cli.data import add_watched_application
         apps = add_watched_application(app_name)
         if apps is not None:
@@ -1350,12 +1336,10 @@ def _update_env_var(var_name, value):
 def stats(ctx):
     """Statistics."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
+        from cli.mode import ensure_cluster
         from cli.formatting import section_header
-        if ic_config.get_mode() == 'cluster':
-            from cli.data import require_data, get_overview_stats
-            if not require_data():
-                return
+        if ensure_cluster():
+            from cli.data import get_overview_stats
             s = get_overview_stats()
             section_header('Statistics')
             print()
@@ -1425,8 +1409,8 @@ def stats_components():
 def ai(ctx):
     """AI analysis commands."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
-        if ic_config.get_mode() == 'cluster':
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
             ctx.invoke(ai_status)
         else:
             _bash_fallback(['ai'])
@@ -1449,12 +1433,10 @@ def ai_batch(args):
 @ai.command('status')
 def ai_status():
     """Show AI analysis summary."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_overview_stats
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_overview_stats
         from cli.formatting import bold, cyan, green, section_header
-        if not require_data():
-            return
         data = get_overview_stats()
         section_header('AI Analysis Status')
         print()
@@ -1934,17 +1916,14 @@ def nightly(ctx, application, output_json):
 def nightly_history(ctx, application, days, output_json):
     """Nightly build history: operator builds + FBC fragment freshness."""
     import json as json_mod
-    from cli.data import require_data
     from cli.formatting import bold, dim, green, red, section_header, yellow
 
     output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
     app = application or cfg.APPLICATION_NAME
 
-    if not require_data():
-        return
 
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
         from cli.api_client import get_client
         data = get_client().get('/api/v1/applications/{}/nightly/history'.format(app),
                                 params={'days': days})
@@ -2193,11 +2172,9 @@ def fix(args):
 def export_cmd(args):
     """Export analysis to ticket format (e.g. ic export component-name slack)."""
     import json as json_mod
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster' and len(args) >= 1:
-        from cli.data import require_data, get_export
-        if not require_data():
-            return
+    from cli.mode import ensure_cluster
+    if ensure_cluster() and len(args) >= 1:
+        from cli.data import get_export
         component = args[0]
         fmt = args[1] if len(args) > 1 else 'slack'
         data = get_export(component, fmt)
@@ -2219,8 +2196,8 @@ def export_cmd(args):
 def conforma(ctx):
     """Conforma (Enterprise Contract) commands."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
-        if ic_config.get_mode() == 'cluster':
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
             ctx.invoke(conforma_report)
         else:
             _bash_fallback(['conforma'])
@@ -2231,12 +2208,10 @@ def conforma(ctx):
 def conforma_report(args):
     """Daily Conforma violations report."""
     import json as json_mod
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_conforma_report
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_conforma_report
         from cli.formatting import dim, red, section_header, yellow
-        if not require_data():
-            return
         data = get_conforma_report()
         if isinstance(data, str):
             print(data)
@@ -2264,12 +2239,10 @@ def conforma_report(args):
 @click.argument('args', nargs=-1)
 def conforma_categories(args):
     """Violation categories across components."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_conforma_violations
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_conforma_violations
         from cli.formatting import bold, section_header
-        if not require_data():
-            return
         data = get_conforma_violations()
         categories = {}
         if isinstance(data, list):
@@ -2289,11 +2262,9 @@ def conforma_categories(args):
 @click.argument('args', nargs=-1)
 def conforma_csv(args):
     """Export Conforma data as CSV."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_conforma_violations
-        if not require_data():
-            return
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_conforma_violations
         data = get_conforma_violations()
         print('component,violations,warnings,scenario,first_seen')
         if isinstance(data, list):
@@ -2331,8 +2302,8 @@ def conforma_scenarios(args):
 def release(ctx):
     """Release commands."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
-        if ic_config.get_mode() == 'cluster':
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
             ctx.invoke(release_status)
         else:
             _bash_fallback(['release'])
@@ -2342,13 +2313,10 @@ def release(ctx):
 @click.argument('args', nargs=-1)
 def release_status(args):
     """Release process checklist."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
         from cli.api_client import get_client
         from cli.formatting import green, red, section_header
-        if not require_data():
-            return
         app = cfg.APPLICATION_NAME
         data = get_client().get('/api/v1/applications/{}/readiness'.format(app))
         if not data:
@@ -2398,12 +2366,10 @@ def report():
 @click.argument('args', nargs=-1)
 def report_build(args):
     """Daily build failures standup table."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_alerts
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_alerts
         from cli.formatting import bold, section_header
-        if not require_data():
-            return
         data = get_alerts()
         section_header('Build Report: {}'.format(cfg.APPLICATION_NAME))
         print()
@@ -2423,8 +2389,8 @@ def report_build(args):
 @click.argument('args', nargs=-1)
 def report_conforma(args):
     """Daily Conforma violations report."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
         from click import get_current_context
         ctx = get_current_context()
         ctx.invoke(conforma_report)
@@ -2520,8 +2486,8 @@ def health_warnings():
 def jira(ctx):
     """Jira ticket commands."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
-        if ic_config.get_mode() == 'cluster':
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
             ctx.invoke(jira_status)
         else:
             _bash_fallback(['jira'])
@@ -2551,12 +2517,10 @@ def jira_link(args):
 @jira.command('status')
 def jira_status():
     """Show Jira ticket links."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_alerts
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
+        from cli.data import get_alerts
         from cli.formatting import bold, cyan, dim, section_header
-        if not require_data():
-            return
         data = get_alerts()
         all_items = data.get('build_failures', []) + data.get('conforma_violations', [])
         section_header('Jira Status')
@@ -2582,8 +2546,8 @@ def jira_status():
 def patterns(ctx):
     """Error pattern commands."""
     if ctx.invoked_subcommand is None:
-        from cli import ic_config
-        if ic_config.get_mode() == 'cluster':
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
             ctx.invoke(patterns_list)
         else:
             _bash_fallback(['patterns'])
@@ -2635,13 +2599,10 @@ def patterns_stale():
 @patterns.command('shared')
 def patterns_shared():
     """Shared patterns across components."""
-    from cli import ic_config
-    if ic_config.get_mode() == 'cluster':
+    from cli.mode import ensure_cluster
+    if ensure_cluster():
         from cli.api_client import get_client
-        from cli.data import require_data
         from cli.formatting import bold, section_header
-        if not require_data():
-            return
         data = get_client().get('/api/v1/patterns') or []
         shared = [p for p in data if (p.get('occurrence_count') or 0) > 1]
         section_header('Shared Patterns (seen in multiple failures)')
