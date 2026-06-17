@@ -50,6 +50,10 @@ def setup_rate_limiter(app):
         is_write = request.method in _WRITE_METHODS
 
         if not _limiter.is_allowed(key, is_write=is_write):
+            import logging
+            logging.getLogger('api.rate_limit').warning(
+                "Rate limit hit: key=%s method=%s path=%s",
+                key, request.method, request.url.path)
             return JSONResponse(
                 status_code=429,
                 content={
