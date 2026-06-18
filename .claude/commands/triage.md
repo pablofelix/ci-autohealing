@@ -13,20 +13,16 @@ The working directory is: .
 
 ### Always start by showing the triage dashboard:
 
-```bash
-./ic triage show 2>/dev/null
-```
+Use MCP tools first, fall back to CLI:
+
+1. **Preferred**: Call `mcp__ic__list_alerts()` and `mcp__ic__get_triage()` for structured data
+2. **Fallback**: `ic triage show 2>/dev/null` and `ic get alerts 2>/dev/null`
 
 This shows tracked items, untracked failures, and the overall triage state. Present this to the user first.
 
 ### If a specific component was provided as `$ARGUMENTS`:
 
-Auto-detect the failure type by running:
-```bash
-./ic get alerts 2>/dev/null
-```
-
-Check whether the component appears in the build failures or conforma violations section, then follow the corresponding workflow:
+Auto-detect the failure type from the alerts data:
 - Build failure → follow the /triage-build workflow for that component
 - Conforma violation → follow the /triage-conforma workflow for that component
 - Both → handle build first, then conforma
@@ -45,4 +41,11 @@ Options:
 - Build triage: follow the exact steps in /triage-build
 - Conforma triage: follow the exact steps in /triage-conforma
 
-Both workflows integrate `ic triage` tracking to maintain state across sessions.
+**CRITICAL**: ALL failures/violations MUST be tracked via `ic triage track` or `mcp__ic__track_triage_item()`. After any action (Jira, Slack, fix), update the triage item. This maintains state across sessions.
+
+### Notes
+
+- Works in both local mode and cluster mode (`ic config use-cluster`)
+- Use MCP tools (`mcp__ic__*`) when available — structured data, no ANSI parsing
+- AI analysis runs locally using your Vertex AI credentials even in cluster mode
+- Use `ic` (not `./ic`) — the CLI is installed via PyPI or available at project root

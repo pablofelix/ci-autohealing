@@ -11,7 +11,7 @@ CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and poli
 - Uses AI to classify failures and recommend fixes
 - Generates fix PRs autonomously for high-confidence failures
 - Stores structured data in PostgreSQL, offloading large blobs (build logs, commit context, violation details) to external storage (local filesystem or MinIO/S3)
-- Powers the `ic` CLI, MCP server (40+ tools), and REST API
+- Powers the `ic` CLI, MCP server (50+ tools), and REST API
 
 **Data sources:**
 - **KubeArchive** — Archived Kubernetes resources (primary)
@@ -31,7 +31,7 @@ CI AutoHealing monitors Konflux CI/CD pipelines, detects build failures and poli
                              │ MCP (stdio / SSE)
 ┌────────────────────────────▼─────────────────────────────────────┐
 │  Interfaces                                                      │
-│  CLI (ic) · MCP Server (40+ tools) · REST API (FastAPI)         │
+│  CLI (ic) · MCP Server (50+ tools) · REST API (FastAPI)         │
 │  All share the same repository layer — zero duplication          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
@@ -223,7 +223,7 @@ Autonomous fix generation with safety gates.
 
 **CLI (`ic`)** — Bash wrapper delegating to Python Click CLI. Context-aware via `.env`.
 
-**MCP Server** (FastMCP, 40+ tools):
+**MCP Server** (FastMCP, 50+ tools):
 - Transports: stdio (Claude Code) and SSE (remote agents)
 - Each tool accepts `application` parameter for multi-version queries
 - Includes skill registry tools: `list_skills`, `get_skill_info`, `list_skill_sources`
