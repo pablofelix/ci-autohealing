@@ -9,208 +9,139 @@ Usage: /triage-build [component-name]
 
 ## Instructions
 
-You are triaging Konflux CI/CD **build failures** for the RHOAI project. Your primary goal is to **find the root cause and solution** for each failure, not just classify them. Use the `ic` CLI tool for ALL data — never hardcode or guess failure data.
+You are triaging Konflux CI/CD **build failures** for the RHOAI project. Your primary goal is to **find the root cause and solution** for each failure, not just classify them.
+
+Use MCP tools (`mcp__ic__*`) for structured data, CLI (`ic`) as fallback. Works in both local and cluster mode.
 
 The working directory is: .
 
 ### Step 1: Check triage state and scan alerts
 
-Start by checking what's already tracked and what the current alert landscape looks like.
+**Using MCP tools (preferred):**
+- `mcp__ic__list_alerts()` — all current failures and violations
+- `mcp__ic__get_triage()` — tracked triage items
 
-Run these commands in parallel:
-
+**Using CLI (fallback):**
 ```bash
-./ic triage show 2>/dev/null
+ic triage show 2>/dev/null
+ic get alerts 2>/dev/null
+ic get alerts --group 2>/dev/null
 ```
 
-```bash
-./ic get alerts 2>/dev/null
-```
-
-```bash
-./ic get alerts --group 2>/dev/null
-```
-
-If the user provided a specific component as `$ARGUMENTS`, skip the full scan and go directly to Step 2 for that component only.
-
-From the output:
-- **Already tracked**: which failures have triage items with Jira/Slack/PR links
-- **Untracked**: which build failures don't have triage items yet
-- Root cause groups (which failures share the same failed step / error type)
-- In-progress builds (components currently building)
+If the user provided a specific component as `$ARGUMENTS`, skip the full scan and go directly to Step 2.
 
 Present a brief summary:
 ```
 ## Current Build Failures
 - X build failures (Y already tracked, Z untracked)
-- N root cause groups (list the groups briefly)
+- N root cause groups
 - Tracked items: [list with Jira keys if any]
 ```
 
-### Step 2: Investigate each build failure in depth
+### Step 2: Investigate each build failure
 
-For each build failure, gather data using ALL relevant `ic` commands. Run them in parallel where possible. The goal is to understand the failure deeply enough to suggest a concrete fix.
+**Using MCP tools (preferred):**
+- `mcp__ic__get_failure(component=<name>)` — full details + logs + commit context
+- `mcp__ic__get_component_history(component=<name>)` — build history timeline
 
-**Core investigation commands (run for every failure):**
-
+**Using CLI (fallback):**
 ```bash
-./ic <N> 2>/dev/null                          # Full component details + build history + logs
-./ic history <component-name> 2>/dev/null     # Full build history (when did it start failing? was it ever green?)
+ic describe component <name> 2>/dev/null
+ic describe component <name> --log 2>/dev/null
 ```
 
-**Key data to extract per failure:**
-- Failed step (e.g., init-task, fips-check, build-images)
-- Error message from logs
-- How long it's been failing (build history timeline — is this new or chronic?)
-- Whether it was ever green (important for new components vs regressions)
-- Whether AI analysis exists
-- Whether it already has a Jira ticket (check triage items from Step 1)
-- What commit triggered the failure (look at the commit message for clues)
+**Key data to extract:**
+- Failed step and error message (logs are auto-filtered to show error context)
+- Build history — new failure or chronic?
+- AI analysis status
+- Jira ticket linked?
+- Triggering commit
 
-**When you need more detail on the error:**
+### Step 3: Run AI analysis for EVERY failure without it
+
+**For individual failures:**
 ```bash
-./ic describe component <name> --log 2>/dev/null   # Complete logs (not just error context)
+ic ai analyze component <name> 2>/dev/null
 ```
 
-### Step 3: Run AI analysis for EVERY failure that doesn't have it
-
-This is critical — don't just note "AI analysis not available" and move on. Proactively generate analysis.
-
-First, check what analysis already exists:
+**For all pending at once:**
 ```bash
-./ic ai status 2>/dev/null
+ic ai batch 2>/dev/null
 ```
 
-**For each failure WITHOUT analysis — run it immediately:**
-```bash
-./ic ai analyze <component-name> 2>/dev/null
-```
+In cluster mode, the LLM runs locally using your Vertex AI credentials. Results upload to the cluster automatically.
 
-Run multiple `ic ai analyze` calls in parallel for different components to save time.
+Run multiple `ic ai analyze` in parallel for different components.
 
-**For failures that have AI analysis, query the details:**
-Call `mcp__ic__get_analysis(component=<component>)` to get the full AI analysis including category, confidence, root_cause, recommended_fix, and can_auto_fix. Or via CLI:
-```bash
-./ic why <component-name> 2>/dev/null
-```
+**Check existing analysis:**
+- MCP: `mcp__ic__get_analysis(component=<name>)`
+- CLI: `ic ai status 2>/dev/null`
 
-**For failures without logs:** Try to fetch them on-demand first:
-```bash
-cd src && python3 fetch_logs.py <pipelinerun-name> 2>/dev/null
-```
-Then run AI analysis. Only skip if log fetching also fails.
+### Step 4: Synthesize solutions
 
-### Step 4: Synthesize the solution for each failure
+For each failure, combine all evidence:
+1. **Root cause** — what is broken and why
+2. **Solution** — concrete fix steps
+3. **Confidence** — AI confidence score
+4. **Owner** — infra / code / config issue
 
-For each failure, combine all the evidence (logs, AI analysis, build history, commit info) to produce:
+Group failures by shared root cause.
 
-1. **Root cause** — What specifically is broken and why
-2. **Solution** — Concrete steps to fix it (not just "investigate further")
-3. **Confidence** — How sure are we about this diagnosis
-4. **Who should fix it** — Is this an infra issue, a code issue, or a config issue?
-
-Group failures by shared root cause — don't repeat the same analysis 5 times for 5 components with the same fips-check failure.
-
-### Step 5: Present the assessment
-
-Show a summary table:
+### Step 5: Present assessment
 
 ```
 ## Build Triage Assessment
 
 | # | Component | Failed Step | Root Cause | AI Conf. | Tracked | Solution |
 |---|-----------|-------------|------------|----------|---------|----------|
-| 1 | comp-a    | init-task   | SA missing | 90%      | #3      | Create SA in namespace |
-| 2 | comp-b    | fips-check  | base image | 85%      | —       | Update base image digest |
-| ...
+| 1 | comp-a    | init-task   | SA missing | 90%      | #3      | Create SA |
+| 2 | comp-b    | build-images| dep issue  | 85%      | —       | Add to prefetch |
 ```
 
-The "Tracked" column shows the triage item ID if the failure is already being tracked, or "—" if untracked.
-
-Then for each failure (or group), provide a **detailed diagnosis**:
-- What the root cause is (with evidence from logs/AI)
-- What the concrete fix would be
-- Whether this is a regression (it used to work) or a new component issue
-- Whether a retry/retrigger might fix it (transient vs persistent)
+Detailed diagnosis per failure or group.
 
 ### Step 6: Track untracked failures
 
-For any failures not yet tracked in triage, track them now:
+**MCP:** `mcp__ic__track_triage_item(component=<name>, group_label="label", root_cause="cause")`
 
+**CLI:**
 ```bash
-./ic triage track <component> --group "root cause label" --cause "root cause description" --step "failed-step" 2>/dev/null
-```
-
-If multiple components share the same root cause, track the first one and add the rest to the same item:
-
-```bash
-./ic triage track <first-component> --group "shared label" --cause "description" 2>/dev/null
-./ic triage track <second-component> --add-to <item-id> 2>/dev/null
+ic triage track <component> --group "label" --cause "description" 2>/dev/null
+ic triage track <second-comp> --add-to <item-id> 2>/dev/null
 ```
 
 ### Step 7: Ask user what to do
 
-Use AskUserQuestion to ask the user what actions to take. Group related failures when they share a root cause.
+For each actionable failure:
+- **Create Jira ticket** — `ic export <component> jira`
+- **Send Slack message** — `ic export <component> slack`
+- **Auto-fix PR** — `ic fix <component> --execute` (high confidence only)
+- **Retrigger build** — if transient issue
+- **Skip**
 
-For each actionable failure (or group), present these options:
-- **Create Jira ticket** — generate with `ic export <component> jira`
-- **Send Slack message** — generate with `ic export <component> slack`
-- **Retrigger build** — suggest user retriggers if analysis indicates transient issue
-- **Skip** — move on
+Show-then-confirm: generate content, show to user, ask approval before sending.
 
-**Show-then-confirm pattern for Jira and Slack:**
+**After ANY action, update the triage item:**
 
-When the user selects "Create Jira ticket" or "Send Slack message":
-1. Generate: `./ic export <component> jira` (or `slack`)
-2. Show the full generated message to the user
-3. Ask: "Send as-is", "Edit the message", or "Cancel"
-4. If edit: ask what to change, apply, show again, re-ask
-5. If send: show the formatted content for the user to copy
+**MCP:** `mcp__ic__update_triage_item(item_id=<id>, jira_key="RHOAIENG-XXXXX")`
 
-**After creating Jira or Slack messages, update the triage item:**
-
+**CLI:**
 ```bash
-./ic triage update <item-id> --jira RHOAIENG-XXXXX 2>/dev/null
-./ic triage update <item-id> --slack "https://slack-thread-url" 2>/dev/null
+ic triage update <id> --jira RHOAIENG-XXXXX 2>/dev/null
+ic triage update <id> --slack "https://..." 2>/dev/null
 ```
 
 ### Step 8: Summary
 
-After processing all failures, show a combined view using triage report:
-
 ```bash
-./ic triage report 2>/dev/null
-```
-
-Then summarize:
-
-```
-## Build Triage Complete
-
-Diagnosed:
-- Group A (fips-check, 5 components): [root cause + solution] — Triage #N
-- Group B (build-images, 1 component): [root cause + solution] — Triage #M
-
-Actions taken:
-- Jira content generated for: comp-a (RHOAIENG-XXXXX), comp-b (RHOAIENG-YYYYY)
-- Slack messages generated for: comp-c
-- Triage items created: #N, #M
-
-Still pending:
-- comp-e: needs manual investigation (reason) — Triage #P
-
-Next steps:
-- [Specific actionable items based on the diagnosis]
+ic triage report 2>/dev/null
 ```
 
 ## Notes
 
-- ALL failure data must come from `ic` commands — never hardcode or invent data
-- Do NOT create PRs or send Jira tickets automatically — always show and let user decide
-- The goal is to FIND THE SOLUTION, not just classify failures
-- Run `ic ai analyze` proactively for any failure missing analysis — don't just report it's missing
-- When multiple failures share a root cause, investigate one deeply and apply findings to the group
-- Use `ic history <component>` to understand whether this is a regression or a chronic issue
-- Use the AI analysis `recommended_fix` field — it often contains the specific fix steps
-- ALWAYS track failures in `ic triage` — this is how we maintain state across sessions
-- Update triage items with Jira keys and Slack URLs as you create them
+- ALL data from `ic` / MCP tools — never invent data
+- Do NOT auto-send Jira/Slack — show and let user decide
+- Run `ic ai analyze` proactively — don't just report it's missing
+- Logs are auto-filtered by error patterns — `--log` for full output
+- AI analysis in cluster mode: LLM local, results to cluster
+- ALWAYS track failures in `ic triage`

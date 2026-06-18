@@ -115,6 +115,9 @@ OUTPUT_HELP=$(cat <<ENDOFOUTPUT
     ${CYAN}export${NC} <N> <format>  Export failure as Jira/Slack/markdown/json
     ${CYAN}fix${NC} <N>              Interactive triage: analyze → PR, Jira, or Slack
     ${CYAN}dashboard${NC}            Operational dashboard with metrics
+    ${CYAN}triage${NC} <action>       Persistent triage tracking across sessions
+    ${CYAN}skills${NC} <action>       Skill execution with sandbox isolation
+    ${CYAN}config${NC} <action>       Mode switching (local/cluster), watched apps
 ENDOFOUTPUT
 )
 
@@ -357,6 +360,12 @@ OUTPUT_FIX=$(cat <<ENDOFOUTPUT
 
   ${GREEN}✓ Slack message sent to #acme-ci-alerts${NC}
     Includes: error details, AI root cause, Jira link PROJECT-39812
+
+  ${GREEN}✓ Triage item #12 created${NC}
+    Component: acme-api-registry-sync-v3-5-ea-1
+    Group: dependency_issue
+    Jira: PROJECT-39812
+    Slack: #acme-ci-alerts thread
 ENDOFOUTPUT
 )
 
@@ -608,6 +617,8 @@ intro_what_is_ic() {
     echo ""
     echo -e "  ${BOLD}ic${NC} is a kubectl-style CLI for monitoring Konflux CI/CD pipelines."
     echo ""
+    narrate "Install: ${CYAN}pip install ic-tool${NC} — works anywhere with Python 3.9+"
+    echo ""
     narrate "It tracks three things:"
     echo -e "    ${RED}•${NC} ${BOLD}Build failures${NC}    — why did the container image fail to build?"
     echo -e "    ${YELLOW}•${NC} ${BOLD}Conforma${NC}          — supply-chain security policy violations"
@@ -615,10 +626,13 @@ intro_what_is_ic() {
     echo ""
     narrate "And it can ${BOLD}act on them${NC}:"
     echo -e "    ${CYAN}•${NC} AI reads build logs and ${BOLD}identifies the root cause${NC}"
+    echo -e "    ${CYAN}•${NC} Executes ${BOLD}remediation skills${NC} in sandboxed environments"
     echo -e "    ${CYAN}•${NC} Generates ${BOLD}PR fixes${NC} automatically for known patterns"
     echo -e "    ${CYAN}•${NC} Creates ${BOLD}Jira tickets${NC} and ${BOLD}Slack alerts${NC} with full context"
+    echo -e "    ${CYAN}•${NC} ${BOLD}Tracks triage state${NC} across sessions with persistent items"
     echo ""
-    narrate "Three access modes: CLI, MCP server (for Claude), REST API."
+    narrate "Three access modes: CLI, MCP server (50+ tools), REST API."
+    narrate "Two deploy modes: ${CYAN}ic config use-local${NC} / ${CYAN}ic config use-cluster <url>${NC}"
     advance 6
 
     callout "Let's start with the command overview:"
@@ -701,9 +715,10 @@ build_fix() {
     echo ""
     type_cmd "ic fix acme-api-registry-sync-v3-5-ea-1"
     show_output "$OUTPUT_FIX"
-    callout "One command: triage → Jira ticket → Slack notification."
+    callout "One command: triage → Jira ticket → Slack notification → tracked."
     narrate "The ticket includes AI root cause, build logs, commit info, and links."
     narrate "The Slack message links back to the Jira ticket."
+    narrate "Everything is tracked in ${CYAN}ic triage${NC} — persists across sessions."
     advance 8
 }
 
@@ -814,24 +829,146 @@ dashboard() {
     advance 7
 }
 
+# ── TRACK: TRIAGE TRACKING ───────────────────────────────────────────
+
+OUTPUT_TRIAGE_SHOW=$(cat <<ENDOFOUTPUT
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${BOLD}Triage Items — acme-v2-1-ea-1${NC}
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   #  │ Component                              │ Group              │ Status │ JIRA          │ Slack
+  ────┼────────────────────────────────────────┼────────────────────┼────────┼───────────────┼──────
+   12 │ acme-api-registry-sync-v3-5-ea-1       │ dependency_issue   │ ${YELLOW}Open${NC}   │ PROJECT-39812 │ ✓
+   13 │ acme-inference-operator-v3-5-ea-1      │ infrastructure     │ ${YELLOW}Open${NC}   │ -             │ -
+   14 │ acme-core-engine-v3-5-ea-1             │ hermetic_task      │ ${YELLOW}Open${NC}   │ -             │ -
+   14 │ acme-openshift-chart-v3-5-ea-1         │ hermetic_task      │ ${YELLOW}Open${NC}   │ -             │ -
+   14 │ acme-xks-chart-v3-5-ea-1              │ hermetic_task      │ ${YELLOW}Open${NC}   │ -             │ -
+   15 │ acme-fbc-fragment-v3-5-ea-1            │ fbc_policy         │ ${YELLOW}Open${NC}   │ -             │ -
+
+  Active: ${BOLD}6${NC} items (4 groups)  │  Resolved (7d): ${GREEN}3${NC}
+ENDOFOUTPUT
+)
+
+triage_tracking() {
+    section_banner "▸ Triage" "Persistent Tracking"
+    narrate "Every failure you investigate is tracked as a ${BOLD}triage item${NC}."
+    narrate "Items persist across sessions — no more losing context."
+    echo ""
+    type_cmd "ic triage show"
+    show_output "$OUTPUT_TRIAGE_SHOW"
+    callout "4 groups from 6 items — shared root causes grouped automatically."
+    narrate "Track new items: ${CYAN}ic triage track <component> --group \"label\" --cause \"reason\"${NC}"
+    narrate "Link to Jira:    ${CYAN}ic triage update 13 --jira PROJECT-39813${NC}"
+    narrate "Resolve:         ${CYAN}ic triage resolve 12${NC}"
+    narrate ""
+    narrate "The MCP equivalent: ${CYAN}mcp__ic__track_triage_item()${NC}, ${CYAN}mcp__ic__update_triage_item()${NC}"
+    advance 6
+}
+
+# ── TRACK: SKILLS ───────────────────────────────────────────────────
+
+OUTPUT_SKILLS=$(cat <<ENDOFOUTPUT
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${BOLD}Available Skills${NC}
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Skill                        │ Risk   │ Description
+  ──────────────────────────────┼────────┼──────────────────────────────────
+    retrigger-build              │ ${GREEN}Low${NC}    │ Retrigger a Konflux PipelineRun
+    update-prefetch              │ ${YELLOW}Medium${NC} │ Regenerate cachi2 prefetch cache
+    add-hermetic-param           │ ${YELLOW}Medium${NC} │ Add hermetic: true to .tekton pipeline
+    create-fix-pr                │ ${RED}High${NC}   │ Create a GitHub PR with AI-generated fix
+    request-exception            │ ${RED}High${NC}   │ Submit policy exception via Conforma API
+
+  ${BOLD}Execution Model:${NC}
+    ${GREEN}Low${NC}     Subprocess with env masking          (automatic)
+    ${YELLOW}Medium${NC}  Subprocess with restricted env        (user prompt)
+    ${RED}High${NC}    K8s Job sandbox — isolated container  (explicit approval)
+
+  ${BOLD}Security:${NC}
+    • Environment variables masked (only declared vars passed)
+    • High-risk skills run in isolated K8s Jobs (no host access)
+    • Full execution audit trail (command, args, stdout, exit code)
+    • Secrets redacted from all logs before storage
+    • API rate limiting (100 read, 10 write per min per key)
+ENDOFOUTPUT
+)
+
+OUTPUT_SKILL_EXEC=$(cat <<ENDOFOUTPUT
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ${BOLD}Skill Execution — update-prefetch${NC}
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Component: acme-api-registry-sync-v3-5-ea-1
+  Risk:      ${YELLOW}Medium${NC} (file modification)
+
+  ${DIM}Dry-run: showing what would change...${NC}
+
+  ${BOLD}Changes:${NC}
+    .tekton/acme-api-registry-sync-pull-request.yaml
+      prefetch-input: ${RED}- old-digest${NC}
+      prefetch-input: ${GREEN}+ new-digest${NC}
+
+  ${BOLD}Approve execution? [y/N]:${NC} ${GREEN}y${NC}
+
+  ${DIM}Running with masked environment (3 vars passed)...${NC}
+  ${GREEN}✓ Skill completed successfully${NC} (exit 0, 4.2s)
+
+  ${GREEN}✓ Triage item #12 updated${NC} — skill execution logged
+ENDOFOUTPUT
+)
+
+skills_section() {
+    section_banner "▸ Skills" "Executable Remediation"
+    narrate "Skills are the ${BOLD}hands${NC} of the system — they go beyond diagnosis."
+    narrate "When the AI identifies a root cause, skills can ${BOLD}apply the fix${NC}."
+    echo ""
+    type_cmd "ic skills list"
+    show_output "$OUTPUT_SKILLS"
+    callout "Risk-based execution: low → automatic, medium → prompt, high → K8s sandbox."
+    narrate "Every skill execution is recorded in the audit trail."
+    advance 7
+
+    callout "Let's run a skill:"
+    type_cmd "ic fix acme-api-registry-sync-v3-5-ea-1 --skill update-prefetch --dry-run"
+    show_output "$OUTPUT_SKILL_EXEC"
+    narrate "Dry-run shows the diff first. Then approval. Then execution."
+    narrate "Result is linked back to the triage item automatically."
+    advance 6
+}
+
 # ── WRAP-UP ──────────────────────────────────────────────────────────
 
 wrapup() {
     section_banner "★" "Architecture & What's Possible"
-    narrate "Everything in this demo is available through ${BOLD}three interfaces${NC}:"
+    narrate "Everything in this demo runs on ${BOLD}OpenShift${NC} with three interfaces:"
     echo ""
-    echo -e "  ${BOLD}┌──────────────┐${NC}"
-    echo -e "  │  ${CYAN}CLI (./ic)${NC}   │──┐"
-    echo -e "  ${BOLD}└──────────────┘${NC}  │"
-    echo -e "  ${BOLD}┌──────────────┐${NC}  │    ${BOLD}┌──────────────┐    ┌────────────┐${NC}"
-    echo -e "  │ ${CYAN}MCP Server${NC}   │──┼────│ Repositories │────│ PostgreSQL │"
-    echo -e "  ${BOLD}└──────────────┘${NC}  │    ${BOLD}└──────────────┘    └────────────┘${NC}"
-    echo -e "  ${BOLD}┌──────────────┐${NC}  │"
-    echo -e "  │ ${CYAN}REST API${NC}     │──┘"
-    echo -e "  ${BOLD}└──────────────┘${NC}"
+    echo -e "                     ${BOLD}┌────────────┐${NC}"
+    echo -e "                     │ ${CYAN}PostgreSQL${NC} │"
+    echo -e "                     └──────┬─────┘"
+    echo -e "                            │"
+    echo -e "              ┌─────────────┼─────────────┐"
+    echo -e "              │             │             │"
+    echo -e "        ${BOLD}┌─────┴────┐${NC}  ${BOLD}┌────┴────┐${NC}  ${BOLD}┌────┴─────┐${NC}"
+    echo -e "        │ ${CYAN}Worker${NC}   │  │ ${CYAN}MinIO${NC}   │  │ ${CYAN}Watcher${NC}  │"
+    echo -e "        │${DIM}sync loop${NC} │  │${DIM}blobs${NC}    │  │${DIM}K8s watch${NC} │"
+    echo -e "        └──────────┘  └─────────┘  └──────────┘"
+    echo -e "                            │"
+    echo -e "                     ${BOLD}┌──────┴─────┐${NC}"
+    echo -e "                     │ ${CYAN}REST API${NC}   │"
+    echo -e "                     │ ${DIM}FastAPI${NC}     │"
+    echo -e "                     └──────┬─────┘"
+    echo -e "                            │"
+    echo -e "         ┌──────────────────┼──────────────────┐"
+    echo -e "   ${BOLD}┌─────┴──────┐${NC}    ${BOLD}┌──────┴──────┐${NC}    ${BOLD}┌──────┴──────┐${NC}"
+    echo -e "   │ ${CYAN}CLI (ic)${NC}   │    │ ${CYAN}MCP Server${NC} │    │ ${CYAN}Dashboards${NC} │"
+    echo -e "   │ ${DIM}PyPI pkg${NC}   │    │ ${DIM}50+ tools${NC}  │    │ ${DIM}webhooks${NC}   │"
+    echo -e "   └────────────┘    └─────────────┘    └─────────────┘"
     echo ""
     narrate "Same data, three access patterns — zero duplication."
-    narrate "Claude uses the MCP server directly. Dashboards use the REST API."
+    narrate "Install: ${CYAN}pip install ic-tool${NC}"
+    narrate "Local:   ${CYAN}ic config use-local${NC}"
+    narrate "Cluster: ${CYAN}ic config use-cluster https://api.example.com --key <key>${NC}"
     advance 6
 
     echo ""
@@ -851,19 +988,36 @@ wrapup() {
 
     echo -e "  ${BOLD}Commands:${NC}"
     echo ""
+    echo -e "  ${HEADER}Triage & Alerts${NC}"
     echo -e "  ${CYAN}ic get alerts${NC}                         Daily triage starting point"
     echo -e "  ${CYAN}ic get alerts --group${NC}                 Group by root cause"
     echo -e "  ${CYAN}ic describe failure <component>${NC}       Drill into a build failure"
     echo -e "  ${CYAN}ic describe conforma <component>${NC}      Conforma violation details"
+    echo -e "  ${CYAN}ic triage show${NC}                        Persistent triage items"
+    echo -e "  ${CYAN}ic triage track <comp> --group X${NC}      Track a new failure"
+    echo -e "  ${CYAN}ic triage update <id> --jira KEY${NC}      Link Jira to triage item"
+    echo -e "  ${CYAN}ic triage resolve <id>${NC}                Mark resolved"
+    echo ""
+    echo -e "  ${HEADER}AI & Skills${NC}"
     echo -e "  ${CYAN}ic ai analyze <component>${NC}             AI root cause analysis"
+    echo -e "  ${CYAN}ic ai batch${NC}                           Analyze all pending failures"
     echo -e "  ${CYAN}ic ai status${NC}                          AI analysis overview"
     echo -e "  ${CYAN}ic fix <component>${NC}                    Interactive triage → action"
+    echo -e "  ${CYAN}ic skills list${NC}                        Available remediation skills"
+    echo -e "  ${CYAN}ic fix <comp> --skill X --dry-run${NC}     Preview skill execution"
+    echo ""
+    echo -e "  ${HEADER}Export & Release${NC}"
     echo -e "  ${CYAN}ic export <component> jira|slack${NC}      Generate formatted content"
     echo -e "  ${CYAN}ic get policy-gap${NC}                     Stage vs prod risk"
     echo -e "  ${CYAN}ic release status${NC}                     Pipeline checklist"
     echo -e "  ${CYAN}ic release readiness${NC}                  Go/no-go decision"
     echo -e "  ${CYAN}ic dashboard${NC}                          Operational metrics"
+    echo ""
+    echo -e "  ${HEADER}Config${NC}"
     echo -e "  ${CYAN}ic get apps${NC}                           Monitored applications"
+    echo -e "  ${CYAN}ic config use-local${NC}                   Switch to local mode"
+    echo -e "  ${CYAN}ic config use-cluster <url>${NC}           Switch to cluster mode"
+    echo -e "  ${CYAN}ic config show${NC}                        Show current config"
     echo ""
     echo -e "  ${DIM}Demo data captured from acme-v2-1-ea-1 on 2026-05-25${NC}"
     echo ""
@@ -881,10 +1035,11 @@ track_menu() {
     echo -e "  ${WHITE}2${NC}) ${BOLD}Conforma${NC}           — policy violations, stage vs prod gap"
     echo -e "  ${WHITE}3${NC}) ${BOLD}Releases${NC}           — pipeline status, readiness, schedule"
     echo -e "  ${WHITE}4${NC}) ${BOLD}AI & Operations${NC}    — analysis engine, dashboard, patterns"
-    echo -e "  ${WHITE}5${NC}) ${BOLD}Full showcase${NC}      — everything, in order"
+    echo -e "  ${WHITE}5${NC}) ${BOLD}Triage & Skills${NC}    — persistent tracking, skill execution"
+    echo -e "  ${WHITE}6${NC}) ${BOLD}Full showcase${NC}      — everything, in order"
     echo -e "  ${WHITE}q${NC}) Exit"
     echo ""
-    echo -ne "  ${DIM}Choice [5]:${NC} "
+    echo -ne "  ${DIM}Choice [6]:${NC} "
 }
 
 run_track_builds() {
@@ -910,6 +1065,11 @@ run_track_ai() {
     dashboard
 }
 
+run_track_triage_skills() {
+    triage_tracking
+    skills_section
+}
+
 run_full() {
     build_group
     build_describe
@@ -921,6 +1081,8 @@ run_full() {
     release_readiness
     ai_status
     dashboard
+    triage_tracking
+    skills_section
     build_export
 }
 
@@ -937,14 +1099,15 @@ main() {
     else
         track_menu
         read -r choice
-        choice="${choice:-5}"
+        choice="${choice:-6}"
 
         case "$choice" in
             1) run_track_builds ;;
             2) run_track_conforma ;;
             3) run_track_releases ;;
             4) run_track_ai ;;
-            5) run_full ;;
+            5) run_track_triage_skills ;;
+            6) run_full ;;
             q|Q) echo -e "\n  ${DIM}Demo ended.${NC}\n"; exit 0 ;;
             *) run_full ;;
         esac
