@@ -158,7 +158,6 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
         ))
 
     conforma_violations = []
-    conforma_failing = _conforma_repo().find_unresolved_component_names(application)
     triage_jira = {}
     try:
         for item in _triage_repo().get_active_items(application):
@@ -169,24 +168,24 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
                         triage_jira[c] = jk
     except Exception:
         pass
-    for comp_name in sorted(conforma_failing):
-        details = _conforma_repo().get_violation_details(comp_name, application)
-        if details:
-            jira_key = details.get('jira_key') or triage_jira.get(comp_name)
-            conforma_violations.append(FailureSummary(
-                component=comp_name,
-                status='Conforma Violation',
-                error_type=details.get('scenario'),
-                first_seen=details.get('first_detected_at', datetime.utcnow()),
-                last_seen=details.get('last_updated_at', datetime.utcnow()),
-                occurrence_count=1,
-                has_logs=details.get('violation_summary') is not None,
-                has_analysis=details.get('ai_analyzed', False),
-                violations_count=details.get('violations_count', 0),
-                warnings_count=details.get('warnings_count', 0),
-                scenario=details.get('scenario'),
-                jira_key=jira_key,
-            ))
+    summaries = _conforma_repo().get_violation_summaries(application)
+    for s in summaries:
+        comp_name = s['component_name']
+        jira_key = s.get('jira_key') or triage_jira.get(comp_name)
+        conforma_violations.append(FailureSummary(
+            component=comp_name,
+            status='Conforma Violation',
+            error_type=s.get('scenario'),
+            first_seen=s.get('first_detected_at', datetime.utcnow()),
+            last_seen=s.get('last_updated_at', datetime.utcnow()),
+            occurrence_count=1,
+            has_logs=s.get('violation_summary') is not None,
+            has_analysis=s.get('ai_analyzed', False),
+            violations_count=s.get('violations_count', 0),
+            warnings_count=s.get('warnings_count', 0),
+            scenario=s.get('scenario'),
+            jira_key=jira_key,
+        ))
 
     all_dates = ([f.last_seen for f in build_failures] +
                  [v.last_seen for v in conforma_violations])

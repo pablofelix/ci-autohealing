@@ -880,11 +880,10 @@ class AIAnalysisRepository:
         with self.db.connection() as conn:
             cursor = conn.cursor()
             app_filter = ""
-            params = []
+            params = [days]
             if application:
                 app_filter = "AND (b.application = %s OR c.application = %s)"
-                params = [application, application]
-            params.append(days)
+                params.extend([application, application])
 
             cursor.execute("""
                 SELECT

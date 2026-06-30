@@ -261,11 +261,25 @@ class TestKnownSources(unittest.TestCase):
         name, url, branch = resolve_source('aiops-infra')
         self.assertEqual(name, 'aiops-infra')
         self.assertIn('github.com', url)
+        self.assertIsNone(branch)
+
+    def test_resolve_known_with_branch(self):
+        name, url, branch = resolve_source('aiops-infra/conforma')
+        self.assertEqual(name, 'aiops-infra/conforma')
+        self.assertIn('github.com', url)
+        self.assertEqual(branch, 'skill/conforma')
 
     def test_resolve_url(self):
         name, url, branch = resolve_source('https://github.com/org/my-repo')
         self.assertEqual(name, 'my-repo')
         self.assertEqual(url, 'https://github.com/org/my-repo')
+        self.assertIsNone(branch)
+
+    def test_resolve_url_with_branch(self):
+        name, url, branch = resolve_source('https://github.com/org/my-repo@feature')
+        self.assertEqual(name, 'my-repo@feature')
+        self.assertEqual(url, 'https://github.com/org/my-repo')
+        self.assertEqual(branch, 'feature')
 
     def test_resolve_unknown(self):
         with self.assertRaises(ValueError):

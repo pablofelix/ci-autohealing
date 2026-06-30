@@ -166,8 +166,22 @@ class TriageRepository:
                     resolution_pr_url = COALESCE(%s, resolution_pr_url),
                     updated_at = NOW()
                 WHERE id = %s
+                RETURNING components, application
             """, (resolution, pr_url, item_id))
-            return cursor.rowcount > 0
+            row = cursor.fetchone()
+            if not row or not verdict:
+                return cursor.rowcount > 0
+            components, application = row
+            if components and application:
+                from repositories.ai_analysis_repository import AIAnalysisRepository
+                ai_repo = AIAnalysisRepository(self.db)
+                for comp in components:
+                    try:
+                        ai_repo.record_verdict(comp, application, verdict,
+                                               verdict_by='triage')
+                    except Exception:
+                        pass
+            return True
 
     def get_report(self, application, date=None):
         """Get triage items grouped for a report, optionally filtered by date."""
