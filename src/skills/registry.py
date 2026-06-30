@@ -48,13 +48,15 @@ class SkillRegistry:
         with open(self.path, 'w') as f:
             json.dump(data, f, indent=2)
 
-    def add_source(self, name: str, url: str, commit: str, local_path: str) -> SourceEntry:
+    def add_source(self, name: str, url: str, commit: str, local_path: str,
+                   branch: Optional[str] = None) -> SourceEntry:
         entry = SourceEntry(
             name=name,
             url=url,
             commit=commit,
             added_at=datetime.now(timezone.utc).isoformat(),
             local_path=local_path,
+            branch=branch,
         )
         self.sources[name] = entry
         return entry

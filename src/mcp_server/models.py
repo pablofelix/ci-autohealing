@@ -162,6 +162,7 @@ class SkillSourceInfo(BaseModel):
     name: str
     url: str
     commit: Optional[str] = None
+    branch: Optional[str] = None
     skill_count: int = 0
 
 

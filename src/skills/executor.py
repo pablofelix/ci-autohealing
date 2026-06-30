@@ -64,13 +64,17 @@ class SkillExecutor:
     """Execute skills with risk-based sandboxing."""
 
     def __init__(self, skill, params=None, dry_run=False, timeout=300,
-                 env_overrides=None, triggered_by='cli'):
+                 env_overrides=None, triggered_by='cli',
+                 component_name=None, application=None, triage_item_id=None):
         self.skill = skill
         self.params = params or {}
         self.dry_run = dry_run
         self.timeout = timeout
         self.env_overrides = env_overrides or {}
         self.triggered_by = triggered_by
+        self.component_name = component_name
+        self.application = application
+        self.triage_item_id = triage_item_id
 
     def _skill_dir(self):
         return self.skill.path
@@ -96,6 +100,9 @@ class SkillExecutor:
 
     def _result(self, **kwargs):
         kwargs.setdefault('triggered_by', self.triggered_by)
+        kwargs.setdefault('component_name', self.component_name)
+        kwargs.setdefault('application', self.application)
+        kwargs.setdefault('triage_item_id', self.triage_item_id)
         return ExecutionResult(**kwargs)
 
     def execute(self):

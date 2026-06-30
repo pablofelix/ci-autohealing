@@ -78,19 +78,30 @@ class SourceEntry:
     commit: str
     added_at: str
     local_path: str
+    branch: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             'name': self.name,
             'url': self.url,
             'commit': self.commit,
             'added_at': self.added_at,
             'local_path': self.local_path,
         }
+        if self.branch:
+            d['branch'] = self.branch
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceEntry':
-        return cls(**data)
+        return cls(
+            name=data['name'],
+            url=data['url'],
+            commit=data['commit'],
+            added_at=data['added_at'],
+            local_path=data['local_path'],
+            branch=data.get('branch'),
+        )
 
 
 @dataclass
@@ -145,6 +156,9 @@ class ExecutionResult:
     steps_executed: int = 0
     steps_total: int = 0
     triggered_by: str = 'cli'
+    component_name: Optional[str] = None
+    application: Optional[str] = None
+    triage_item_id: Optional[int] = None
     dry_run_steps: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -160,5 +174,8 @@ class ExecutionResult:
             'steps_executed': self.steps_executed,
             'steps_total': self.steps_total,
             'triggered_by': self.triggered_by,
+            'component_name': self.component_name,
+            'application': self.application,
+            'triage_item_id': self.triage_item_id,
             'dry_run_steps': self.dry_run_steps,
         }

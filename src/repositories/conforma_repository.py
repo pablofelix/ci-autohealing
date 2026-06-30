@@ -149,6 +149,32 @@ class ConformaRepository:
         except Exception:
             return False
 
+    def get_violation_summaries(self, application):
+        """Summary of all unresolved violations (no violation_details). One query."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT ON (component_name)
+                    component_name, scenario,
+                    violations_count, warnings_count, successes_count,
+                    violation_summary,
+                    repository_url, commit_sha,
+                    first_detected_at, last_updated_at,
+                    ai_analyzed, jira_key
+                FROM conforma_results
+                WHERE application = %s AND is_resolved = FALSE
+                ORDER BY component_name, last_updated_at DESC
+            """, (application,))
+            cols = [
+                'component_name', 'scenario',
+                'violations_count', 'warnings_count', 'successes_count',
+                'violation_summary',
+                'repository_url', 'commit_sha',
+                'first_detected_at', 'last_updated_at',
+                'ai_analyzed', 'jira_key',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     def get_violation_details(self, component, application):
         """Full violation details for a component. Used by MCP/API for describe views."""
         with self.db.connection() as conn:

@@ -159,9 +159,20 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
 
     conforma_violations = []
     conforma_failing = _conforma_repo().find_unresolved_component_names(application)
+    triage_jira = {}
+    try:
+        for item in _triage_repo().get_active_items(application):
+            jk = item.get('jira_key')
+            if jk:
+                for c in item.get('components', []):
+                    if c not in triage_jira:
+                        triage_jira[c] = jk
+    except Exception:
+        pass
     for comp_name in sorted(conforma_failing):
         details = _conforma_repo().get_violation_details(comp_name, application)
         if details:
+            jira_key = details.get('jira_key') or triage_jira.get(comp_name)
             conforma_violations.append(FailureSummary(
                 component=comp_name,
                 status='Conforma Violation',
@@ -171,6 +182,10 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
                 occurrence_count=1,
                 has_logs=details.get('violation_summary') is not None,
                 has_analysis=details.get('ai_analyzed', False),
+                violations_count=details.get('violations_count', 0),
+                warnings_count=details.get('warnings_count', 0),
+                scenario=details.get('scenario'),
+                jira_key=jira_key,
             ))
 
     all_dates = ([f.last_seen for f in build_failures] +
@@ -643,6 +658,7 @@ def resolve_triage_item(
     item_id: int,
     resolution: str = '',
     pr_url: str = '',
+    verdict: str = '',
     application: str = DEFAULT_APPLICATION,
 ) -> Dict[str, Any]:
     """Resolve a triage item (mark investigation as complete).
@@ -651,10 +667,19 @@ def resolve_triage_item(
         item_id: Triage item ID to resolve
         resolution: Resolution description (e.g. "PR merged", "config fix applied")
         pr_url: URL of the fix PR (optional)
+        verdict: AI diagnosis accuracy — correct, partial, or incorrect (optional)
         application: Application name
     """
     repo = _triage_repo()
     repo.resolve_item(item_id, resolution=resolution, pr_url=pr_url)
+
+    if verdict and verdict in ('correct', 'partial', 'incorrect'):
+        item = repo.get_by_id(item_id)
+        if item and item.get('components'):
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            ai_repo = AIAnalysisRepository(_db_connection())
+            ai_repo.record_verdict(item['components'][0], application, verdict, verdict_by='mcp')
+
     return {"action": "resolved", "item_id": item_id, "resolution": resolution}
 
 
@@ -1704,6 +1729,7 @@ def list_skill_sources() -> List[SkillSourceInfo]:
             name=src.name,
             url=src.url,
             commit=src.commit or None,
+            branch=src.branch,
             skill_count=source_counts.get(src.name, 0),
         )
         for src in sources
@@ -1960,3 +1986,23 @@ def _format_conforma_jira(violation: Dict[str, Any], analysis: Optional[Dict[str
         lines.append(f"* [Analysis Trace|{ai.langfuse_trace_url}]")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def get_ai_quality_metrics(
+    application: str = DEFAULT_APPLICATION,
+    days: int = 30,
+) -> Dict[str, Any]:
+    """AI analysis quality metrics: accuracy from human verdicts and auto-correlation.
+
+    Returns verdict counts (correct/partial/incorrect), accuracy rate,
+    average confidence for correct vs incorrect diagnoses, and breakdown
+    by failure category.
+
+    Args:
+        application: Application name
+        days: Number of days to look back (default 30)
+    """
+    from repositories.ai_analysis_repository import AIAnalysisRepository
+    repo = AIAnalysisRepository(_db_connection())
+    return repo.get_quality_metrics(application=application, days=days)

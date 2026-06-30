@@ -29,6 +29,10 @@ class AnalysisSubmission(BaseModel):
 router = APIRouter(tags=["analyses"])
 
 
+def _repo():
+    return get_repository(AIAnalysisRepository)
+
+
 def _ai_repo():
     return get_repository(AIAnalysisRepository)
 
@@ -126,3 +130,28 @@ def submit_analysis(application: str, submission: AnalysisSubmission) -> Dict[st
         'component': submission.component,
         'confidence': submission.confidence_score,
     }
+
+
+class VerdictSubmission(BaseModel):
+    verdict: Literal['correct', 'partial', 'incorrect']
+    actual_root_cause: Optional[str] = None
+
+
+@router.post("/applications/{application}/analyses/{component}/verdict")
+def submit_verdict(application: str, component: str, req: VerdictSubmission) -> Dict[str, Any]:
+    """Record human verdict on AI analysis accuracy."""
+    repo = _repo()
+    updated = repo.record_verdict(
+        component, application, req.verdict,
+        actual_root_cause=req.actual_root_cause, verdict_by='api')
+    if not updated:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"No AI analysis found for {component}")
+    return {'action': 'verdict_recorded', 'component': component, 'verdict': req.verdict}
+
+
+@router.get("/metrics/ai-quality")
+def get_ai_quality(application: Optional[str] = None, days: int = 30) -> Dict[str, Any]:
+    """AI analysis quality metrics from human verdicts and auto-correlation."""
+    repo = _repo()
+    return repo.get_quality_metrics(application=application, days=days)

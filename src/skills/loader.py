@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 
 from skills.models import SkillMetadata
 
-SKILL_SCAN_DIRS = ['.claude/skills', 'helpers/skills']
+SKILL_SCAN_DIRS = ['.claude/skills', 'helpers/skills', 'skills']
 
 
 def _cache_dir() -> str:
@@ -16,17 +16,18 @@ def _cache_dir() -> str:
     return os.path.join(base, 'cache')
 
 
-def _cache_path(name: str, url: str) -> str:
-    url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
+def _cache_path(name: str, url: str, branch: Optional[str] = None) -> str:
+    cache_key = '{}@{}'.format(url, branch) if branch else url
+    url_hash = hashlib.sha256(cache_key.encode()).hexdigest()[:12]
     return os.path.join(_cache_dir(), '{}-{}'.format(name, url_hash))
 
 
-def clone_source(url: str, name: str) -> Tuple[str, str]:
+def clone_source(url: str, name: str, branch: Optional[str] = None) -> Tuple[str, str]:
     """Clone a git repo (shallow) into the cache directory.
 
     Returns (local_path, commit_sha).
     """
-    dest = _cache_path(name, url)
+    dest = _cache_path(name, url, branch)
     os.makedirs(_cache_dir(), exist_ok=True)
 
     if os.path.isdir(dest):
@@ -35,18 +36,22 @@ def clone_source(url: str, name: str) -> Tuple[str, str]:
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
+            remote_ref = 'origin/{}'.format(branch) if branch else 'origin/HEAD'
             subprocess.run(
                 ['git', '-C', dest, 'fetch', '--depth', '1', 'origin'],
                 capture_output=True, text=True, timeout=60,
             )
             subprocess.run(
-                ['git', '-C', dest, 'reset', '--hard', 'origin/HEAD'],
+                ['git', '-C', dest, 'reset', '--hard', remote_ref],
                 capture_output=True, text=True, timeout=60,
             )
     else:
+        cmd = ['git', 'clone', '--depth', '1']
+        if branch:
+            cmd += ['--branch', branch]
+        cmd += [url, dest]
         result = subprocess.run(
-            ['git', 'clone', '--depth', '1', url, dest],
-            capture_output=True, text=True, timeout=120,
+            cmd, capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError('git clone failed: {}'.format(result.stderr.strip()))

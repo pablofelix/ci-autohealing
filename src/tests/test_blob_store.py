@@ -163,7 +163,7 @@ class TestResolveBlobFields(unittest.TestCase):
             'blob_refs': {'violation_details': key},
         }
         resolve_blob_fields(row, fields=('violation_details',))
-        self.assertEqual(row['violation_details'], '{"rules": []}')
+        self.assertEqual(row['violation_details'], {'rules': []})
         self.assertIsNone(row['build_logs'])
 
     def test_missing_blob_returns_none(self):

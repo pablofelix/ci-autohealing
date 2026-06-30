@@ -839,6 +839,111 @@ class AIAnalysisRepository:
 
             return None
 
+    def record_verdict(self, component, application, verdict,
+                       actual_root_cause=None, verdict_by=None):
+        """Record human verdict on AI analysis accuracy.
+
+        Args:
+            component: Component name
+            application: Application name
+            verdict: correct, partial, incorrect, or unknown
+            actual_root_cause: What actually caused it (if different from AI diagnosis)
+            verdict_by: Who provided the verdict (user, auto-resolve, etc.)
+        """
+        valid = ('correct', 'partial', 'incorrect', 'unknown')
+        if verdict not in valid:
+            raise ValueError("verdict must be one of: {}".format(', '.join(valid)))
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE ai_analysis SET
+                    human_verdict = %s,
+                    human_verdict_at = NOW(),
+                    human_verdict_by = %s,
+                    actual_root_cause = COALESCE(%s, actual_root_cause)
+                WHERE id = (
+                    SELECT a.id FROM ai_analysis a
+                    LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                    LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE (b.component_name = %s AND b.application = %s)
+                       OR (c.component_name = %s AND c.application = %s)
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                )
+            """, (verdict, verdict_by, actual_root_cause,
+                  component, application, component, application))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_quality_metrics(self, application=None, days=30):
+        """Aggregate AI quality metrics from human verdicts."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            app_filter = ""
+            params = []
+            if application:
+                app_filter = "AND (b.application = %s OR c.application = %s)"
+                params = [application, application]
+            params.append(days)
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE a.human_verdict IS NOT NULL) AS total_with_verdict,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'unknown') AS unknown,
+                    ROUND(AVG(a.confidence_score) FILTER (WHERE a.human_verdict = 'correct'), 2) AS avg_conf_correct,
+                    ROUND(AVG(a.confidence_score) FILTER (WHERE a.human_verdict = 'incorrect'), 2) AS avg_conf_incorrect,
+                    COUNT(*) AS total_analyses
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE a.analyzed_at > NOW() - make_interval(days => %s)
+                {app_filter}
+            """.format(app_filter=app_filter), params)
+            row = cursor.fetchone()
+
+            total_judged = row[0] or 0
+            correct = row[1] or 0
+            partial = row[2] or 0
+
+            result = {
+                'total_with_verdict': total_judged,
+                'correct': correct,
+                'partial': partial,
+                'incorrect': row[3] or 0,
+                'unknown': row[4] or 0,
+                'accuracy': round((correct + partial * 0.5) / total_judged, 2) if total_judged > 0 else None,
+                'avg_confidence_correct': float(row[5]) if row[5] else None,
+                'avg_confidence_incorrect': float(row[6]) if row[6] else None,
+                'total_analyses': row[7] or 0,
+            }
+
+            cursor.execute("""
+                SELECT
+                    a.failure_category,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) AS total
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE a.human_verdict IS NOT NULL
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                  {app_filter}
+                GROUP BY a.failure_category
+                ORDER BY COUNT(*) DESC
+            """.format(app_filter=app_filter), params)
+
+            result['by_category'] = {
+                r[0]: {'correct': r[1], 'partial': r[2], 'incorrect': r[3], 'total': r[4]}
+                for r in cursor.fetchall()
+            }
+
+            return result
+
     def get_conforma_queue(self, application):
         with self.db.connection() as conn:
             cursor = conn.cursor()

@@ -156,7 +156,7 @@ class TriageRepository:
             """, (url, item_id, url))
             return cursor.rowcount > 0
 
-    def resolve_item(self, item_id, resolution=None, pr_url=None):
+    def resolve_item(self, item_id, resolution=None, pr_url=None, verdict=None):
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""

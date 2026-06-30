@@ -83,9 +83,9 @@ def get_daily_stats(application: str, days: int = 7) -> List[Dict[str, Any]]:
     return _build_repo().get_daily_stats(application, days)
 
 
-@router.get("/applications/{application}/triage", response_model=TriageResponse)
+@router.get("/applications/{application}/triage-summary", response_model=TriageResponse)
 def get_triage(application: str):
-    """Triage summary: failing vs working components."""
+    """Triage summary: failing vs working components (build status)."""
     triage = _build_repo().get_triage_summary(application)
     return TriageResponse(
         application=application,

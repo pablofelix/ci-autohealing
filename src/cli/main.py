@@ -117,6 +117,25 @@ def get_component(ctx, name, output_json):
     print()
 
 
+def _format_since(raw):
+    """Format a timestamp as '30 Jun 08:04' for display."""
+    from datetime import datetime as dt
+    s = str(raw or '')
+    for fmt in ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+        try:
+            d = dt.strptime(s[:26], fmt)
+            return d.strftime('%d %b %H:%M')
+        except (ValueError, IndexError):
+            continue
+    if len(s) >= 10:
+        try:
+            d = dt.strptime(s[:10], '%Y-%m-%d')
+            return d.strftime('%d %b')
+        except ValueError:
+            pass
+    return s[:12] if s else ''
+
+
 @get.command('alerts')
 @click.option('--group', is_flag=True, help='Group by root cause')
 @click.option('--all', 'show_all', is_flag=True, help='All applications')
@@ -144,6 +163,15 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         nightlies = data.get('nightly_warnings', [])
         schedule = data.get('release_schedule')
         last_sync = data.get('last_sync', '')
+
+        from cli.data import _triage_info_map_safe
+        triage_info = _triage_info_map_safe(cfg.APPLICATION_NAME)
+        if triage_info:
+            for v in conforma:
+                comp = v.get('component', '')
+                info = triage_info.get(comp)
+                if info and not v.get('jira_key') and info.get('jira_key'):
+                    v['jira_key'] = info['jira_key']
 
         section_header('Alerts — {}'.format(cfg.APPLICATION_NAME))
         print()
@@ -173,33 +201,50 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 
         print(bold('Build Failures ({})'.format(len(builds))) + ':')
         if builds:
-            for f in builds:
+            print('  {:<4} {:<45} {:<20} {:>12}  {}'.format(
+                '#', 'Component', 'Error/Cause', 'Since', 'JIRA'))
+            print('  {}  {} {} {}  {}'.format(
+                '---', '-' * 45, '-' * 20, '-' * 12, '--------'))
+            for i, f in enumerate(builds, 1):
                 comp = f.get('component', '?')
+                if len(comp) > 45:
+                    comp = comp[:42] + '...'
                 err = f.get('error_type') or f.get('possible_cause') or ''
+                info = triage_info.get(f.get('component', ''))
+                if not err and info:
+                    err = info.get('group_label') or ''
+                if len(err) > 20:
+                    err = err[:17] + '...'
+                first = _format_since(f.get('first_seen', ''))
+                jira = ''
+                if f.get('jira_key'):
+                    jira = f['jira_key']
+                elif info and info.get('jira_key'):
+                    jira = info['jira_key']
+                jira = jira or '-'
                 analyzed = green(' [AI]') if f.get('has_analysis') else ''
-                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+                print('  {:<4} {:<45} {:<20} {:>12}  {}{}'.format(
+                    i, comp, err, first, jira, analyzed))
         else:
             print('  {} No build failures'.format(green('✓')))
         print()
 
         print(bold('Conforma Failures ({})'.format(len(conforma))) + ':')
         if conforma:
-            print('  {:<4} {:<45} {:>6} {:>6} {:>6}  {}'.format(
+            print('  {:<4} {:<45} {:>6} {:>6} {:>12}  {}'.format(
                 '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
             print('  {}  {} {} {} {}  {}'.format(
-                '---', '-' * 45, '------', '------', '------', '--------'))
+                '---', '-' * 45, '------', '------', '-' * 12, '--------'))
             for i, v in enumerate(conforma, 1):
                 comp = v.get('component', '?')
                 if len(comp) > 45:
                     comp = comp[:42] + '...'
                 viol = v.get('violations_count', 0) or 0
                 warn = v.get('warnings_count', 0) or 0
-                first = str(v.get('first_seen', ''))[:10]
-                if first and len(first) == 10:
-                    first = first[5:]
+                first = _format_since(v.get('first_seen', ''))
                 jira = v.get('jira_key') or '-'
                 viol_color = red if viol > 0 else green
-                print('  {:<4} {:<45} {} {:>6} {:>6}  {}'.format(
+                print('  {:<4} {:<45} {} {:>6} {:>12}  {}'.format(
                     i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira))
                 policy_url = v.get('policy_url')
                 if policy_url:
@@ -245,6 +290,15 @@ def get_conforma(ctx, filter, output_json):
         from cli.data import get_conforma_violations
         from cli.formatting import bold, dim, green, red, section_header
         data = get_conforma_violations()
+        if isinstance(data, list):
+            from cli.data import _triage_jira_map_safe
+            jira_map = _triage_jira_map_safe(cfg.APPLICATION_NAME)
+            if jira_map:
+                for v in data:
+                    if isinstance(v, dict):
+                        comp = v.get('component', v.get('component_name', ''))
+                        if not v.get('jira_key') and comp in jira_map:
+                            v['jira_key'] = jira_map[comp]
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
             return
@@ -263,9 +317,12 @@ def get_conforma(ctx, filter, output_json):
                 viol = v.get('violations_count', 0) or 0
                 warn = v.get('warnings_count', 0) or 0
                 scenario = v.get('scenario', v.get('error_type', ''))
+                jira = v.get('jira_key', '')
                 viol_color = red if viol > 0 else green
-                print('  {} — {} viol, {} warn — {}'.format(
-                    bold(comp), viol_color(str(viol)), warn, dim(scenario)))
+                jira_part = ' — {}'.format(bold(jira)) if jira else ''
+                print('  {} — {} viol, {} warn — {}{}'.format(
+                    bold(comp), viol_color(str(viol)), warn, dim(scenario),
+                    jira_part))
         print()
         return
     args = ['get', 'conforma']
@@ -282,29 +339,14 @@ def get_conforma(ctx, filter, output_json):
 def get_exceptions(ctx, output_json):
     """Policy exceptions expiring/expired."""
     import json as json_mod
-    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ensure_cluster():
-        from cli.data import get_policy_exceptions
-        from cli.formatting import bold, dim, section_header, yellow
-        data = get_policy_exceptions()
-        if is_json:
+    if is_json:
+        from cli.mode import ensure_cluster
+        if ensure_cluster():
+            from cli.data import get_policy_exceptions
+            data = get_policy_exceptions()
             print(json_mod.dumps(data, indent=2, default=str))
             return
-        section_header('Policy Exceptions')
-        print()
-        exceptions = data.get('exceptions', []) if data else []
-        if not exceptions:
-            print('  No exceptions found')
-        for exc in exceptions:
-            val = exc.get('value', '')
-            ref = exc.get('reference', '')
-            until = exc.get('effectiveUntil')
-            print('  {} — {}'.format(bold(val[:60]), dim(ref[:40])))
-            if until:
-                print('    Expires: {}'.format(yellow(until)))
-        print()
-        return
     args = ['get', 'exceptions']
     if is_json:
         args.append('--json')
@@ -1872,6 +1914,58 @@ def ai_stats(fixes):
     print()
 
 
+@ai.command('quality')
+def ai_quality():
+    """AI analysis quality metrics — accuracy from verdicts."""
+    from cli.mode import is_cluster
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+
+    if is_cluster():
+        from cli.api_client import get_client
+        data = get_client().get('/api/v1/metrics/ai-quality',
+                                params={'application': cfg.APPLICATION_NAME})
+    else:
+        from cli.db import get_repo, require_db
+        from repositories.ai_analysis_repository import AIAnalysisRepository
+        if not require_db():
+            return
+        data = get_repo(AIAnalysisRepository).get_quality_metrics(cfg.APPLICATION_NAME)
+
+    if not data or not data.get('total_with_verdict'):
+        print('  No verdicts recorded yet.')
+        print('  Verdicts are recorded automatically when builds pass after AI analysis,')
+        print('  or manually via: ic triage resolve <id> --verdict correct|partial|incorrect')
+        return
+
+    section_header('AI Quality Metrics')
+    print()
+    total = data['total_with_verdict']
+    acc = data.get('accuracy')
+    acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
+    color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
+
+    print('  Accuracy:     {}'.format(color(acc_str)))
+    print('  Verdicts:     {} total'.format(bold(str(total))))
+    print('    Correct:    {}'.format(green(str(data['correct']))))
+    print('    Partial:    {}'.format(yellow(str(data['partial']))))
+    print('    Incorrect:  {}'.format(red(str(data['incorrect']))))
+    if data.get('avg_confidence_correct') is not None:
+        print('  Avg conf (correct):   {}%'.format(
+            int(data['avg_confidence_correct'] * 100)))
+    if data.get('avg_confidence_incorrect') is not None:
+        print('  Avg conf (incorrect): {}%'.format(
+            int(data['avg_confidence_incorrect'] * 100)))
+
+    if data.get('by_category'):
+        print()
+        print('  {}'.format(bold('By Category:')))
+        for cat, stats in data['by_category'].items():
+            cat_acc = (stats['correct'] + stats['partial'] * 0.5) / stats['total'] if stats['total'] else 0
+            print('    {:<30} {}/{} ({}%)'.format(
+                cyan(cat), stats['correct'], stats['total'], int(cat_acc * 100)))
+    print()
+
+
 # --- Top-level commands ---
 
 from cli.commands.triage import triage  # noqa: E402
@@ -3165,8 +3259,13 @@ def skills_list(ctx, filter_tag, filter_source, output_json):
 
 @skills.command('add')
 @click.argument('source_name_or_url')
-def skills_add(source_name_or_url):
-    """Add skills from a git repo or known source."""
+@click.option('--branch', 'branch_flag', default=None, help='Git branch to clone (overrides @branch syntax)')
+def skills_add(source_name_or_url, branch_flag):
+    """Add skills from a git repo or known source.
+
+    Supports branch syntax: ic skills add <url>@<branch>
+    Or explicit flag:       ic skills add <url> --branch <branch>
+    """
     from skills.known_sources import resolve_source
     from skills.loader import clone_source, discover_skills, use_local_source
     from skills.db_registry import get_registry
@@ -3179,12 +3278,14 @@ def skills_add(source_name_or_url):
         local_path, commit = use_local_source(expanded)
         name = os.path.basename(os.path.abspath(expanded))
         url = 'file://{}'.format(os.path.abspath(expanded))
+        branch = None
     else:
-        name, url = resolve_source(source_name_or_url)
-        print('Cloning {}...'.format(url))
-        local_path, commit = clone_source(url, name)
+        name, url, branch = resolve_source(source_name_or_url, branch_override=branch_flag)
+        branch_msg = ' (branch: {})'.format(branch) if branch else ''
+        print('Cloning {}{}...'.format(url, branch_msg))
+        local_path, commit = clone_source(url, name, branch)
 
-    registry.add_source(name, url, commit, local_path)
+    registry.add_source(name, url, commit, local_path, branch)
 
     found = discover_skills(local_path)
     if not found:
@@ -3274,7 +3375,7 @@ def skills_update(source_name):
         return
     for src in sources:
         print('Updating {}...'.format(bold(src.name)))
-        local_path, commit = clone_source(src.url, src.name)
+        local_path, commit = clone_source(src.url, src.name, src.branch)
         found = discover_skills(local_path)
         found_names = set()
         for skill_dir, meta in found:
@@ -3332,6 +3433,8 @@ def skills_info(name):
     if source:
         print(bold('Source:'))
         print('  URL:    {}'.format(source.url))
+        if source.branch:
+            print('  Branch: {}'.format(source.branch))
         print('  Commit: {}'.format(source.commit))
         print('  Added:  {}'.format(source.added_at[:10]))
         print()
@@ -3350,8 +3453,9 @@ def skills_sources():
     if registry.sources:
         for src in registry.list_sources():
             skill_count = len([s for s in registry.skills.values() if s.source == src.name])
-            print('  {:<20}  {} skill(s)  commit {}  {}'.format(
-                bold(src.name), skill_count, src.commit[:8], dim(src.url)))
+            branch_info = '  branch {}'.format(src.branch) if src.branch else ''
+            print('  {:<30}  {} skill(s)  commit {}{}'.format(
+                bold(src.name), skill_count, src.commit[:8], branch_info))
     else:
         print('  None registered yet.')
     print()
@@ -3360,9 +3464,11 @@ def skills_sources():
     print()
     for name, info in sorted(KNOWN_SOURCES.items()):
         registered = green('✓') if name in registry.sources else dim('—')
-        print('  {} {:<20}  {}'.format(registered, name, info['description']))
+        branch_note = ' [{}]'.format(info['branch']) if info.get('branch') else ''
+        print('  {} {:<30}  {}{}'.format(registered, name, info['description'], branch_note))
     print()
     print("  Add with: ic skills add <name>   (e.g., ic skills add aiops-infra)")
+    print("  With branch: ic skills add <url>@<branch>  or  --branch <branch>")
     print()
 
 

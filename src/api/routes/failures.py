@@ -15,6 +15,7 @@ from mcp_server.models import (
 )
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
+from repositories.triage_repository import TriageRepository
 from repositories.repository_factory import get_repository, get_pool
 
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
@@ -28,6 +29,10 @@ def _build_repo():
 
 def _conforma_repo():
     return get_repository(ConformaRepository)
+
+
+def _triage_repo():
+    return get_repository(TriageRepository)
 
 
 def _konflux_url(pr_name: str) -> str:
@@ -55,6 +60,16 @@ def list_alerts(application: str):
 
     conforma_violations = []
     conforma_failing = _conforma_repo().find_unresolved_component_names(application)
+    triage_jira = {}
+    try:
+        for item in _triage_repo().get_active_items(application):
+            jk = item.get('jira_key')
+            if jk:
+                for c in item.get('components', []):
+                    if c not in triage_jira:
+                        triage_jira[c] = jk
+    except Exception:
+        pass
     ec_policy_base = os.environ.get('GITLAB_EC_POLICY_URL', '')
     for comp_name in sorted(conforma_failing):
         details = _conforma_repo().get_violation_details(comp_name, application)
@@ -67,6 +82,7 @@ def list_alerts(application: str):
                 if m:
                     policy_name = m.group(1)
                     policy_url = '{}/{}.yaml'.format(ec_policy_base, policy_name)
+            jira_key = details.get('jira_key') or triage_jira.get(comp_name)
             conforma_violations.append(FailureSummary(
                 component=comp_name,
                 status='Conforma Violation',
@@ -80,7 +96,7 @@ def list_alerts(application: str):
                 warnings_count=details.get('warnings_count', 0),
                 scenario=scenario,
                 policy_url=policy_url,
-                jira_key=details.get('jira_key'),
+                jira_key=jira_key,
             ))
 
     nightly_warnings = []

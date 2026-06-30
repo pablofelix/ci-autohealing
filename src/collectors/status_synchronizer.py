@@ -327,6 +327,9 @@ class StatusSynchronizer:
                     logger.warning("Triage auto-resolve failed for %s",
                                    component.name, exc_info=True)
 
+                self._auto_verdict(component.name, app)
+                self._correlate_skill_runs(component.name, app)
+
             if self.build_repo.record_successful_build(
                 component.name, current['name'], current['uid'],
                 app, ns, component.repository_url, component.branch
@@ -346,6 +349,40 @@ class StatusSynchronizer:
             logger.info("Current status: Failed (will be collected by comprehensive collector)")
 
         return result
+
+    def _auto_verdict(self, component_name, application):
+        """Auto-record 'correct' verdict when a build passes after AI analysis."""
+        try:
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            ai_repo = AIAnalysisRepository(self.build_repo.db)
+            analysis = ai_repo.get_analysis_by_component(component_name, application, 'build')
+            if analysis and not analysis.get('human_verdict'):
+                ai_repo.record_verdict(
+                    component_name, application, 'correct',
+                    verdict_by='auto-resolve')
+                logger.info("Auto-verdict 'correct' for %s AI analysis", component_name)
+        except Exception:
+            logger.debug("Auto-verdict failed for %s", component_name, exc_info=True)
+
+    def _correlate_skill_runs(self, component_name, application):
+        """Mark recent skill_runs for this component with outcome=build_passed."""
+        try:
+            with self.build_repo.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE skill_runs
+                    SET outcome = 'build_passed'
+                    WHERE component_name = %s
+                      AND application = %s
+                      AND outcome IS NULL
+                      AND started_at > NOW() - INTERVAL '7 days'
+                """, (component_name, application))
+                if cursor.rowcount > 0:
+                    conn.commit()
+                    logger.info("Marked %d skill_runs as build_passed for %s",
+                                cursor.rowcount, component_name)
+        except Exception:
+            logger.debug("Skill run correlation failed for %s", component_name, exc_info=True)
 
     def run(self, components=None):
         start_time = time.time()

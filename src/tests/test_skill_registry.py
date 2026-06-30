@@ -258,12 +258,12 @@ class TestSkillRegistry(unittest.TestCase):
 class TestKnownSources(unittest.TestCase):
 
     def test_resolve_known(self):
-        name, url = resolve_source('aiops-infra')
+        name, url, branch = resolve_source('aiops-infra')
         self.assertEqual(name, 'aiops-infra')
         self.assertIn('github.com', url)
 
     def test_resolve_url(self):
-        name, url = resolve_source('https://github.com/org/my-repo')
+        name, url, branch = resolve_source('https://github.com/org/my-repo')
         self.assertEqual(name, 'my-repo')
         self.assertEqual(url, 'https://github.com/org/my-repo')
 
