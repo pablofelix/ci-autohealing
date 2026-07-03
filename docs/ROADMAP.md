@@ -89,6 +89,42 @@ Goal: run skills as automated workflows, not just lookup/reference.
 
 ---
 
+## Phase 4b: Agent Execution Mode
+
+Goal: skills with multi-step workflows (like `conforma-analyze`) execute via an AI agent that follows SKILL.md instructions step-by-step, with sandboxed command execution.
+
+**4b-1 — Foundation (Tools + Sandbox)**
+- [ ] `agent_config.py`: frozen dataclass with max_turns, max_cost, timeout, sandbox_timeout
+- [ ] `agent_tools.py`: ToolRegistry with handler pattern (bash_execute, python_execute, read_file, write_file, ask_user)
+- [ ] `agent_sandbox.py`: ToolSandbox ABC + LocalSandbox (subprocess with `get_safe_env()` filtering)
+- [ ] `agent_state.py`: conversation history, variables, turn count, token/cost tracking
+
+**4b-2 — Multi-turn LLM + Agent Executor**
+- [ ] Extend `LLMProvider` with `create_conversation()` for multi-turn tool_use
+- [ ] Implement in `AnthropicDirectProvider` and `VertexAIProvider`
+- [ ] `agent_executor.py`: agent loop — read SKILL.md as prompt, iterate with tool_use, execute via sandbox
+- [ ] Streaming output: agent text + command results to stdout in real-time
+- [ ] Safety limits: max iterations, total timeout, cost ceiling, output redaction
+
+**4b-3 — CLI Integration + Auto-detection**
+- [ ] `type_detector.py`: detect skill type from SKILL.md content (routing/workflow/script/hybrid)
+- [ ] `execution_mode` field in SkillMetadata frontmatter
+- [ ] `--agent` flag on `ic skills run` (or auto-detect from metadata/content)
+- [ ] `--interactive` flag: agent pauses for user confirmation before tool calls
+- [ ] `--max-turns N`, `--max-cost DOLLARS` safety flags
+
+**4b-4 — Interaction Modes**
+- [ ] Autonomous: pre-configured params, no user interaction (default)
+- [ ] Interactive: `--interactive` pauses for confirmation before tool calls
+- [ ] Semi-autonomous: `--param key=value` pre-fills known answers
+
+**4b-5 — K8s Sandbox (future)**
+- [ ] `K8sSandbox` implementing `ToolSandbox` — execute in ephemeral K8s pod
+- [ ] Route high-risk agent skills to K8s sandbox based on risk assessment
+- [ ] `IcMetadata.sandbox` dict configuration (image, namespace, resources)
+
+---
+
 ## Phase 5: Self-Healing Loop
 
 Goal: close the loop from detection → diagnosis → fix → verification automatically for high-confidence failures.
@@ -132,6 +168,18 @@ Goal: dashboards and trends, not just point-in-time snapshots.
 - [ ] Weekly accuracy report command: `ic ai quality`
 - [ ] Confidence calibration analysis
 - [ ] Training data export: `ic ai export-training-data` (for future custom model)
+
+**6a2 — Confidence Calibration & Scientific Error Analysis (requires 6a)**
+- [ ] Calibration curve: when AI says 0.90, how often is it correct? Plot predicted vs actual
+- [ ] Bayesian priors per failure category from historical verdicts
+- [ ] Feature-based scoring: replace subjective LLM float with calculated score from boolean features (has_build_history, sha_mismatch_confirmed, nudging_checked, etc.)
+- [ ] Confidence cap refinement: tune penalties based on actual miss rates per missing source
+- [ ] Calibration dashboard in `ic ai quality --calibration`
+- [ ] Differential diagnosis: prompt LLM to generate 2-3 competing hypotheses ranked by evidence strength before selecting root cause
+- [ ] Evidence hierarchy classification: weight evidence sources (commit diff > build log > config > error message) and score evidence coverage
+- [ ] Fault Tree Analysis: structured decomposition of complex failures into contributing factors (multi-cause failures)
+- [x] Context-aware confidence cap: penalize confidence when enrichment sources unavailable (`_apply_confidence_cap`)
+- [x] Fix verification: prompt instructions + post-analysis annotation when fixes are already in progress
 
 **6b — Operational Metrics**
 - [ ] Build health trends over time (success rate charts per component)
@@ -226,8 +274,8 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 - [x] STYLE.md pre-commit hook (frozen dataclass, no bare except, no print in lib)
 - [x] cli/mode.py: ensure_cluster() eliminates 31 repeated mode-check blocks (DRY)
 - [x] cli/log_filter.py: smart error filtering for build logs (error patterns + context)
-- [ ] Autocomplete suggestions from DB for invalid names
-- [ ] Progress indicators for long operations
+- [x] Autocomplete suggestions from DB for invalid names — `cli/completions.py`
+- [x] Progress indicators for long operations — `cli/progress.py` (animated spinner)
 
 ---
 
@@ -235,28 +283,28 @@ Goal: eliminate all direct DB access from CLI. `ic` becomes a pure REST API clie
 
 Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full analysis.
 
-**S1a — Log and output security**
-- [ ] Secret scanning/redaction in stored logs and AI output (T2)
-- [ ] Sanitize AI-generated content before Jira/Slack posting (T5)
-- [ ] Strip ANSI escape codes from stored logs (T1)
-- [ ] LLM prompt injection protection: canary tokens + output validation (T15)
+**S1a — Log and output security (done)**
+- [x] Secret scanning/redaction in stored logs and AI output (T2) — `security/redact.py`, 12 regex patterns
+- [x] Sanitize AI-generated content before Jira/Slack posting (T5) — `_sanitize_for_jira()`, `_sanitize_for_slack()`
+- [x] Strip ANSI escape codes from stored logs (T1) — `strip_ansi()`, `sanitize_for_storage()`
+- [x] LLM prompt injection protection: canary tokens + output validation (T15) — `security/llm_guard.py`
 
-**S1b — Skill execution security**
-- [ ] Command audit log: wrap subprocess to log every command before execution (T7)
-- [ ] Secret masking: only pass env vars declared in requires-env, strip undeclared tokens (T7)
-- [ ] Execution budget: timeout + max output size per skill (T7)
+**S1b — Skill execution security (partial)**
+- [x] Command audit log: wrap subprocess to log every command before execution (T7) — `executor.py` logs command, args, exit code
+- [x] Secret masking: only pass env vars declared in requires-env, strip undeclared tokens (T7) — `get_safe_env()`
+- [x] Execution budget: timeout + max output size per skill (T7) — `subprocess.TimeoutExpired` handling
 - [ ] Pin external skills to SHA — require approval before first run (T7)
 - [ ] Sandbox ALL skill execution by default (not just high-risk) (T7)
 
-**S1c — Autonomous action limits**
+**S1c — Autonomous action limits (partial)**
+- [x] AUTONOMOUS_MODE activation controls with confirmation (T6) — `security/autonomous.py`, 24h time limit
 - [ ] Autonomous PR scope limits: repo allowlist, file allowlist, branch naming (T3, T8)
-- [ ] AUTONOMOUS_MODE activation controls with confirmation (T6)
 - [ ] GitHub API call audit logging (T4)
 - [ ] Never-modify file list for auto-fix PRs (T8)
 
-**S1d — API hardening**
-- [ ] Basic rate limiting: 100 req/min read, 10 req/min write (T11)
-- [ ] Config file permissions: ~/.ic/config.json mode 600 on creation (T12)
+**S1d — API hardening (done)**
+- [x] Basic rate limiting: 100 req/min read, 10 req/min write (T11) — `api/rate_limit.py`
+- [x] Config file permissions: ~/.ic/config.json mode 600 on creation (T12) — `ic_config.py`
 
 ## Phase S2: Defense in Depth
 
@@ -294,6 +342,64 @@ Goal: prevent the most damaging attacks. See `docs/THREAT_MODEL.md` for full ana
 - [ ] Multi-tenant data isolation (T18)
 - [ ] Per-agent MCP tool allowlists (T16)
 - [ ] `ic import-data` for migration between instances (T17)
+
+---
+
+## Phase 10: Conforma Reporter Integration
+
+Goal: seamless access to stage/nightly conforma violations from the reporter repo, without leaving ic.
+
+| Feature | CLI | MCP | API | Status |
+|---------|-----|-----|-----|--------|
+| `--stage` flag for stage policy violations | `ic get conforma --stage` | `get_conforma_report(reporter_env='stage')` | `?reporter_env=stage` | done |
+| `--nightly` flag for nightly build violations | `ic get conforma --nightly` | `get_conforma_report(reporter_build_type='nightly')` | `?reporter_build_type=nightly` | done |
+| Combined `--stage --nightly` | `ic get conforma --stage --nightly` | Both params | Both params | done |
+| Reporter CSV client with 1h file cache | — | — | — | done |
+| Stage policies in category map | — | — | — | done |
+| All conforma subcommands support flags | `report`, `categories`, `csv` | `get_conforma_categories()` | `/violations`, `/violations/report` | done |
+| Group violations by rule + solution | `ic conforma rules` | `get_conforma_rules()` | `/violations/rules` | done |
+
+---
+
+## Phase 11: AI Evidence References & Release Visibility
+
+Goal: AI analyses cite their sources with structured evidence links, and release verify-conforma failures show full violation details.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| Show violated rule names in `ic describe release --logs` | CLI | done |
+| Wire `ReleaseFailureAnalyzer` display into `ic describe release` | CLI | done |
+| `EvidenceReference` model (type, url, description) | Analyzers | done |
+| `evidence_references` in all 3 tool schemas (build, conforma, release) | Analyzers | done |
+| Prompt instructions + known doc URLs for evidence generation | Prompts | done |
+| Evidence references display in `display_ai_analysis()` | CLI | done |
+| Policy URL with line anchors via `conforma_utils.py` | Conforma analyzer | done |
+| Neo4j knowledge graph context in all 3 analyzers | `graph_context.py` | done |
+| Tekton file name resolution from GitHub API | `conforma_analyzer._get_tekton_files()` | done |
+| Source transparency (sources used, unavailable, limitations) | All 3 analyzers + CLI + MCP | done |
+
+---
+
+## Phase 12: Enriched Release Analysis
+
+Goal: the release AI analyzer has the same context as a human engineer doing triage — not just pipeline logs, but build history, SHA tracing, nudging state, application health, and active triage items.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| Violation-driven enrichment: build history + SHA per violated component | Analyzer | done |
+| SHA tracing: compare violation SHA vs green build SHA, flag mismatch | Analyzer | done |
+| Build failure details for failed components (failed TaskRun + error) | Analyzer | done |
+| operator-nudging.yaml fetch and display (configurable repo/path) | Analyzer | done |
+| Nudge PR lookup for violated components | Analyzer | done |
+| Application health: working/failing counts, active build failures | Analyzer | done |
+| Active conforma violations context | Analyzer | done |
+| Active triage items with Jira keys and root causes | Analyzer | done |
+| Nightly build history (last 7 days) | Analyzer | done |
+| Configurable repos: GITHUB_OPERATOR_OWNER/REPO, OPERATOR_NUDGING_PATH | Config | done |
+| Context-aware confidence cap: penalize when enrichment sources unavailable | Analyzer | done |
+| System prompt: enriched context instructions + confidence scoring update | Prompt | done |
+| Enriched context sections in build_analysis_prompt() | Prompt builder | done |
+| TriageRepository exported from repositories package | Repositories | done |
 
 ---
 

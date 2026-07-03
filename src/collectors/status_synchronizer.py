@@ -7,6 +7,7 @@ Provides:
 """
 
 import time
+from datetime import datetime
 from dataclasses import replace
 
 from logger import setup_logger
@@ -327,7 +328,8 @@ class StatusSynchronizer:
                     logger.warning("Triage auto-resolve failed for %s",
                                    component.name, exc_info=True)
 
-                self._auto_verdict(component.name, app)
+                self._auto_verdict(component.name, app,
+                                   resolution_commit_sha=current.get('commit_sha'))
                 self._correlate_skill_runs(component.name, app)
 
             if self.build_repo.record_successful_build(
@@ -350,17 +352,35 @@ class StatusSynchronizer:
 
         return result
 
-    def _auto_verdict(self, component_name, application):
-        """Auto-record 'correct' verdict when a build passes after AI analysis."""
+    def _auto_verdict(self, component_name, application,
+                      resolution_commit_sha=None):
+        """Smart auto-verdict using GitHub PR correlation when available."""
         try:
             from repositories.ai_analysis_repository import AIAnalysisRepository
             ai_repo = AIAnalysisRepository(self.build_repo.db)
             analysis = ai_repo.get_analysis_by_component(component_name, application, 'build')
-            if analysis and not analysis.get('human_verdict'):
-                ai_repo.record_verdict(
-                    component_name, application, 'correct',
-                    verdict_by='auto-resolve')
-                logger.info("Auto-verdict 'correct' for %s AI analysis", component_name)
+            if not analysis or analysis.get('human_verdict'):
+                return
+
+            verdict = 'correct'
+            token = getattr(self.config, 'github_token', None)
+            if token and resolution_commit_sha:
+                try:
+                    from collectors.verdict_correlator import VerdictCorrelator
+                    correlator = VerdictCorrelator(self.config, self.build_repo.db)
+                    verdict = correlator.correlate_build_resolution(
+                        component_name, application,
+                        resolution_commit_sha, datetime.utcnow()
+                    )
+                except Exception as e:
+                    logger.warning("Smart correlation failed for %s, using simple verdict: %s",
+                                   component_name, str(e)[:100])
+                    verdict = 'correct'
+
+            ai_repo.record_verdict(
+                component_name, application, verdict,
+                verdict_by='auto-resolve')
+            logger.info("Auto-verdict '%s' for %s AI analysis", verdict, component_name)
         except Exception:
             logger.debug("Auto-verdict failed for %s", component_name, exc_info=True)
 

@@ -873,7 +873,60 @@ class AIAnalysisRepository:
             """, (verdict, verdict_by, actual_root_cause,
                   component, application, component, application))
             conn.commit()
-            return cursor.rowcount > 0
+            updated = cursor.rowcount > 0
+
+        if updated and verdict in ('correct', 'partial', 'incorrect'):
+            self._update_confidence_models(component, application, verdict)
+
+        return updated
+
+    def _update_confidence_models(self, component, application, verdict):
+        """Update feature weights from new verdict (incremental learning)."""
+        try:
+            from analyzers.feature_weights import FeatureWeightService
+            from analyzers.confidence_features import FeatureVector
+
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT a.analysis_json FROM ai_analysis a
+                    LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                    LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE (b.component_name = %s AND b.application = %s)
+                       OR (c.component_name = %s AND c.application = %s)
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                """, (component, application, component, application))
+                row = cursor.fetchone()
+                if not row or not row[0]:
+                    return
+
+                analysis_json = row[0]
+                metadata = {}
+                if isinstance(analysis_json, list):
+                    for tc in analysis_json:
+                        if isinstance(tc, dict) and 'confidence_metadata' in tc.get('input', {}):
+                            metadata = tc['input']['confidence_metadata']
+                            break
+                elif isinstance(analysis_json, dict):
+                    metadata = analysis_json.get('confidence_metadata', {})
+
+                features_used = metadata.get('features_used', [])
+                if not features_used:
+                    return
+
+                feature_dict = {f: True for f in features_used}
+                features = FeatureVector(**{
+                    k: feature_dict.get(k, False)
+                    for k in FeatureVector.__dataclass_fields__
+                })
+
+                was_correct = verdict == 'correct' or (verdict == 'partial')
+                weight_service = FeatureWeightService(self.db)
+                weight_service.update_from_verdict(features, was_correct)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Feature weight update failed for %s", component, exc_info=True)
 
     def get_quality_metrics(self, application=None, days=30):
         """Aggregate AI quality metrics from human verdicts."""
@@ -941,6 +994,88 @@ class AIAnalysisRepository:
                 for r in cursor.fetchall()
             }
 
+            return result
+
+    def get_verdict_stats_by_category(self, analyzer_type='build', days=90):
+        """Return verdict stats grouped by failure_category.
+
+        Used by BayesianPriorService to compute P(correct | category).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            if analyzer_type == 'build':
+                join = "JOIN build_failures b ON a.build_failure_id = b.id"
+            elif analyzer_type == 'conforma':
+                join = "JOIN conforma_results b ON a.conforma_result_id = b.id"
+            else:
+                join = """LEFT JOIN build_failures bf ON a.build_failure_id = bf.id
+                          LEFT JOIN conforma_results cr ON a.conforma_result_id = cr.id"""
+
+            cursor.execute("""
+                SELECT
+                    a.failure_category AS category,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) AS total
+                FROM ai_analysis a
+                {join}
+                WHERE a.human_verdict IS NOT NULL
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                GROUP BY a.failure_category
+                ORDER BY COUNT(*) DESC
+            """.format(join=join), (days,))
+
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_calibration_data(self, analyzer_type=None, category=None, days=90):
+        """Return confidence_score and verdict accuracy for calibration curves.
+
+        Each row has 'confidence' (predicted) and 'accuracy' (0/0.5/1 actual).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            conditions = ["a.human_verdict IS NOT NULL",
+                          "a.analyzed_at > NOW() - make_interval(days => %s)"]
+            params = [days]
+
+            if analyzer_type == 'build':
+                conditions.append("a.build_failure_id IS NOT NULL")
+            elif analyzer_type == 'conforma':
+                conditions.append("a.conforma_result_id IS NOT NULL")
+
+            if category:
+                conditions.append("a.failure_category = %s")
+                params.append(category)
+
+            where = " AND ".join(conditions)
+            cursor.execute("""
+                SELECT
+                    a.confidence_score,
+                    a.human_verdict,
+                    a.failure_category
+                FROM ai_analysis a
+                WHERE {where}
+                ORDER BY a.analyzed_at
+            """.format(where=where), params)
+
+            result = []
+            for row in cursor.fetchall():
+                verdict = row[1]
+                if verdict == 'correct':
+                    accuracy = 1.0
+                elif verdict == 'partial':
+                    accuracy = 0.5
+                elif verdict == 'incorrect':
+                    accuracy = 0.0
+                else:
+                    continue
+                result.append({
+                    'confidence': float(row[0]) if row[0] else 0.5,
+                    'accuracy': accuracy,
+                    'category': row[2],
+                })
             return result
 
     def get_conforma_queue(self, application):

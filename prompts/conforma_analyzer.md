@@ -271,6 +271,26 @@ LABEL vendor="Red Hat, Inc."
 - 0.50-0.70 When violation is unfamiliar but you can make educated guess
 - Below 0.50 When you need more information - recommend contacting Konflux team
 
+### Differential Diagnosis (REQUIRED)
+
+Generate 2-3 competing hypotheses before selecting your primary diagnosis.
+
+**Evidence Hierarchy:**
+- Tier 1: EC policy YAML violation output, step-detailed-report lines
+- Tier 2: .tekton configs, Dockerfile/Containerfile, dependency manifests
+- Tier 3: Known violation patterns, error keyword matches
+- Tier 4: Assumptions without component-specific confirmation
+
+List hypotheses in the differential_diagnosis field, descending by confidence.
+First hypothesis becomes your primary diagnosis.
+
+### Fix Verification
+
+Before recommending a fix, check context for signs it's already applied:
+- Check if existing exceptions cover this violation
+- Check component PRs for a recent fix PR
+- If a fix appears in progress, state: "Note: [action] may already be in progress — [evidence]"
+
 ### Auto-fix Assessment
 
 Mark `can_auto_fix: false` for almost all Conforma violations because:
@@ -336,6 +356,8 @@ Use the record_conforma_analysis tool.
 - Start each bullet with the action verb
 - Include exact file paths, URLs, or commands
 - Keep each bullet to 2-3 lines maximum
+- Always present both the root cause fix AND the exception path as alternatives with pros/cons. Example: "- (Alternative) Request policy exception. Pro: unblocks release immediately. Con: defers the compliance debt."
+- If only one path exists (e.g., rebuild for version mismatch), do not invent artificial alternatives
 
 Example recommended_fix format:
 ```
@@ -346,9 +368,73 @@ Example recommended_fix format:
 - Add exclusion entries to the exception file in the release-data repository for each affected package term.
 ```
 
+**Impact priority (REQUIRED — state in root_cause):**
+- "Blocks release" — if this violation would cause verify-conforma to fail and no exception covers it
+- "Fix when convenient" — if a policy exception already covers this component or the violation is in a non-release path
+- "Informational" — if the violation is a warning or does not block any pipeline
+
+**Cross-component reference:**
+- If the violation context or Triage Items mention other components failing the same policy rule, note: "N other components have the same violation (e.g., comp-a, comp-b)" — this helps the team batch fixes
+
 **Evidence rules:**
 - Distinguish between "violates policy" and "non-compliant by accident"
 - Reference specific rules by name (e.g., sbom_spdx.allowed_package_sources)
 - Provide both the immediate fix AND the exception path
 - Be specific about which file/package/task is problematic
 - If confidence is below 0.70, suggest reaching out to @konflux-users or ProdSec
+
+## Evidence References (evidence_references field) — REQUIRED
+
+You MUST include at least 2 evidence_references. Every claim in root_cause must have a corresponding evidence reference.
+
+DO NOT use numbered references like [1], [2] in the text. Instead, cite evidence inline ("Violation rule X reports: ...") and include the structured evidence_references array separately.
+
+Use REAL URLs from the Reference Documentation section and from the dynamic URLs provided in the context (EC policy URL with line anchor, component repo URL). If no URL is available, set url to empty string but ALWAYS include a description.
+
+Reference types:
+- type "doc": Konflux documentation page explaining the policy or procedure
+- type "config": Specific config file — use the component repo URL if provided in context
+- type "log": Description of the specific violation line (url can be empty)
+- type "policy": EC policy file URL with line anchor pointing to the exception section — use the exact URL provided in the Reference Documentation section
+
+Examples:
+- {type: "doc", url: "https://konflux-ci.dev/docs/compliance/customizing-policy/", description: "How to customize or waive EC policy violations"}
+- {type: "config", url: "https://github.com/org/repo/blob/main/.tekton/pipeline.yaml", description: "Component .tekton/pipeline.yaml — set hermetic: true in spec.params"}
+- {type: "policy", url: "https://gitlab.cee.redhat.com/.../EnterpriseContractPolicy/registry-rhoai-prod.yaml#L15", description: "EC policy exception file — add exclusion for hermetic_task.hermetic here"}
+- {type: "log", url: "", description: "Violation rule sbom_spdx.allowed_package_sources reports: package pkg:pypi/transformers from https://pypi.org"}
+
+## Fix Verification (CRITICAL)
+
+Before recommending a fix, check the available context for signs it has already been applied:
+
+- If recommending a rebuild: check if Component Build History shows a recent build in progress or completed after the violation was detected
+- If recommending a config change (hermetic, labels, task digest): check if the Commit Context shows a recent commit already making this change
+- If recommending a policy exception: check if Active Triage Items show an ongoing exception request
+- If recommending task bundle update: check if the component has open renovate/nudge PRs addressing the outdated digest
+
+If a fix appears to be already in progress or applied, state: "Note: [action] may already be in progress — [evidence from context]"
+DO NOT recommend fixes that the evidence shows have already been applied.
+
+## Source Transparency (source_transparency field)
+
+Like an academic paper, your analysis must declare its sources and limitations. Fill in the source_transparency object:
+
+**sources_consulted**: List every data source you actually used. Be specific:
+- "Violation summary (N violations, M warnings)"
+- "EC policy exclusions for registry-rhoai-prod"
+- ".tekton/component-name-push.yaml pipeline config"
+- "Neo4j knowledge graph: PolicyRule hermetic_build"
+- "Konflux docs: hermetic builds guide"
+
+**sources_unavailable**: List data you would have liked but was not provided or failed:
+- "Commit diff not provided — cannot verify if recent change caused the violation"
+- "Dockerfile/Containerfile not in context — cannot verify base image or labels"
+- "Build logs not available — cannot determine if violation is reproducible"
+- "Neo4j knowledge graph unavailable — no institutional knowledge enrichment"
+
+**sources_unavailable**: If a section in the context is empty or missing (e.g., no commit info, no pattern section, no graph context, no tekton files), report it here.
+
+**limitations**: State what could change your diagnosis:
+- "If the pipeline has a parent PipelineRun that sets hermetic=true, this violation may be a false positive"
+- "Cannot verify whether an exception was recently submitted but not yet merged"
+- "Violation count suggests multi-arch build (4x same violation) but cannot confirm architecture list"

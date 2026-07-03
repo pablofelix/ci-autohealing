@@ -490,6 +490,8 @@ class GitHubClient:
                 'author': pr.get('user', {}).get('login', ''),
                 'base_branch': pr.get('base', {}).get('ref', ''),
                 'updated_at': pr.get('updated_at', ''),
+                'merged_at': pr.get('merged_at'),
+                'merge_commit_sha': pr.get('merge_commit_sha'),
                 'merged': pr.get('merged_at') is not None,
             }
             for pr in resp.json()[:limit]

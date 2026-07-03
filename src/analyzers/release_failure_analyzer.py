@@ -14,12 +14,16 @@ import time
 from kubernetes import client
 
 from logger import setup_logger
-from repositories import DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository
+from repositories import (
+    DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository,
+    BuildFailureRepository, ConformaRepository, TriageRepository,
+)
 from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
 from clients.kubearchive import KubeArchiveClient
 from clients.github_client import GitHubClient
 from clients.gitlab_client import GitLabClient
+from clients.tekton_results import TektonResultsClient
 from prompt_loader import load_prompt
 from openshift_auth import _ensure_k8s_config
 
@@ -38,6 +42,10 @@ GITLAB_EC_PATHS = [
 GITHUB_BUILD_CONFIG_OWNER = os.environ.get('GITHUB_BUILD_CONFIG_OWNER', '')
 GITHUB_BUILD_CONFIG_REPO = os.environ.get('GITHUB_BUILD_CONFIG_REPO', '')
 
+GITHUB_OPERATOR_OWNER = os.environ.get('GITHUB_OPERATOR_OWNER', 'red-hat-data-services')
+GITHUB_OPERATOR_REPO = os.environ.get('GITHUB_OPERATOR_REPO', 'rhods-operator')
+OPERATOR_NUDGING_PATH = os.environ.get('OPERATOR_NUDGING_PATH', 'build/operator-nudging.yaml')
+
 RELEASE_ANALYSIS_TOOL = {
     'name': 'record_release_analysis',
     'description': 'Record the analysis of a release pipeline failure',
@@ -55,6 +63,7 @@ RELEASE_ANALYSIS_TOOL = {
                     'rpa_mapping_typo',
                     'cross_product_dependency',
                     'missing_ec_exception',
+                    'build_artifact_missing',
                     'validation_error',
                     'publish_failure',
                     'access_denied',
@@ -77,6 +86,18 @@ RELEASE_ANALYSIS_TOOL = {
                 'items': {'type': 'string'},
                 'description': 'Files that need modification'
             },
+            'fix_action_type': {
+                'type': 'string',
+                'enum': [
+                    'rebuild',
+                    'file_change',
+                    'config_change',
+                    'multi_step',
+                    'investigation_needed',
+                    'other'
+                ],
+                'description': 'Type of fix action required: rebuild (fresh build in Konflux), file_change (modify source/config files), config_change (Tekton/pipeline config), multi_step (coordinated sequence), investigation_needed (unclear root cause), other (novel pattern)'
+            },
             'can_auto_fix': {
                 'type': 'boolean',
                 'description': 'Whether this can be automatically fixed'
@@ -93,6 +114,55 @@ RELEASE_ANALYSIS_TOOL = {
             'owner_team': {
                 'type': 'string',
                 'description': 'Which team should fix this (e.g., RHOAI, RHAII, RelEng)'
+            },
+            'evidence_references': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'type': {'type': 'string', 'enum': ['doc', 'config', 'log', 'policy']},
+                        'url': {'type': 'string', 'description': 'URL to the resource'},
+                        'description': {'type': 'string', 'description': 'What this reference shows'},
+                    },
+                    'required': ['type', 'description']
+                },
+                'description': 'Links to docs, config files, policy YAML, or log evidence supporting the diagnosis'
+            },
+            'source_transparency': {
+                'type': 'object',
+                'properties': {
+                    'sources_consulted': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Data sources actually used (e.g., "release PipelineRun logs", "RPA mapping", "EC policy YAML")'
+                    },
+                    'sources_unavailable': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Sources attempted but not available (e.g., "snapshot manifest not provided", "Build-Config repo not accessible")'
+                    },
+                    'limitations': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Factors that could change the diagnosis (e.g., "could not verify image digest matches snapshot")'
+                    },
+                },
+                'description': 'Academic-style transparency: what was used, what was missing, and analysis limitations'
+            },
+            'differential_diagnosis': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'hypothesis': {'type': 'string', 'description': 'One-sentence explanation'},
+                        'category': {'type': 'string', 'description': 'failure_category enum value'},
+                        'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                        'supporting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                        'contradicting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                    },
+                    'required': ['hypothesis', 'category', 'confidence']
+                },
+                'description': '2-3 competing hypotheses ranked by evidence strength. First = primary diagnosis.'
             },
         },
         'required': [
@@ -117,8 +187,12 @@ class ReleaseFailureAnalyzer:
             db = DatabaseConnection(config.db)
 
         self.config = config
+        self.db = db
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
         self.pattern_repo = ErrorPatternRepository(db)
+        self.build_repo = BuildFailureRepository(db)
+        self.conforma_repo = ConformaRepository(db)
+        self.triage_repo = TriageRepository(db)
 
         if llm is None:
             if not config.llm:
@@ -134,6 +208,7 @@ class ReleaseFailureAnalyzer:
         self.kubearchive = None
         self.github = None
         self.gitlab = None
+        self._tekton_results = None
 
     def _get_kubearchive(self):
         if self.kubearchive is None:
@@ -174,14 +249,353 @@ class ReleaseFailureAnalyzer:
         except Exception:
             return None
 
+    @staticmethod
+    def _extract_violations(detailed_report):
+        """Extract [Violation] lines with their ImageRef from the full report.
+
+        Returns a list of dicts with 'image_ref', 'rule', and 'reason'.
+        This runs BEFORE log truncation so violations buried in the
+        middle of a large report are never lost.
+        """
+        violations = []
+        current_image = ''
+        for line in detailed_report.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('ImageRef:'):
+                current_image = stripped[len('ImageRef:'):].strip()
+            elif '[Violation]' in stripped:
+                rule = stripped.split('[Violation]')[-1].strip()
+                violations.append({
+                    'image_ref': current_image,
+                    'rule': rule,
+                })
+            elif stripped.startswith('Reason:') and violations:
+                violations[-1]['reason'] = stripped[len('Reason:'):].strip()
+        return violations
+
+    def _get_tekton_results(self, namespace='rhoai-tenant'):
+        if self._tekton_results is None or self._tekton_results.namespace != namespace:
+            self._tekton_results = TektonResultsClient(namespace=namespace)
+        return self._tekton_results
+
+    @staticmethod
+    def _image_ref_to_component(image_ref, application_suffix=''):
+        """Map a quay.io ImageRef to a Konflux component name.
+
+        quay.io/rhoai/odh-workbench-jupyter-minimal-cpu-py312-rhel9@sha256:...
+        -> odh-workbench-jupyter-minimal-cpu-py312-v3-5-ea-2
+        """
+        if not image_ref:
+            return ''
+        name_part = image_ref.split('@')[0].split('/')[-1]
+        name_part = re.sub(r'-rhel\d+$', '', name_part)
+        if application_suffix:
+            return '{}-{}'.format(name_part, application_suffix)
+        return name_part
+
+    @staticmethod
+    def _application_to_suffix(application):
+        """rhoai-v3-5-ea-2 -> v3-5-ea-2"""
+        match = re.match(r'\w+-(.+)', application)
+        return match.group(1) if match else ''
+
+    def _enrich_violation_context(self, context):
+        """For each violated component, gather build history and failure details.
+
+        Queries the IC database first; falls back to Tekton Results for
+        build-level SHA data the DB doesn't store.
+        """
+        violations = context.get('violations_summary', [])
+        if not violations:
+            return
+
+        application = context.get('application', '')
+        app_suffix = self._application_to_suffix(application)
+        build_ns = self.config.k8s.namespace
+
+        # Deduplicate: group violations by component
+        components_seen = {}
+        for v in violations:
+            component = self._image_ref_to_component(v.get('image_ref', ''), app_suffix)
+            if component and component not in components_seen:
+                components_seen[component] = v.get('image_ref', '').split('@')[-1] if '@' in v.get('image_ref', '') else ''
+
+        logger.info("  Enriching %d violated component(s) with build context", len(components_seen))
+        enriched = {}
+
+        for component, violation_sha in components_seen.items():
+            comp_data = {'component': component, 'violation_sha': violation_sha}
+
+            # DB build history (fast)
+            try:
+                history = self.build_repo.get_component_history(component, application, limit=5)
+                if history:
+                    comp_data['build_history'] = [
+                        {
+                            'pipelinerun': h.get('pr_name', ''),
+                            'status': h.get('status', ''),
+                            'created': str(h.get('created_at', '')),
+                            'error': h.get('error_message', '')[:200] if h.get('error_message') else '',
+                        }
+                        for h in history
+                    ]
+                    logger.info("    %s: %d builds from DB", component, len(history))
+            except Exception as e:
+                logger.debug("    %s: DB history unavailable: %s", component, e)
+
+            # Tekton Results for SHA-level data (fallback / supplement)
+            try:
+                tr = self._get_tekton_results(namespace=build_ns)
+                records = tr.query_component_build_history(application, component, page_size=5)
+                if records:
+                    builds_with_sha = []
+                    for rec in records:
+                        name = rec.get('metadata', {}).get('name', '')
+                        created = rec.get('metadata', {}).get('creationTimestamp', '')
+                        conds = rec.get('status', {}).get('conditions', [])
+                        status = conds[-1].get('reason', 'Unknown') if conds else 'Unknown'
+                        sha = ''
+                        for r in rec.get('status', {}).get('results', []):
+                            if r.get('name') == 'IMAGE_DIGEST':
+                                sha = r.get('value', '')
+                                break
+                        builds_with_sha.append({
+                            'name': name, 'created': created,
+                            'status': status, 'image_sha': sha,
+                        })
+                    comp_data['builds_with_sha'] = builds_with_sha
+                    logger.info("    %s: %d builds from Tekton Results", component, len(builds_with_sha))
+
+                    # SHA tracing: find which build matches the violation SHA
+                    if violation_sha:
+                        for b in builds_with_sha:
+                            if b['image_sha'] and violation_sha.startswith(b['image_sha'][:20]):
+                                comp_data['violation_build'] = {
+                                    'name': b['name'], 'status': b['status'],
+                                    'created': b['created'],
+                                }
+                                break
+                        # Find latest green build with different SHA
+                        for b in builds_with_sha:
+                            if b['status'] in ('Completed', 'Succeeded') and b['image_sha'] != violation_sha:
+                                comp_data['latest_green_build'] = {
+                                    'name': b['name'], 'status': b['status'],
+                                    'image_sha': b['image_sha'],
+                                    'created': b['created'],
+                                }
+                                break
+            except Exception as e:
+                logger.debug("    %s: Tekton Results unavailable: %s", component, e)
+
+            # Build failure details: if latest build failed, get the failed TaskRun
+            if comp_data.get('builds_with_sha'):
+                latest = comp_data['builds_with_sha'][0]
+                if latest['status'] in ('Failed', 'PipelineRunTimeout'):
+                    try:
+                        tr = self._get_tekton_results(namespace=build_ns)
+                        failed_task, failed_logs, _ = tr.find_failed_taskrun(latest['name'])
+                        if failed_task:
+                            comp_data['failed_task'] = failed_task
+                            comp_data['failed_task_logs'] = failed_logs[:500] if failed_logs else ''
+                    except Exception as e:
+                        logger.debug("    %s: failed TaskRun lookup error: %s", component, e)
+
+            # Source image verification for source_image.exists violations
+            self._enrich_source_image_status(comp_data, violation_sha, context)
+
+            enriched[component] = comp_data
+
+        context['violation_enrichment'] = enriched
+
+    def _enrich_source_image_status(self, comp_data, violation_sha, context):
+        """Check source image existence for violation SHA and latest green build SHA.
+
+        Uses RegistryClient to query quay.io referrers API and .src tag convention.
+        Results help the AI distinguish between 'needs rebuild' vs 'needs config change'.
+        """
+        violations_summary = context.get('violations_summary', [])
+        has_source_violation = any(
+            'source_image' in v.get('rule', '') or 'source_image' in v.get('message', '')
+            for v in violations_summary
+        )
+        if not has_source_violation:
+            return
+
+        try:
+            from clients.registry_client import RegistryClient
+            client = RegistryClient()
+        except Exception:
+            return
+
+        component = comp_data.get('component', '')
+
+        # Determine registry/repository from violation image refs
+        image_ref = ''
+        for v in violations_summary:
+            ref = v.get('image_ref', '')
+            if component.replace('-', '') in ref.replace('-', ''):
+                image_ref = ref
+                break
+        if not image_ref:
+            return
+
+        registry, repository, _ = client.parse_image_ref(image_ref)
+        if not registry or not repository:
+            return
+
+        source_checks = {}
+
+        # Check violation SHA
+        if violation_sha and violation_sha.startswith('sha256:'):
+            result = client.check_source_image(registry, repository, violation_sha)
+            source_checks['violation_sha'] = {
+                'digest': violation_sha[:20] + '...',
+                **result,
+            }
+            logger.info("    %s: source image for violation SHA: %s (%s)",
+                        component, result.get('exists'), result.get('method'))
+
+        # Check latest green build SHA
+        green_build = comp_data.get('latest_green_build', {})
+        green_sha = green_build.get('image_sha', '')
+        if green_sha and green_sha.startswith('sha256:'):
+            result = client.check_source_image(registry, repository, green_sha)
+            source_checks['green_build_sha'] = {
+                'digest': green_sha[:20] + '...',
+                'build_name': green_build.get('name', ''),
+                **result,
+            }
+            logger.info("    %s: source image for green build SHA: %s (%s)",
+                        component, result.get('exists'), result.get('method'))
+
+        if source_checks:
+            comp_data['source_image_status'] = source_checks
+
+    def _enrich_application_context(self, context):
+        """Add application-level health data: alerts, nightly, triage, conforma."""
+        application = context.get('application', '')
+        if not application:
+            return
+
+        logger.info("  Enriching application-level context for %s", application)
+
+        # Active build failures
+        try:
+            failing = self.build_repo.find_failing_component_names(application)
+            if failing:
+                context['active_build_failures'] = sorted(failing)
+                logger.info("    %d active build failure(s)", len(failing))
+        except Exception as e:
+            logger.debug("    Build failures query error: %s", e)
+
+        # Active conforma violations
+        try:
+            conforma_failing = self.conforma_repo.find_unresolved_component_names(application)
+            if conforma_failing:
+                context['active_conforma_violations'] = sorted(conforma_failing)
+                logger.info("    %d active conforma violation(s)", len(conforma_failing))
+        except Exception as e:
+            logger.debug("    Conforma violations query error: %s", e)
+
+        # Triage items
+        try:
+            triage_items = self.triage_repo.get_active(application)
+            if triage_items:
+                context['triage_items'] = [
+                    {
+                        'id': t.get('id'),
+                        'components': t.get('components', []),
+                        'group_label': t.get('group_label', ''),
+                        'root_cause': t.get('root_cause', ''),
+                        'jira_key': t.get('jira_key', ''),
+                        'status': t.get('status', ''),
+                    }
+                    for t in triage_items
+                ]
+                logger.info("    %d active triage item(s)", len(triage_items))
+        except Exception as e:
+            logger.debug("    Triage query error: %s", e)
+
+        # Nightly build history
+        try:
+            nightly = self.build_repo.get_nightly_history(application, days=7)
+            if nightly:
+                context['nightly_history'] = nightly[:5]
+                logger.info("    %d nightly build(s)", len(nightly))
+        except Exception as e:
+            logger.debug("    Nightly history query error: %s", e)
+
+        # Component health summary (counts)
+        try:
+            working = self.build_repo.get_working_components(application)
+            unresolved = self.build_repo.find_unresolved_component_names(application)
+            context['health_summary'] = {
+                'working': len(working) if working else 0,
+                'failing': len(unresolved) if unresolved else 0,
+            }
+        except Exception as e:
+            logger.debug("    Health summary error: %s", e)
+
+    def _enrich_with_component_prs(self, context):
+        """Check for nudge PRs and fetch operator-nudging.yaml for SHA verification."""
+        enrichment = context.get('violation_enrichment', {})
+        if not enrichment:
+            return
+
+        application = context.get('application', '')
+        owner = GITHUB_OPERATOR_OWNER
+        operator_repo = GITHUB_OPERATOR_REPO
+        branch = self._derive_branch(application)
+        # rhoai-3.5-ea.2 format for the operator branch
+        base_branch = branch.replace('.', '-ea.') if 'ea' in branch else branch
+
+        try:
+            gh = self._get_github()
+        except Exception:
+            return
+
+        # Fetch operator-nudging.yaml — single source of truth for image SHAs
+        try:
+            nudging_content = gh.get_file_content(
+                owner, operator_repo, OPERATOR_NUDGING_PATH, ref=base_branch
+            )
+            if nudging_content:
+                context['operator_nudging_content'] = nudging_content
+                context['operator_nudging_source'] = '{}/{} branch {} build/operator-nudging.yaml'.format(
+                    owner, operator_repo, base_branch)
+                logger.info("    Got operator-nudging.yaml (%d chars)", len(nudging_content))
+        except Exception as e:
+            logger.debug("    operator-nudging.yaml fetch error: %s", e)
+
+        for component, data in enrichment.items():
+            try:
+                prs = gh.list_pull_requests(owner, operator_repo, base=base_branch, state='all', limit=10)
+                comp_short = re.sub(r'-v\d+-\d+.*$', '', component)
+                nudge_prs = [
+                    {'number': p.get('number'), 'title': p.get('title', '')[:100],
+                     'state': p.get('state', ''), 'url': p.get('html_url', '')}
+                    for p in (prs or [])
+                    if comp_short in p.get('title', '').lower() or 'nudge' in p.get('title', '').lower()
+                ]
+                if nudge_prs:
+                    data['nudge_prs'] = nudge_prs[:3]
+                    logger.info("    %s: %d nudge PR(s)", component, len(nudge_prs))
+            except Exception as e:
+                logger.debug("    %s: PR lookup error: %s", component, e)
+
     def _derive_branch(self, application):
         """Derive the GitHub branch name from application name.
 
         product-v3-4 -> product-3.4
+        product-v3-5-ea-2 -> product-3.5-ea.2
         """
-        match = re.match(r'(.+)-v(\d+)-(\d+)', application)
+        match = re.match(r'(.+)-v(\d+)-(\d+)(?:-ea-(\d+))?$', application)
         if match:
-            return '{}-{}.{}'.format(match.group(1), match.group(2), match.group(3))
+            product, major, minor, ea = match.groups()
+            base = '{}-{}.{}'.format(product, major, minor)
+            if ea:
+                return '{}-ea.{}'.format(base, ea)
+            return base
         return 'main'
 
     def _derive_rpa_filename(self, release_plan):
@@ -283,11 +697,19 @@ class ReleaseFailureAnalyzer:
                                 except (json.JSONDecodeError, KeyError):
                                     pass
 
-                    # Get pod logs (step-validate contains the actual errors)
+                    # Get pod logs
                     pod_name = '{}-pod'.format(taskrun_name)
                     for step in ['step-validate', 'step-report', 'step-detailed-report']:
                         logs = ka.get_pod_logs(pod_name, container=step, namespace=RELENG_NAMESPACE)
                         if logs:
+                            # Extract violations BEFORE truncating (they can be
+                            # anywhere in the report and truncation loses them)
+                            if step == 'step-detailed-report':
+                                violations = self._extract_violations(logs)
+                                if violations:
+                                    context['violations_summary'] = violations
+                                    logger.info("    Extracted %d violation(s) from %s",
+                                                len(violations), step)
                             if len(logs) > 50000:
                                 logs = logs[-50000:]
                             context.setdefault('logs', {})
@@ -382,6 +804,15 @@ class ReleaseFailureAnalyzer:
             except Exception as e:
                 logger.warning("  GitHub unavailable: %s", e)
 
+        # 7. Enrich with build context for violated components
+        self._enrich_violation_context(context)
+
+        # 8. Enrich with application-level health data
+        self._enrich_application_context(context)
+
+        # 9. Check for nudge PRs for violated components
+        self._enrich_with_component_prs(context)
+
         return context
 
     def build_analysis_prompt(self, context):
@@ -422,12 +853,43 @@ class ReleaseFailureAnalyzer:
                     test_output.get('warnings', 0), test_output.get('result', 'unknown')
                 ))
 
-        # Pipeline logs
+        # Pre-extracted violations (immune to log truncation)
+        violations = context.get('violations_summary', [])
+        if violations:
+            sections.append("\n## VIOLATIONS FOUND (extracted from step-detailed-report before truncation)")
+            sections.append("These are the AUTHORITATIVE policy violations that caused the release to fail.")
+            sections.append("Use these to determine failure_category — NOT the step-validate errors below.\n")
+            rules = {}
+            for v in violations:
+                rule = v.get('rule', 'unknown')
+                rules.setdefault(rule, []).append(v.get('image_ref', ''))
+            for rule, images in rules.items():
+                sections.append("Rule: {} ({} violation(s))".format(rule, len(images)))
+                for img in images:
+                    reason = ''
+                    for v in violations:
+                        if v.get('image_ref') == img and v.get('rule') == rule:
+                            reason = v.get('reason', '')
+                            break
+                    sections.append("  - ImageRef: {}".format(img))
+                    if reason:
+                        sections.append("    Reason: {}".format(reason))
+
+        # Pipeline logs — with descriptive headers per step
         logs = context.get('logs', {})
         if logs:
             sections.append("\n## Pipeline Logs")
+            step_descriptions = {
+                'step-detailed-report': 'AUTHORITATIVE policy violations — [Violation] lines here are the actual failures',
+                'step-validate': 'Image evaluation results and fetch errors — NOT counted as policy violations',
+                'step-report': 'Summary statistics',
+            }
             for step_name, log_content in logs.items():
-                sections.append("\n### {} logs".format(step_name))
+                desc = step_descriptions.get(step_name, '')
+                header = "\n### {} logs".format(step_name)
+                if desc:
+                    header += " ({})".format(desc)
+                sections.append(header)
                 sections.append("```")
                 sections.append(log_content)
                 sections.append("```")
@@ -464,16 +926,213 @@ class ReleaseFailureAnalyzer:
             sections.append(context['bundle_images_content'][:30000])
             sections.append("```")
 
+        # ---- ENRICHED CONTEXT ----
+
+        # Operator nudging file (source of truth for image SHAs in FBC)
+        if context.get('operator_nudging_content'):
+            sections.append("\n## Operator Nudging File (from {})".format(
+                context.get('operator_nudging_source', 'GitHub')
+            ))
+            sections.append("This file maps component images to their SHA digests.")
+            sections.append("The operator-processor updates this file nightly from quay.io.")
+            sections.append("If a violation SHA matches a SHA here, the nudging picked up a bad build.")
+            nudging = context['operator_nudging_content']
+            # Only include relevant lines (search for violated component names)
+            enrichment = context.get('violation_enrichment', {})
+            if enrichment and len(nudging) > 5000:
+                relevant_lines = []
+                for comp in enrichment:
+                    comp_short = re.sub(r'-v\d+-\d+.*$', '', comp)
+                    for i, line in enumerate(nudging.splitlines()):
+                        if comp_short in line:
+                            start = max(0, i - 1)
+                            end = min(len(nudging.splitlines()), i + 3)
+                            for j in range(start, end):
+                                relevant_lines.append('L{}: {}'.format(j + 1, nudging.splitlines()[j]))
+                            relevant_lines.append('')
+                if relevant_lines:
+                    sections.append("```yaml (relevant lines only)")
+                    sections.append('\n'.join(relevant_lines))
+                    sections.append("```")
+                else:
+                    sections.append("```yaml")
+                    sections.append(nudging[:8000])
+                    sections.append("```")
+            else:
+                sections.append("```yaml")
+                sections.append(nudging[:8000])
+                sections.append("```")
+
+        # Build history and SHA tracing for violated components
+        enrichment = context.get('violation_enrichment', {})
+        if enrichment:
+            sections.append("\n## Component Build History (for violated images)")
+            sections.append("For each component whose image violated a policy, here is the build history.")
+            sections.append("Compare the violation SHA against the builds to trace which build the snapshot used.\n")
+
+            for comp, data in enrichment.items():
+                sections.append("### {}".format(comp))
+
+                # SHA tracing summary
+                if data.get('violation_build'):
+                    vb = data['violation_build']
+                    sections.append("VIOLATION SHA belongs to build: {} (status: {}, created: {})".format(
+                        vb['name'], vb['status'], vb['created']))
+                if data.get('latest_green_build'):
+                    gb = data['latest_green_build']
+                    sections.append("LATEST GREEN BUILD: {} (sha: {}, created: {})".format(
+                        gb['name'], gb['image_sha'], gb['created']))
+                    if data.get('violation_build'):
+                        sections.append(">> SHA MISMATCH: Snapshot uses a {} build, not the latest green build.".format(
+                            data['violation_build']['status']))
+
+                # Source image verification results
+                source_status = data.get('source_image_status', {})
+                if source_status:
+                    sections.append("SOURCE IMAGE VERIFICATION:")
+                    for key, check in source_status.items():
+                        label = 'Violation SHA' if key == 'violation_sha' else 'Green Build SHA'
+                        exists = check.get('exists')
+                        if exists is True:
+                            status_str = 'PRESENT'
+                        elif exists is False:
+                            status_str = 'MISSING'
+                        else:
+                            status_str = 'UNKNOWN'
+                        sections.append("  {} ({}): source image {} — {}".format(
+                            label, check.get('digest', '?'),
+                            status_str, check.get('details', '')))
+                    # Add diagnostic guidance
+                    v_check = source_status.get('violation_sha', {})
+                    g_check = source_status.get('green_build_sha', {})
+                    if v_check.get('exists') is False and g_check.get('exists') is True:
+                        sections.append(">> DIAGNOSTIC: Violation SHA has no source image but green build does.")
+                        sections.append(">> This confirms the fix is a REBUILD — the green build SHA has a valid source image.")
+                    elif v_check.get('exists') is False and g_check.get('exists') is False:
+                        sections.append(">> DIAGNOSTIC: BOTH SHAs lack source images.")
+                        sections.append(">> A simple rebuild may NOT fix this — the source-build task may be misconfigured or timing out consistently.")
+
+                # Build history with SHAs
+                builds = data.get('builds_with_sha', [])
+                if builds:
+                    sections.append("Recent builds:")
+                    for b in builds:
+                        sections.append("  - {} | {} | sha={} | {}".format(
+                            b['created'], b['status'],
+                            b['image_sha'] if b['image_sha'] else 'n/a',
+                            b['name']))
+
+                # Failed task details
+                if data.get('failed_task'):
+                    sections.append("Failed task: {}".format(data['failed_task']))
+                if data.get('failed_task_logs'):
+                    sections.append("Error: {}".format(data['failed_task_logs']))
+
+                # DB build history (complementary)
+                db_history = data.get('build_history', [])
+                if db_history and not builds:
+                    sections.append("Build history (from DB):")
+                    for h in db_history:
+                        sections.append("  - {} | {} | {}".format(
+                            h['created'], h['status'], h['pipelinerun']))
+                        if h['error']:
+                            sections.append("    Error: {}".format(h['error']))
+
+                # Nudge PRs
+                nudge_prs = data.get('nudge_prs', [])
+                if nudge_prs:
+                    sections.append("Nudge PRs in rhods-operator:")
+                    for pr in nudge_prs:
+                        sections.append("  - PR #{}: {} [{}]".format(
+                            pr['number'], pr['title'], pr['state']))
+
+                sections.append("")
+
+        # Application health summary
+        if context.get('health_summary'):
+            hs = context['health_summary']
+            sections.append("\n## Application Health")
+            sections.append("- Working components: {}".format(hs.get('working', '?')))
+            sections.append("- Failing components: {}".format(hs.get('failing', '?')))
+
+        if context.get('active_build_failures'):
+            sections.append("- Components with active build failures: {}".format(
+                ', '.join(context['active_build_failures'][:20])))
+
+        if context.get('active_conforma_violations'):
+            sections.append("- Components with active conforma violations: {}".format(
+                ', '.join(context['active_conforma_violations'][:20])))
+
+        # Nightly build history
+        nightly = context.get('nightly_history', [])
+        if nightly:
+            sections.append("\n## Recent Nightly Builds")
+            for n in nightly:
+                sections.append("- {} | {} | {}".format(
+                    n.get('created_at', ''), n.get('status', ''),
+                    n.get('pr_name', '')))
+
+        # Triage items
+        triage = context.get('triage_items', [])
+        if triage:
+            sections.append("\n## Active Triage Items")
+            sections.append("These are issues currently being tracked/investigated:")
+            for t in triage:
+                components_str = ', '.join(t.get('components', [])[:5])
+                sections.append("- Triage #{}: {} | {} | Jira: {} | Components: {}".format(
+                    t.get('id', '?'), t.get('group_label', ''),
+                    t.get('root_cause', '')[:100], t.get('jira_key', 'none'),
+                    components_str))
+
+        # Reference documentation URLs for evidence_references
+        sections.append("\n## Reference Documentation")
+        sections.append("Use these URLs in evidence_references when relevant:")
+        sections.append("- EC policy customization: https://konflux-ci.dev/docs/compliance/customizing-policy/")
+        sections.append("- Policy evaluations: https://konflux-ci.dev/docs/compliance/policy-evaluations/")
+        sections.append("- Release troubleshooting: https://konflux-ci.dev/docs/troubleshooting/releases/")
+        sections.append("- Conforma policy config: https://conforma.dev/docs/cli/configuration.html")
+        sections.append("- Hermetic builds: https://konflux-ci.dev/docs/building/hermetic-builds/")
+        if GITHUB_OPERATOR_OWNER and GITHUB_OPERATOR_REPO:
+            sections.append("- operator-nudging.yaml: https://github.com/{}/{}/blob/main/{}".format(
+                GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO, OPERATOR_NUDGING_PATH))
+        if GITHUB_BUILD_CONFIG_OWNER and GITHUB_BUILD_CONFIG_REPO:
+            sections.append("- Build-Config repo: https://github.com/{}/{}".format(
+                GITHUB_BUILD_CONFIG_OWNER, GITHUB_BUILD_CONFIG_REPO))
+        if context.get('rpa_source'):
+            sections.append("- RPA file: {}".format(context['rpa_source']))
+        if context.get('ec_policies'):
+            for ec in context['ec_policies']:
+                sections.append("- EC policy: {}".format(ec['path']))
+
         # Institutional memory: include known patterns for this failure type
         pattern_section = self._format_pattern_section(context)
         if pattern_section:
             sections.append(pattern_section)
 
+        # Targeted knowledge graph context (fails silently if Neo4j unavailable)
+        try:
+            from utils.graph_context import release_context
+            graph_section = release_context(context)
+            if graph_section:
+                sections.append(graph_section)
+        except Exception:
+            pass
+
         sections.append("\nUse the record_release_analysis tool. Remember:")
+        sections.append("- CRITICAL: Determine failure_category from step-detailed-report [Violation] lines, NOT from step-validate errors")
+        sections.append("- If step-validate has errors (UNAUTHORIZED, 404), report them in root_cause as secondary issues but use the violation rule from step-detailed-report as the primary category")
+        sections.append("- Use Component Build History to trace which build the snapshot used — compare violation SHA against build SHAs")
+        sections.append("- If SHA MISMATCH is flagged, explain that the snapshot uses a stale/broken build instead of the latest green one")
+        sections.append("- Check operator-nudging.yaml to verify whether the nudging picked up the correct SHA")
+        sections.append("- Cross-reference Active Triage Items to see if the issue is already being tracked")
+        sections.append("- Include Nightly Build status and Application Health in your diagnosis context")
         sections.append("- State ONLY what you observe in the evidence")
         sections.append("- Quote exact error messages from logs")
-        sections.append("- Cite the source for every claim (log line, RPA file, bundle file)")
+        sections.append("- Cite the source for every claim (log line, RPA file, bundle file, build history, nudging file)")
         sections.append("- Identify the specific team that owns the fix")
+        sections.append("- Include source_transparency: list what data you used, what was missing, and what limitations affect your diagnosis")
+        sections.append("- Set fix_action_type: rebuild, file_change, config_change, multi_step, investigation_needed, or other")
+        sections.append("- If SOURCE IMAGE VERIFICATION shows violation SHA missing but green build present → fix_action_type MUST be rebuild")
 
         user_prompt = '\n'.join(sections)
         return (SYSTEM_PROMPT, user_prompt)
@@ -489,6 +1148,45 @@ class ReleaseFailureAnalyzer:
             if p.get('typical_fix'):
                 parts.append("**Typical fix:**\n{}\n".format(p['typical_fix']))
         return '\n'.join(parts)
+
+    def _apply_confidence_cap(self, analysis, context):
+        """Cap confidence based on available enrichment sources.
+
+        The AI might report high confidence from pattern matching alone.
+        If key enrichment data was missing, cap the confidence to reflect
+        the incomplete evidence.
+        """
+        score = analysis.get('confidence_score', 0.0)
+        penalties = []
+
+        if not context.get('violation_enrichment'):
+            penalties.append(('no component build history', 0.10))
+        if not context.get('operator_nudging_content'):
+            penalties.append(('no operator-nudging.yaml', 0.10))
+        if not context.get('health_summary'):
+            penalties.append(('no application health data', 0.05))
+        if not context.get('triage_items'):
+            penalties.append(('no triage items data', 0.05))
+        if not context.get('violations_summary') and not context.get('logs'):
+            penalties.append(('no pipeline logs or violations', 0.15))
+
+        if penalties:
+            total_penalty = sum(p for _, p in penalties)
+            max_allowed = max(0.55, 1.0 - total_penalty)
+            if score > max_allowed:
+                reasons = ', '.join(r for r, _ in penalties)
+                logger.info("  Confidence capped: %.2f -> %.2f (missing: %s)",
+                            score, max_allowed, reasons)
+                analysis['confidence_score'] = round(max_allowed, 2)
+                # Append limitation to source_transparency
+                transparency = analysis.get('source_transparency', {})
+                if transparency:
+                    limitations = transparency.get('limitations', [])
+                    limitations.append(
+                        'Confidence capped from {:.2f} to {:.2f} due to missing enrichment: {}'.format(
+                            score, max_allowed, reasons))
+                    transparency['limitations'] = limitations
+        return analysis
 
     def parse_analysis_response(self, llm_response):
         """Extract structured analysis from LLMResponse.tool_calls."""
@@ -527,6 +1225,19 @@ class ReleaseFailureAnalyzer:
                 'owner_team': input_data.get('owner_team', ''),
             }
 
+    def _is_release_failed(self, release_name, namespace=None):
+        """Quick check if a release has failed, without collecting full context."""
+        ns = namespace or self.config.k8s.namespace
+        release_cr = self._k8s_get_json('release', release_name, ns)
+        if not release_cr:
+            return None
+        conditions = release_cr.get('status', {}).get('conditions', [])
+        return any(
+            c.get('type') in ('Released', 'ManagedPipelineProcessed', 'Validated')
+            and c.get('status') == 'False'
+            for c in conditions
+        )
+
     def analyze_release(self, release_name, namespace=None, force=False):
         """Full analysis pipeline: collect context -> LLM -> parse -> save."""
 
@@ -537,21 +1248,19 @@ class ReleaseFailureAnalyzer:
                 logger.info("Release already analyzed (use --force to re-analyze)")
                 return existing
 
+        # Quick failure check before expensive context collection
+        failed = self._is_release_failed(release_name, namespace)
+        if failed is None:
+            raise ValueError("Release CR not found: {}".format(release_name))
+        if not failed:
+            logger.info("Release has not failed — nothing to analyze")
+            return {'status': 'not_failed', 'release_name': release_name}
+
         logger.info("Collecting release context...")
         context = self.collect_context(release_name, namespace)
 
         if not context.get('conditions'):
             raise ValueError("Could not fetch Release CR — no conditions found")
-
-        # Check if release actually failed
-        is_failed = any(
-            c.get('type') in ('Released', 'ManagedPipelineProcessed', 'Validated')
-            and c.get('status') == 'False'
-            for c in context.get('conditions', [])
-        )
-        if not is_failed:
-            logger.info("Release has not failed — nothing to analyze")
-            return {'status': 'not_failed', 'release_name': release_name}
 
         logger.info("\nAnalyzing with LLM...")
         system_prompt, user_prompt = self.build_analysis_prompt(context)
@@ -589,8 +1298,23 @@ class ReleaseFailureAnalyzer:
         )
 
         analysis = self.parse_analysis_response(response)
+        analysis = self._apply_confidence_cap(analysis, context)
+        analysis = self._validate_fix_action_type(analysis, context)
+        analysis = self._annotate_fix_status(analysis, context)
 
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
+
+        # These fields live in analysis_json, not DB columns
+        analysis.pop('evidence_references', None)
+        analysis.pop('source_transparency', None)
+        fix_action = analysis.pop('fix_action_type', None)
+
+        tool_calls = response.tool_calls or []
+        if fix_action and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
+                    tc.setdefault('input', {})['fix_action_type'] = fix_action
+                    break
 
         analysis_id = self.ai_repo.insert_release_analysis(
             release_name=release_name,
@@ -599,7 +1323,7 @@ class ReleaseFailureAnalyzer:
             tokens_used=response.input_tokens + response.output_tokens,
             cost_usd=cost_usd,
             analysis_duration=duration,
-            analysis_json=response.tool_calls,
+            analysis_json=tool_calls,
             **analysis
         )
 
@@ -610,6 +1334,77 @@ class ReleaseFailureAnalyzer:
 
         self.langfuse.end_trace(trace, output=analysis)
         self.langfuse.flush()
+
+        return analysis
+
+    _VALID_FIX_ACTIONS = {
+        'rebuild', 'file_change', 'config_change',
+        'multi_step', 'investigation_needed', 'other',
+    }
+
+    _CATEGORY_FIX_HINTS = {
+        'build_artifact_missing': 'rebuild',
+        'unmapped_image': 'file_change',
+        'rpa_mapping_typo': 'file_change',
+        'missing_ec_exception': 'file_change',
+        'access_denied': 'investigation_needed',
+        'infrastructure': 'investigation_needed',
+    }
+
+    def _validate_fix_action_type(self, analysis, context):
+        """Validate and correct the LLM's fix_action_type classification."""
+        proposed = analysis.get('fix_action_type', '')
+
+        # If LLM didn't provide one, infer from failure_category
+        if not proposed or proposed not in self._VALID_FIX_ACTIONS:
+            category = analysis.get('failure_category', '')
+            proposed = self._CATEGORY_FIX_HINTS.get(category, 'investigation_needed')
+
+        # Source image correction: if source_image violation and green build has source image → rebuild
+        enrichment = context.get('violation_enrichment', {})
+        for data in enrichment.values():
+            source_status = data.get('source_image_status', {})
+            v_check = source_status.get('violation_sha', {})
+            g_check = source_status.get('green_build_sha', {})
+            if v_check.get('exists') is False and g_check.get('exists') is True:
+                proposed = 'rebuild'
+            elif v_check.get('exists') is False and g_check.get('exists') is False:
+                proposed = 'investigation_needed'
+
+        analysis['fix_action_type'] = proposed
+        return analysis
+
+    def _annotate_fix_status(self, analysis, context):
+        """Append fix-status notes when enrichment data shows a fix is already in progress."""
+        notes = []
+        enrichment = context.get('violation_enrichment', {})
+
+        for component, data in enrichment.items():
+            nudge_prs = data.get('nudge_prs', [])
+            merged = [p for p in nudge_prs if p.get('state') == 'closed']
+            open_prs = [p for p in nudge_prs if p.get('state') == 'open']
+            if merged:
+                notes.append('- Nudge PR #{} for {} was recently merged — fix may already be propagating'.format(
+                    merged[0].get('number', '?'), component))
+            elif open_prs:
+                notes.append('- Nudge PR #{} for {} is open — fix is in progress'.format(
+                    open_prs[0].get('number', '?'), component))
+
+            builds = data.get('build_history', [])
+            if builds and builds[0].get('status') == 'success':
+                notes.append('- {} has a recent successful build ({}); a rebuild may already resolve this'.format(
+                    component, builds[0].get('build_id', '?')[:8]))
+
+        triage_items = context.get('triage_items', [])
+        if triage_items:
+            active = [t for t in triage_items if t.get('status') == 'active']
+            if active:
+                notes.append('- Triage item #{} is actively tracking this issue'.format(
+                    active[0].get('id', '?')))
+
+        if notes:
+            fix_status = '\n\nFix Status (auto-detected):\n' + '\n\n'.join(notes)
+            analysis['recommended_fix'] = analysis.get('recommended_fix', '') + fix_status
 
         return analysis
 

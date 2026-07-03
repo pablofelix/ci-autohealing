@@ -67,6 +67,55 @@ CONFORMA_ANALYSIS_TOOL = {
                 'type': 'boolean',
                 'description': 'Whether human review is needed (usually true - policy exceptions need approval)'
             },
+            'evidence_references': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'type': {'type': 'string', 'enum': ['doc', 'config', 'log', 'policy']},
+                        'url': {'type': 'string', 'description': 'URL to the resource'},
+                        'description': {'type': 'string', 'description': 'What this reference shows'},
+                    },
+                    'required': ['type', 'description']
+                },
+                'description': 'Links to docs, config files, policy YAML, or log evidence supporting the diagnosis'
+            },
+            'source_transparency': {
+                'type': 'object',
+                'properties': {
+                    'sources_consulted': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Data sources actually used (e.g., "build logs", "EC policy YAML", ".tekton/push.yaml")'
+                    },
+                    'sources_unavailable': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Sources attempted but not available (e.g., "commit diff not provided", "Dockerfile not in context")'
+                    },
+                    'limitations': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Factors that could change the diagnosis (e.g., "could not verify if hermetic param is set at pipeline level")'
+                    },
+                },
+                'description': 'Academic-style transparency: what was used, what was missing, and analysis limitations'
+            },
+            'differential_diagnosis': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'hypothesis': {'type': 'string', 'description': 'One-sentence explanation'},
+                        'category': {'type': 'string', 'description': 'failure_category enum value'},
+                        'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                        'supporting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                        'contradicting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                    },
+                    'required': ['hypothesis', 'category', 'confidence']
+                },
+                'description': '2-3 competing hypotheses ranked by evidence strength. First = primary diagnosis.'
+            },
         },
         'required': [
             'root_cause',
@@ -163,6 +212,13 @@ class ConformaAnalyzer:
 
         commit_section = '\n'.join(commit_info) if commit_info else "- Commit: (not available)"
 
+        # Targeted knowledge graph context (fails silently if Neo4j unavailable)
+        try:
+            from utils.graph_context import conforma_context
+            graph_section = conforma_context(violation)
+        except Exception:
+            graph_section = ""
+
         user_prompt = """Analyze this Conforma (Enterprise Contract) compliance violation. Focus on identifying which policy is violated and the best path forward — fix vs. exception request.
 
 ## Component
@@ -182,7 +238,7 @@ class ConformaAnalyzer:
 ```
 {summary}
 ```
-{pattern_section}{exclusion_section}{sarif_section}
+{pattern_section}{exclusion_section}{sarif_section}{graph_context}{tekton_files}
 Use the record_conforma_analysis tool. Remember:
 - Match against the 14 known patterns (hermetic build, unpinned task, package source, etc.)
 - Explain WHICH policy is violated and WHY
@@ -192,7 +248,19 @@ Use the record_conforma_analysis tool. Remember:
 - Set confidence based on pattern match strength
 - If confidence is below 0.70, recommend contacting #konflux-users or @owatkins in Slack
 - Mark can_auto_fix=false unless it's a simple rebuild or zero-risk config change
+- Include evidence_references with links to docs, config files, and policy YAML
+- Include source_transparency: list what data you actually used, what was missing, and what limitations affect your diagnosis
+
+## Reference Documentation
+Use these URLs in evidence_references when relevant:
+- EC policy customization: https://konflux-ci.dev/docs/compliance/customizing-policy/
+- Policy evaluations: https://konflux-ci.dev/docs/compliance/policy-evaluations/
+- Hermetic builds: https://konflux-ci.dev/docs/building/hermetic-builds/
+- Prefetching dependencies: https://konflux-ci.dev/docs/building/prefetching-dependencies/
+- Conforma policy config: https://conforma.dev/docs/cli/configuration.html
+{doc_refs}
 """.format(
+            doc_refs=self._get_doc_refs(violation),
             component=violation.get('component_name', 'unknown'),
             repository=violation.get('repository', 'unknown'),
             snapshot=violation.get('snapshot_name', 'unknown'),
@@ -206,9 +274,85 @@ Use the record_conforma_analysis tool. Remember:
             pattern_section=pattern_section,
             exclusion_section=self._get_policy_exclusions(violation),
             sarif_section=self._get_sarif_context(violation),
+            graph_context=graph_section,
+            tekton_files=self._get_tekton_files(violation),
         )
 
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
+
+    def _get_doc_refs(self, violation):
+        """Generate policy URL references for the LLM context."""
+        from utils.conforma_utils import (
+            extract_violation_rules, extract_policy_from_scenario,
+            policy_url_with_line,
+        )
+        refs = []
+        scenario = violation.get('scenario', '')
+        summary = violation.get('violation_summary', '')
+        policy_name = extract_policy_from_scenario(scenario)
+        if policy_name and summary:
+            rules = extract_violation_rules(summary)
+            url = policy_url_with_line(policy_name, rules)
+            if url:
+                refs.append('- EC policy file: {}'.format(url))
+        repo = violation.get('repository', '')
+        if repo:
+            refs.append('- Component repo: {}'.format(repo))
+        return '\n'.join(refs)
+
+    def _get_tekton_files(self, violation):
+        """Fetch .tekton file names from GitHub for this component."""
+        repo = violation.get('repository', '')
+        component = violation.get('component_name', '')
+        if not repo or not component:
+            return ''
+        try:
+            from clients.github_client import parse_github_repo, GitHubClient
+            parsed = parse_github_repo(repo)
+            if not parsed:
+                return ''
+            owner, repo_name = parsed
+            gh = GitHubClient()
+
+            branch = violation.get('branch', '')
+            if not branch:
+                branch = 'konflux-{}'.format(component)
+            listing = gh.get_directory_listing(owner, repo_name, '.tekton', ref=branch)
+            if not listing:
+                listing = gh.get_directory_listing(owner, repo_name, '.tekton')
+            if not listing:
+                return ''
+
+            files = self._match_tekton_files(component, listing)
+            if not files:
+                return ''
+            lines = ['\n## Component Tekton Pipeline Files']
+            for f in sorted(files):
+                lines.append('- .tekton/{}'.format(f))
+            return '\n'.join(lines)
+        except Exception:
+            return ''
+
+    @staticmethod
+    def _match_tekton_files(component, listing):
+        """Match component name to Tekton filenames with flexible matching."""
+        base = component.rsplit('-v3-', 1)[0] if '-v3-' in component else component
+        exact = [f for f in listing if base in f]
+        if exact:
+            return exact
+        noise = {'odh', 'workbench', 'cpu', 'gpu', 'ubi9', 'ubi8', 'v3', 'v4',
+                 'ea', 'ea1', 'ea2', 'rc1', 'rc2', 'py311', 'py312'}
+        keywords = [p for p in base.split('-') if p and p not in noise and len(p) > 2]
+        if not keywords:
+            return []
+        best, best_score = [], 0
+        for f in listing:
+            score = sum(1 for kw in keywords if kw in f)
+            if score > best_score:
+                best, best_score = [f], score
+            elif score == best_score and score > 0:
+                best.append(f)
+        return best if best_score >= max(1, len(keywords) // 2) else []
 
     def _format_pattern_section(self, violation):
         """Return a prompt section with institutional memory from prior occurrences."""
@@ -358,6 +502,22 @@ Use the record_conforma_analysis tool. Remember:
                 'requires_human_review': True,
             }
 
+    def _annotate_fix_status(self, analysis, violation):
+        """Append fix-status notes when violation context shows a fix may already exist."""
+        notes = []
+        category = analysis.get('failure_category', '')
+        if category in ('policy_version_mismatch', 'policy_outdated_label'):
+            notes.append('- This violation type is typically resolved by a rebuild — check if one is already in progress')
+
+        if violation.get('has_exception'):
+            notes.append('- A policy exception already covers this component — this may be a false positive')
+
+        if notes:
+            fix_status = '\n\nFix Status (auto-detected):\n' + '\n\n'.join(notes)
+            analysis['recommended_fix'] = analysis.get('recommended_fix', '') + fix_status
+
+        return analysis
+
     def analyze_violation(self, violation):
         """Analyze one violation: build prompt -> call LLM -> parse response -> save to DB.
 
@@ -409,11 +569,14 @@ Use the record_conforma_analysis tool. Remember:
 
         # Parse response
         analysis = self.parse_analysis_response(response)
+        analysis = self._annotate_fix_status(analysis, violation)
 
         # Estimate cost (same as build failures)
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
-        # Save to database
+        # Save to database (these fields live in analysis_json, not DB columns)
+        analysis.pop('evidence_references', None)
+        analysis.pop('source_transparency', None)
         analysis_id = self.ai_repo.insert_analysis(
             conforma_result_id=violation['id'],
             model_used=self.llm.model_name(),

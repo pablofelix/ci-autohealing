@@ -142,9 +142,11 @@ def _format_since(raw):
 @click.option('--date', help='Alerts on specific date')
 @click.option('--from', 'from_date', help='Start date for range')
 @click.option('--to', 'to_date', help='End date for range')
+@click.option('--stage', is_flag=True, help='Show only stage-policy violations')
+@click.option('--prod', is_flag=True, help='Show only prod-policy violations')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
+def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, output_json):
     """Unified view: build failures + Conforma violations."""
     import json as json_mod
     from cli.mode import ensure_cluster
@@ -161,6 +163,19 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         builds = data.get('build_failures', [])
         conforma = data.get('conforma_violations', [])
         nightlies = data.get('nightly_warnings', [])
+
+        if stage or prod:
+            from utils.conforma_utils import policy_env as _policy_env, extract_policy_from_scenario as _extract_policy
+            filtered = []
+            for v in conforma:
+                env = _policy_env(_extract_policy(v.get('scenario', '')))
+                if stage and env == 'stage':
+                    filtered.append(v)
+                elif prod and env == 'prod':
+                    filtered.append(v)
+                elif stage and prod:
+                    filtered.append(v)
+            conforma = filtered
         schedule = data.get('release_schedule')
         last_sync = data.get('last_sync', '')
 
@@ -229,7 +244,16 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
             print('  {} No build failures'.format(green('✓')))
         print()
 
-        print(bold('Conforma Failures ({})'.format(len(conforma))) + ':')
+        from utils.conforma_utils import extract_policy_from_scenario
+        policies_seen = set()
+        for v in conforma:
+            p = extract_policy_from_scenario(v.get('scenario', ''))
+            if p:
+                policies_seen.add(p)
+        policy_note = ''
+        if len(policies_seen) > 1:
+            policy_note = '  ({} policies)'.format(len(policies_seen))
+        print(bold('Conforma Failures ({})'.format(len(conforma))) + policy_note + ':')
         if conforma:
             print('  {:<4} {:<45} {:>6} {:>6} {:>12}  {}'.format(
                 '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
@@ -244,11 +268,37 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
                 first = _format_since(v.get('first_seen', ''))
                 jira = v.get('jira_key') or '-'
                 viol_color = red if viol > 0 else green
-                print('  {:<4} {:<45} {} {:>6} {:>12}  {}'.format(
-                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira))
-                policy_url = v.get('policy_url')
-                if policy_url:
-                    print('       {} {}'.format(dim('↳'), dim(policy_url)))
+                policy = extract_policy_from_scenario(v.get('scenario', ''))
+                policy_tag = ' [{}]'.format(dim(policy)) if policy and len(policies_seen) > 1 else ''
+                env_tag = v.get('exception_env_tag')
+                stage_cov = v.get('exception_coverage_stage')
+                prod_cov = v.get('exception_coverage_prod')
+                cov_tag = ''
+                if env_tag:
+                    is_partial = (stage_cov == 'partially_covered' or prod_cov == 'partially_covered')
+                    label = 'PARTIAL' if is_partial else 'EXC'
+                    color_fn = yellow if is_partial else green
+                    cov_tag = ' {}'.format(color_fn('[{}:{}]'.format(label, env_tag)))
+                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}'.format(
+                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira, policy_tag, cov_tag))
+                p_url_s = v.get('policy_url_stage')
+                p_url_p = v.get('policy_url_prod')
+                if p_url_s:
+                    print('       {} {}'.format(dim('↳ stage'), dim(p_url_s)))
+                if p_url_p:
+                    print('       {} {}'.format(dim('↳ prod '), dim(p_url_p)))
+                if env_tag and (stage_cov == 'partially_covered' or prod_cov == 'partially_covered'):
+                    us = v.get('uncovered_rules_stage', [])
+                    up = v.get('uncovered_rules_prod', [])
+                    both = sorted(set(us) & set(up))
+                    only_s = sorted(set(us) - set(up))
+                    only_p = sorted(set(up) - set(us))
+                    if both:
+                        print('       {} {}'.format(red('↳ missing(S+P):'), ', '.join(both)))
+                    if only_s:
+                        print('       {} {}'.format(red('↳ missing(S):'), ', '.join(only_s)))
+                    if only_p:
+                        print('       {} {}'.format(red('↳ missing(P):'), ', '.join(only_p)))
         else:
             print('  {} No conforma violations'.format(green('✓')))
         print()
@@ -272,6 +322,10 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         args.extend(['--from', from_date])
     if to_date:
         args.extend(['--to', to_date])
+    if stage:
+        args.append('--stage')
+    if prod:
+        args.append('--prod')
     if is_json:
         args.append('--json')
     _bash_fallback(args)
@@ -280,16 +334,22 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 @get.command('conforma')
 @click.argument('filter', required=False, default='')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.pass_context
-def get_conforma(ctx, filter, output_json):
+def get_conforma(ctx, filter, output_json, stage, nightly):
     """Conforma test failures."""
     import json as json_mod
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.data import get_conforma_violations
         from cli.formatting import bold, dim, green, red, section_header
-        data = get_conforma_violations()
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        data = get_conforma_violations(
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
         if isinstance(data, list):
             from cli.data import _triage_jira_map_safe
             jira_map = _triage_jira_map_safe(cfg.APPLICATION_NAME)
@@ -302,7 +362,13 @@ def get_conforma(ctx, filter, output_json):
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
             return
-        section_header('Conforma Violations: {}'.format(cfg.APPLICATION_NAME))
+        source_parts = []
+        if stage:
+            source_parts.append('stage')
+        if nightly:
+            source_parts.append('nightly')
+        source_label = ' ({})'.format('+'.join(source_parts)) if source_parts else ''
+        section_header('Conforma Violations: {}{}'.format(cfg.APPLICATION_NAME, source_label))
         print()
         if not data:
             print(green('  No conforma violations'))
@@ -312,17 +378,66 @@ def get_conforma(ctx, filter, output_json):
             for comp in data:
                 print('  {}'.format(comp))
         elif isinstance(data, list):
+            from utils.conforma_utils import extract_policy_from_scenario
+            from cli.formatting import yellow
+            cov_counts = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
             for v in data:
                 comp = v.get('component', v.get('component_name', '?'))
                 viol = v.get('violations_count', 0) or 0
                 warn = v.get('warnings_count', 0) or 0
                 scenario = v.get('scenario', v.get('error_type', ''))
                 jira = v.get('jira_key', '')
+                policy = extract_policy_from_scenario(scenario)
+                exc_cov = v.get('exception_coverage')
+                env_tag = v.get('exception_env_tag')
+                stage_cov = v.get('exception_coverage_stage')
+                prod_cov = v.get('exception_coverage_prod')
                 viol_color = red if viol > 0 else green
                 jira_part = ' — {}'.format(bold(jira)) if jira else ''
-                print('  {} — {} viol, {} warn — {}{}'.format(
-                    bold(comp), viol_color(str(viol)), warn, dim(scenario),
-                    jira_part))
+                policy_part = ' [{}]'.format(dim(policy)) if policy else ''
+                cov_part = ''
+                if env_tag:
+                    is_partial = (stage_cov == 'partially_covered' or prod_cov == 'partially_covered')
+                    label = 'PARTIAL' if is_partial else 'EXC'
+                    color_fn = yellow if is_partial else green
+                    cov_part = ' {}'.format(color_fn('[{}:{}]'.format(label, env_tag)))
+                    if is_partial:
+                        cov_counts['partially_covered'] += 1
+                    else:
+                        cov_counts['fully_covered'] += 1
+                elif exc_cov == 'fully_covered':
+                    cov_part = ' {}'.format(green('[EXC]'))
+                    cov_counts['fully_covered'] += 1
+                elif exc_cov == 'partially_covered':
+                    cov_part = ' {}'.format(yellow('[PARTIAL]'))
+                    cov_counts['partially_covered'] += 1
+                elif exc_cov == 'not_covered':
+                    cov_counts['not_covered'] += 1
+                print('  {} — {} viol, {} warn{}{}{}'.format(
+                    bold(comp), viol_color(str(viol)), warn, policy_part,
+                    cov_part, jira_part))
+                if env_tag and (stage_cov == 'partially_covered' or prod_cov == 'partially_covered'):
+                    us = v.get('uncovered_rules_stage', [])
+                    up = v.get('uncovered_rules_prod', [])
+                    both = sorted(set(us) & set(up))
+                    only_s = sorted(set(us) - set(up))
+                    only_p = sorted(set(up) - set(us))
+                    if both:
+                        print('    {} {}'.format(red('↳ missing(S+P):'), ', '.join(both)))
+                    if only_s:
+                        print('    {} {}'.format(red('↳ missing(S):'), ', '.join(only_s)))
+                    if only_p:
+                        print('    {} {}'.format(red('↳ missing(P):'), ', '.join(only_p)))
+            if any(cov_counts.values()):
+                parts = []
+                if cov_counts['fully_covered']:
+                    parts.append(green('{} covered'.format(cov_counts['fully_covered'])))
+                if cov_counts['partially_covered']:
+                    parts.append(yellow('{} partial'.format(cov_counts['partially_covered'])))
+                if cov_counts['not_covered']:
+                    parts.append(red('{} uncovered'.format(cov_counts['not_covered'])))
+                print()
+                print('  Exception coverage: {}'.format(', '.join(parts)))
         print()
         return
     args = ['get', 'conforma']
@@ -339,14 +454,44 @@ def get_conforma(ctx, filter, output_json):
 def get_exceptions(ctx, output_json):
     """Policy exceptions expiring/expired."""
     import json as json_mod
+    from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if is_json:
-        from cli.mode import ensure_cluster
-        if ensure_cluster():
-            from cli.data import get_policy_exceptions
-            data = get_policy_exceptions()
+    if ensure_cluster():
+        from cli.data import get_policy_exceptions
+        from cli.formatting import dim, green, red, section_header, yellow
+        data = get_policy_exceptions()
+        if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
             return
+        section_header('Policy Exceptions')
+        print()
+        exceptions = data.get('exceptions', []) if data else []
+        if not exceptions:
+            print('  No exceptions found')
+            print()
+            return
+        from utils.conforma_utils import policy_env as _policy_env
+        print('  {:<40} {:<6} {:<12} {}'.format('Rule', 'Env', 'Expires', 'Policy'))
+        print('  {}  {} {} {}'.format('-' * 40, '-' * 6, '-' * 12, '-' * 30))
+        for exc in sorted(exceptions, key=lambda e: (e.get('source_policy', ''), e.get('value', ''))):
+            value = exc.get('value', '?')
+            if len(value) > 40:
+                value = value[:37] + '...'
+            pname = exc.get('source_policy', '')
+            env = _policy_env(pname)
+            env_display = green('stage') if env == 'stage' else yellow('prod') if env == 'prod' else dim('-')
+            days = exc.get('days_left')
+            if exc.get('permanent'):
+                expires = dim('permanent')
+            elif days is not None:
+                expires = red('{}d'.format(days)) if days <= 7 else yellow('{}d'.format(days))
+            else:
+                expires = dim('-')
+            print('  {:<40} {:<6} {:<12} {}'.format(value, env_display, expires, dim(pname)))
+        print()
+        print('  Total: {} exceptions'.format(len(exceptions)))
+        print()
+        return
     args = ['get', 'exceptions']
     if is_json:
         args.append('--json')
@@ -1915,7 +2060,8 @@ def ai_stats(fixes):
 
 
 @ai.command('quality')
-def ai_quality():
+@click.option('--calibration', is_flag=True, help='Show calibration analysis')
+def ai_quality(calibration):
     """AI analysis quality metrics — accuracy from verdicts."""
     from cli.mode import is_cluster
     from cli.formatting import bold, cyan, green, red, section_header, yellow
@@ -1929,7 +2075,8 @@ def ai_quality():
         from repositories.ai_analysis_repository import AIAnalysisRepository
         if not require_db():
             return
-        data = get_repo(AIAnalysisRepository).get_quality_metrics(cfg.APPLICATION_NAME)
+        ai_repo = get_repo(AIAnalysisRepository)
+        data = ai_repo.get_quality_metrics(cfg.APPLICATION_NAME)
 
     if not data or not data.get('total_with_verdict'):
         print('  No verdicts recorded yet.')
@@ -1963,7 +2110,87 @@ def ai_quality():
             cat_acc = (stats['correct'] + stats['partial'] * 0.5) / stats['total'] if stats['total'] else 0
             print('    {:<30} {}/{} ({}%)'.format(
                 cyan(cat), stats['correct'], stats['total'], int(cat_acc * 100)))
+
+    if calibration and not is_cluster():
+        _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow, section_header)
     print()
+
+
+def _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow, section_header):
+    """Display calibration analysis: predicted vs actual accuracy."""
+    from analyzers.calibration import CalibrationService
+    from analyzers.feature_weights import FeatureWeightService
+    from analyzers.bayesian_priors import BayesianPriorService
+    from cli.db import get_db
+
+    print()
+    section_header('Calibration Analysis')
+
+    cal_service = CalibrationService(ai_repo)
+    curve = cal_service.compute_calibration_curve()
+
+    if not curve:
+        print('  No calibration data yet (need verdicts with confidence scores).')
+        return
+
+    print()
+    print('  {:<12} {:<10} {:<10} {}'.format(
+        bold('Predicted'), bold('Actual'), bold('Samples'), bold('Status')))
+    for bucket in curve:
+        lo = int(bucket.bucket_min * 100)
+        hi = int(bucket.bucket_max * 100)
+        actual_pct = int(bucket.actual_accuracy * 100)
+        diff = bucket.actual_accuracy - bucket.predicted_confidence
+        if abs(diff) < 0.1:
+            status = green('well-calibrated')
+        elif diff > 0:
+            status = cyan('underconfident')
+        else:
+            status = yellow('overconfident')
+        print('  {:<12} {:<10} {:<10} {}'.format(
+            '{}-{}%'.format(lo, hi), '{}%'.format(actual_pct),
+            str(bucket.sample_size), status))
+
+    score = cal_service.compute_calibration_score()
+    if score is not None:
+        color = green if score >= 0.85 else yellow if score >= 0.7 else red
+        print()
+        print('  Calibration Score: {} ({})'.format(
+            color(str(score)),
+            'excellent' if score >= 0.9 else 'good' if score >= 0.8 else
+            'fair' if score >= 0.7 else 'poor'))
+
+    try:
+        db = get_db()
+        weight_service = FeatureWeightService(db)
+        importance = weight_service.get_feature_importance()
+        if importance:
+            print()
+            print('  {}'.format(bold('Feature Importance (learned):')))
+            for fi in importance:
+                bar = int(fi['weight'] * 5)
+                indicator = green('*' * bar) if fi['weight'] >= 1.0 else yellow('*' * max(1, bar))
+                print('    {:<30} {:<6} {} ({} samples)'.format(
+                    cyan(fi['name']), str(fi['weight']), indicator, fi['sample_size']))
+    except Exception:
+        pass
+
+    try:
+        prior_service = BayesianPriorService(ai_repo)
+        stats = ai_repo.get_verdict_stats_by_category('build')
+        if stats:
+            print()
+            print('  {}'.format(bold('Bayesian Priors (by category):')))
+            for row in stats[:10]:
+                prior = prior_service.get_prior(row['category'])
+                flag = '*' if prior.is_bootstrapped else ''
+                print('    {:<30} P(correct)={:<6} ({} verdicts{})'.format(
+                    cyan(row['category']),
+                    '{:.2f}'.format(prior.prior_correct),
+                    prior.sample_size,
+                    ' bootstrapped' if flag else ''))
+    except Exception:
+        pass
 
 
 # --- Top-level commands ---
@@ -2414,7 +2641,7 @@ def lookup(ctx, image_ref):
     """Find which component produced a given image or digest."""
     import json as json_mod
     from cli.db import get_repo, print_table, require_db
-    from cli.formatting import bold, cyan, section_header
+    from cli.formatting import bold, cyan, green, section_header
     from repositories.build_failure_repository import BuildFailureRepository
     output_json = ctx.obj.get('json') if ctx.obj else False
 
@@ -2426,21 +2653,44 @@ def lookup(ctx, image_ref):
         pass
 
     cluster_matches = []
+    all_comps = []
+    url_component = None
     try:
         from clients.kubernetes import KubernetesClient
         kc = KubernetesClient(namespace=cfg.NAMESPACE)
         all_comps = kc.list_components()
         term = image_ref.lower()
         cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+
+        if not cluster_matches and '/' in image_ref:
+            path = image_ref.split('/')[-1].split('@')[0].split(':')[0]
+            if path:
+                url_component = path
+                cluster_matches = [c for c in all_comps if c.get('name', '') == path]
+                if not cluster_matches:
+                    import re
+                    core = re.sub(r'-(rhel[0-9]+|v[0-9]+-[0-9]+-.*|ea-[0-9]+.*)$', '', path)
+                    if core and core != path:
+                        cluster_matches = [c for c in all_comps
+                                           if c.get('name', '').startswith(core)]
     except Exception:
         pass
 
+    quay_match = None
+    if not db_matches and not cluster_matches:
+        quay_match = _resolve_via_quay(image_ref, all_comps)
+
     if output_json:
-        print(json_mod.dumps({
+        result = {
             'query': image_ref,
             'db_matches': db_matches,
             'cluster_matches': cluster_matches,
-        }, indent=2, default=str))
+        }
+        if url_component:
+            result['url_component'] = url_component
+        if quay_match:
+            result['quay_match'] = quay_match
+        print(json_mod.dumps(result, indent=2, default=str))
         return
 
     section_header('Image Lookup: {}'.format(image_ref[:60]))
@@ -2464,7 +2714,10 @@ def lookup(ctx, image_ref):
 
     print()
     if cluster_matches:
-        print(bold('Found in cluster components:'))
+        if url_component:
+            print(bold('Found via URL path (component: {}):'.format(url_component)))
+        else:
+            print(bold('Found in cluster components:'))
         print_table(
             ['Component', 'Application', 'Image'],
             [(c['name'], c['application'], c['container_image'][:70]) for c in cluster_matches],
@@ -2473,8 +2726,116 @@ def lookup(ctx, image_ref):
         print('  No matches in cluster components.')
     print()
 
-    if not db_matches and not cluster_matches:
+    if quay_match:
+        print(bold('Resolved via Quay manifest (per-arch image):'))
+        print('  {} {}'.format(green('Component:'), quay_match.get('component', '')))
+        print('  {} {}/{}'.format(
+            green('Platform:'),
+            quay_match.get('os', ''), quay_match.get('architecture', '')))
+        print('  {} {}'.format(green('Manifest list tag:'), quay_match.get('manifest_list_tag', '')))
+        print()
+
+    if not db_matches and not cluster_matches and not quay_match:
         print(cyan('No matches found. Try a longer digest or full image URL.'))
+        print()
+
+
+def _resolve_via_quay(image_ref, all_comps):
+    """Try to resolve a per-arch digest via Quay manifest list API."""
+    from clients.registry_client import RegistryClient
+
+    target_digest = image_ref.strip()
+    if not target_digest.startswith('sha256:'):
+        if '@sha256:' in image_ref:
+            target_digest = image_ref.split('@')[-1]
+        else:
+            return None
+
+    if len(target_digest) < 20:
+        return None
+
+    rc = RegistryClient()
+
+    if '/' in image_ref and '@' in image_ref:
+        registry, repository, _ = rc.parse_image_ref(image_ref)
+        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+        if result:
+            comp_name = repository.rsplit('/', 1)[-1] if '/' in repository else repository
+            result['component'] = comp_name
+            return result
+
+    for comp in all_comps[:20]:
+        ci = comp.get('container_image', '')
+        if not ci:
+            continue
+        registry, repository, _ = rc.parse_image_ref(ci)
+        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+        if result:
+            result['component'] = comp.get('name', '')
+            return result
+
+    return None
+
+
+@cli.command('snapshot-check')
+@click.pass_context
+def snapshot_check(ctx):
+    """Check snapshot freshness — detect stale or failed build images."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    from proactive.health_monitor import HealthMonitor
+
+    output_json = ctx.obj.get('json') if ctx.obj else False
+    monitor = HealthMonitor(db=None)
+    result = monitor.check_snapshot_freshness()
+
+    if output_json:
+        print(json_mod.dumps(result, indent=2, default=str))
+        return
+
+    if result.get('error'):
+        print(red('Error: {}'.format(result['error'])))
+        raise SystemExit(1)
+
+    section_header('Snapshot Freshness — {}'.format(result.get('application', '')))
+    print()
+    print('{}  {}'.format(bold('Snapshot:'), cyan(result.get('snapshot', ''))))
+    print('{}  {}'.format(bold('Created:'), result.get('snapshot_created', '')))
+    print('{}  {}'.format(bold('Components:'), result.get('total_components', 0)))
+    print()
+
+    stale = result.get('stale', [])
+    no_builds = result.get('no_builds', [])
+    fresh_count = result.get('fresh_count', 0)
+
+    if not stale and not no_builds:
+        print(green('All {} components are fresh — snapshot matches latest builds.'.format(fresh_count)))
+        print()
+        return
+
+    print('{} fresh, {} stale, {} no builds'.format(
+        green(str(fresh_count)), red(str(len(stale))), yellow(str(len(no_builds)))))
+    print()
+
+    if stale:
+        print(bold('Stale components:'))
+        print()
+        for s in stale:
+            reason = s.get('reason', '')
+            if reason == 'latest_build_failed':
+                print('  {} {}'.format(red('FAILED'), bold(s['component'])))
+                print('    Latest build failed: {} ({})'.format(
+                    s.get('latest_build_pr', ''), s.get('latest_build_date', '')[:10]))
+                print('    Snapshot has pre-failure image')
+            elif reason == 'newer_build_available':
+                print('  {} {}'.format(yellow('STALE'), bold(s['component'])))
+                print('    Newer build available: {}'.format(s.get('latest_build_date', '')[:10]))
+            print()
+
+    if no_builds:
+        print(bold('No builds found ({}):'.format(len(no_builds))))
+        for nb in no_builds:
+            print('  {} {}'.format(yellow('?'), nb['component']))
         print()
 
 
@@ -2634,15 +2995,25 @@ def conforma(ctx):
 
 
 @conforma.command('report')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.argument('args', nargs=-1)
-def conforma_report(args):
+def conforma_report(stage, nightly, args):
     """Daily Conforma violations report."""
     import json as json_mod
     from cli.mode import ensure_cluster
-    if ensure_cluster():
-        from cli.data import get_conforma_report
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.formatting import dim, red, section_header, yellow
-        data = get_conforma_report()
+        if stage or nightly:
+            from cli.data import get_conforma_violations
+            reporter_env = 'stage' if stage else None
+            reporter_build_type = 'nightly' if nightly else None
+            data = get_conforma_violations(
+                reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        else:
+            from cli.data import get_conforma_report
+            data = get_conforma_report()
         if isinstance(data, str):
             print(data)
         elif isinstance(data, dict):
@@ -2666,36 +3037,117 @@ def conforma_report(args):
 
 
 @conforma.command('categories')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.argument('args', nargs=-1)
-def conforma_categories(args):
+def conforma_categories(stage, nightly, args):
     """Violation categories across components."""
     from cli.mode import ensure_cluster
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.data import get_conforma_violations
         from cli.formatting import bold, section_header
-        data = get_conforma_violations()
-        categories = {}
+        from utils.conforma_utils import categorize_policy, count_unique_violations
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        data = get_conforma_violations(
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        groups = {}
+        scenarios = {}
         if isinstance(data, list):
             for v in data:
-                cat = v.get('scenario', v.get('error_type', 'unknown'))
-                categories[cat] = categories.get(cat, 0) + 1
+                scenario = v.get('scenario', v.get('error_type', 'unknown'))
+                cat = categorize_policy(scenario)
+                uv = v.get('unique_violations') or 0
+                if not uv:
+                    uv, _ = count_unique_violations(v.get('violation_summary', ''))
+                if cat not in groups:
+                    groups[cat] = {'components': 0, 'violations': 0}
+                groups[cat]['components'] += 1
+                groups[cat]['violations'] += uv
+                scenarios[scenario] = scenarios.get(scenario, 0) + 1
         section_header('Conforma Categories')
         print()
-        for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
-            print('  {:<50} {}'.format(cat[:50], bold(str(count))))
+        for cat in ('FBC', 'Components', 'Charts'):
+            g = groups.get(cat, {'components': 0, 'violations': 0})
+            print('  {:<15} {} components, {} unique violations'.format(
+                bold(cat + ':'), g['components'], g['violations']))
+        print()
+        section_header('By Scenario')
+        print()
+        for sc, count in sorted(scenarios.items(), key=lambda x: -x[1]):
+            print('  {:<60} {}'.format(sc[:60], bold(str(count))))
         print()
         return
     _bash_fallback(['conforma', 'categories'] + list(args))
 
 
+@conforma.command('rules')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
+def conforma_rules(stage, nightly):
+    """Violations grouped by rule with affected components."""
+    from cli.mode import ensure_cluster
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
+        from cli.data import get_conforma_rules
+        from cli.formatting import bold, dim, section_header
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        rules = get_conforma_rules(
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        source_label = ''
+        if stage:
+            source_label = ' (stage)'
+        if nightly:
+            source_label += ' (nightly)' if source_label else ' (nightly)'
+        section_header('Conforma Rules — {}{}'.format(cfg.APPLICATION_NAME, source_label))
+        if not rules:
+            print('\n  No violations found.\n')
+            return
+        all_comps = set()
+        for r in rules:
+            all_comps.update(r.get('components', []))
+        print('\n{} rules failing across {} components\n'.format(
+            bold(str(len(rules))), bold(str(len(all_comps)))))
+        app_name = cfg.APPLICATION_NAME or ''
+        version_suffix = ''
+        if '-v' in app_name:
+            version_suffix = '-v' + app_name.split('-v', 1)[1]
+        for r in rules:
+            rule_name = r['rule']
+            count = r['count']
+            print('{:<55} {} components'.format(bold(rule_name), count))
+            solution = r.get('solution', '')
+            if solution:
+                sol_text = solution[:120] + '...' if len(solution) > 120 else solution
+                print('  Solution: {}'.format(dim(sol_text)))
+            comps = r.get('components', [])
+            if comps:
+                display_comps = [c.replace(version_suffix, '') for c in comps]
+                comp_line = ', '.join(display_comps[:8])
+                if len(comps) > 8:
+                    comp_line += ', ... (+{})'.format(len(comps) - 8)
+                print('  Components: {}'.format(comp_line))
+            print()
+        return
+    _bash_fallback(['conforma', 'rules'])
+
+
 @conforma.command('csv')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.argument('args', nargs=-1)
-def conforma_csv(args):
+def conforma_csv(stage, nightly, args):
     """Export Conforma data as CSV."""
     from cli.mode import ensure_cluster
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.data import get_conforma_violations
-        data = get_conforma_violations()
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        data = get_conforma_violations(
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
         print('component,violations,warnings,scenario,first_seen')
         if isinstance(data, list):
             for v in data:
@@ -3652,16 +4104,19 @@ def skills_doctor(path):
 @click.argument('name')
 @click.option('--dry-run', is_flag=True, help='Show steps without executing')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation for medium-risk skills')
-@click.option('--timeout', type=int, default=300, help='Timeout in seconds per step')
+@click.option('--timeout', type=int, default=900, help='Total timeout in seconds (default: 900)')
 @click.option('--param', '-p', multiple=True, help='Parameters as key=value')
+@click.option('--agent', is_flag=True, help='Use AI agent to execute workflow-type skills')
+@click.option('--interactive', is_flag=True, help='Agent pauses for user confirmation before tool calls')
+@click.option('--max-turns', type=int, default=30, help='Max agent turns (default: 30)')
+@click.option('--max-cost', type=float, default=2.0, help='Max agent cost in USD (default: 2.0)')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
+def skills_run(ctx, name, dry_run, yes, timeout, param, agent, interactive,
+               max_turns, max_cost, output_json):
     """Run a skill."""
-    import json as json_mod
-    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from cli.formatting import cyan, red
     from skills.db_registry import get_registry
-    from skills.executor import SkillExecutor
 
     registry = get_registry()
     skill = registry.get_skill(name)
@@ -3679,6 +4134,302 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         if '=' in p:
             k, v = p.split('=', 1)
             params[k] = v
+
+    use_agent = agent
+    if not use_agent:
+        from skills.type_detector import should_use_agent
+        use_agent = should_use_agent(
+            skill.path,
+            execution_mode=skill.metadata.execution_mode,
+        )
+
+    if use_agent:
+        result = _run_agent_skill(
+            skill, params, dry_run, timeout, max_turns, max_cost,
+            interactive, output_json, ctx,
+        )
+    else:
+        result = _run_script_skill(
+            skill, params, dry_run, yes, timeout, output_json, ctx,
+        )
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    _print_output_tip(skill)
+
+    if result.status == 'failed':
+        raise SystemExit(1)
+
+
+def _find_skill_outputs(skill):
+    """Find .work/ runs for a skill, newest first.
+
+    Returns list of (dir_path, date_str, all_files) where all_files
+    includes every file in the run directory.
+    """
+    from skills.models import resolve_working_dir
+    work_dir = resolve_working_dir(skill.path, skill.metadata.working_dir)
+    work_path = os.path.join(work_dir, '.work')
+    if not os.path.isdir(work_path):
+        return []
+    runs = []
+    for entry in sorted(os.listdir(work_path), reverse=True):
+        run_dir = os.path.join(work_path, entry)
+        if not os.path.isdir(run_dir) or len(entry) < 8 or not entry[:8].isdigit():
+            continue
+        files = []
+        for f in os.listdir(run_dir):
+            fp = os.path.join(run_dir, f)
+            if os.path.isfile(fp):
+                files.append(f)
+        if files:
+            runs.append((run_dir, entry, sorted(files)))
+    return runs
+
+
+def _render_file(filepath):
+    """Render a file to the terminal. Markdown uses rich, others use plain text."""
+    if filepath.endswith('.md'):
+        try:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            with open(filepath) as f:
+                content = f.read()
+            Console().print(Markdown(content))
+            return
+        except ImportError:
+            pass
+    elif filepath.endswith('.json'):
+        try:
+            from rich.console import Console
+            from rich.json import JSON
+            with open(filepath) as f:
+                content = f.read()
+            Console().print(JSON(content))
+            return
+        except ImportError:
+            pass
+    with open(filepath) as f:
+        print(f.read())
+
+
+def _print_output_tip(skill):
+    """Print tip about viewing output if .work/ has files."""
+    from cli.formatting import cyan, dim
+    runs = _find_skill_outputs(skill)
+    if runs:
+        md_count = sum(1 for f in runs[0][2] if f.endswith('.md'))
+        if md_count:
+            print()
+            print(dim('Tip: ') + cyan('ic skills output {}'.format(skill.name)))
+
+
+@skills.command('output')
+@click.argument('name')
+@click.option('--list', 'list_runs', is_flag=True, help='List all available runs')
+@click.option('--run', 'run_index', type=int, default=1, help='Which run to view (1=latest)')
+@click.option('--file', 'file_name', type=str, default=None, help='View a specific file by name')
+@click.pass_context
+def skills_output(ctx, name, list_runs, run_index, file_name):
+    """View output files from a skill run."""
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.db_registry import get_registry
+
+    registry = get_registry()
+    try:
+        skill = registry.get_skill(name)
+    except KeyError as e:
+        print(red(str(e)))
+        raise SystemExit(1)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(name))
+        raise SystemExit(1)
+
+    runs = _find_skill_outputs(skill)
+    if not runs:
+        print(yellow('No output found for ') + cyan(name))
+        print(dim('Run the skill first: ic skills run {}'.format(name)))
+        raise SystemExit(1)
+
+    if list_runs:
+        print(bold('Runs for ') + cyan(name))
+        print()
+        for i, (run_dir, date_str, files) in enumerate(runs, 1):
+            md_files = [f for f in files if f.endswith('.md')]
+            data_files = [f for f in files if not f.endswith('.md')]
+            total_size = sum(
+                os.path.getsize(os.path.join(run_dir, f)) for f in files
+            )
+            date_display = '{}-{}-{} {}:{}'.format(
+                date_str[:4], date_str[4:6], date_str[6:8],
+                date_str[9:11], date_str[11:13],
+            )
+            marker = green(' (latest)') if i == 1 else ''
+            print('  {} {}  {} md, {} data, {:.1f} KB{}'.format(
+                bold('#{}'.format(i)),
+                dim(date_display),
+                len(md_files), len(data_files),
+                total_size / 1024,
+                marker,
+            ))
+        print()
+        print(dim('View a run: ic skills output {} --run N'.format(name)))
+        return
+
+    if run_index < 1 or run_index > len(runs):
+        print(red('Run #{} not found.'.format(run_index))
+              + ' Available: 1-{}'.format(len(runs)))
+        raise SystemExit(1)
+
+    run_dir, date_str, files = runs[run_index - 1]
+
+    if file_name:
+        filepath = os.path.join(run_dir, file_name)
+        if not os.path.isfile(filepath):
+            print(red('File not found: ') + cyan(file_name))
+            print(dim('Available: ') + ', '.join(files))
+            raise SystemExit(1)
+        _render_file(filepath)
+        return
+
+    md_files = sorted(
+        [f for f in files if f.endswith('.md')],
+        key=lambda f: os.path.getsize(os.path.join(run_dir, f)),
+        reverse=True,
+    )
+    data_files = sorted(f for f in files if not f.endswith('.md'))
+
+    date_display = '{}-{}-{} {}:{}'.format(
+        date_str[:4], date_str[4:6], date_str[6:8],
+        date_str[9:11], date_str[11:13],
+    )
+    print(bold('Run ') + dim(date_display) + bold(' — {} files'.format(len(files))))
+    print()
+
+    if md_files:
+        print(bold('  Markdown:'))
+        for i, f in enumerate(md_files, 1):
+            size = os.path.getsize(os.path.join(run_dir, f))
+            print('    {}. {}  ({:.1f} KB)'.format(i, cyan(f), size / 1024))
+
+    if data_files:
+        if len(data_files) <= 5:
+            print(bold('  Data: ') + dim(', '.join(data_files)))
+        else:
+            shown = ', '.join(data_files[:3])
+            print(bold('  Data: ') + dim('{} (+{} more)'.format(shown, len(data_files) - 3)))
+
+    print()
+
+    if len(md_files) == 1:
+        _render_file(os.path.join(run_dir, md_files[0]))
+    elif md_files:
+        try:
+            choice = input('View [1-{}, all, q]: '.format(len(md_files))).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice == 'q':
+            return
+        if choice == 'all':
+            for f in md_files:
+                print()
+                print(bold('━━━ {} ━━━'.format(f)))
+                print()
+                _render_file(os.path.join(run_dir, f))
+        elif choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(md_files):
+                _render_file(os.path.join(run_dir, md_files[idx - 1]))
+            else:
+                print(red('Invalid choice'))
+    else:
+        print(yellow('No markdown files in this run.'))
+        print(dim('View a specific file: ic skills output {} --file <name>'.format(name)))
+
+
+def _run_agent_skill(skill, params, dry_run, timeout, max_turns, max_cost,
+                     interactive, output_json, ctx):
+    """Execute a skill via the AI agent loop."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.agent_config import AgentConfig
+    from skills.agent_executor import AgentExecutor
+
+    config = AgentConfig(
+        max_turns=max_turns,
+        cost_limit_usd=max_cost,
+        total_timeout_seconds=timeout,
+    )
+
+    try:
+        from clients.llm_provider import create_llm_provider
+        from config import CollectorConfig
+        app_config = CollectorConfig.from_env()
+        if not app_config.llm:
+            print(red('LLM provider not configured'))
+            print(dim('Set ANTHROPIC_API_KEY or Vertex AI credentials'))
+            raise SystemExit(1)
+        llm = create_llm_provider(app_config.llm)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(red('LLM provider error: {}'.format(e)))
+        print(dim('Set up Vertex AI or Anthropic API credentials'))
+        raise SystemExit(1)
+
+    print(bold('Skill:    ') + cyan(skill.qualified_name))
+    print(bold('Mode:     ') + cyan('agent'))
+    print(bold('Model:    ') + dim(llm.model_name()))
+    print(bold('Limits:   ') + dim('{} turns, ${:.2f} max'.format(
+        config.max_turns, config.cost_limit_usd)))
+    if interactive:
+        print(bold('Input:    ') + yellow('interactive'))
+    print()
+
+    executor = AgentExecutor(
+        skill=skill,
+        llm_provider=llm,
+        config=config,
+        params=params,
+        interactive=interactive,
+        dry_run=dry_run,
+    )
+
+    result = executor.execute()
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(result.to_dict(), indent=2, default=str))
+        return result
+
+    print()
+    status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
+    print(bold('Status:   ') + status_color(result.status))
+    if result.duration_seconds:
+        print(bold('Duration: ') + '{:.1f}s'.format(result.duration_seconds))
+    if result.steps_executed:
+        print(bold('Turns:    ') + '{}'.format(result.steps_executed))
+
+    if result.status == 'dry_run' and result.dry_run_steps:
+        print()
+        for step in result.dry_run_steps:
+            print(dim('  ' + step))
+
+    return result
+
+
+def _run_script_skill(skill, params, dry_run, yes, timeout, output_json, ctx):
+    """Execute a skill via the traditional code-block executor."""
+    import json as json_mod
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.executor import SkillExecutor
 
     executor = SkillExecutor(skill, params=params, dry_run=dry_run, timeout=timeout)
     assessment = executor.assess()
@@ -3701,18 +4452,17 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         confirm = input('Execute? [y/N] ').strip().lower()
         if confirm != 'y':
             print(dim('Cancelled'))
-            return
+            from skills.models import ExecutionResult
+            return ExecutionResult(
+                skill_name=skill.qualified_name,
+                status='cancelled',
+            )
 
     result = executor.execute()
 
-    try:
-        registry.record_run(result)
-    except Exception:
-        pass
-
     if output_json or (ctx.obj and ctx.obj.get('json')):
         print(json_mod.dumps(result.to_dict(), indent=2, default=str))
-        return
+        return result
 
     status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
     risk_color = green if risk == 'low' else yellow if risk == 'medium' else red
@@ -3749,8 +4499,7 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         print()
         print(red(result.stderr))
 
-    if result.status == 'failed':
-        raise SystemExit(1)
+    return result
 
 
 @skills.command('runs')
