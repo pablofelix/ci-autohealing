@@ -22,6 +22,20 @@ class TriageRepository:
                   failed_step, slack_thread_urls, jira_key, notes))
             return cursor.fetchone()[0]
 
+    def build_jira_map(self, application):
+        """Build component->jira_key map from active triage items."""
+        jira_map = {}
+        try:
+            for item in self.get_active(application):
+                jira_key = item.get('jira_key')
+                if jira_key:
+                    for comp in item.get('components', []):
+                        if comp not in jira_map:
+                            jira_map[comp] = jira_key
+        except Exception:
+            pass
+        return jira_map
+
     def get_active(self, application):
         with self.db.connection() as conn:
             cursor = conn.cursor()

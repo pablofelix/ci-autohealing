@@ -1,6 +1,5 @@
 """Build failure endpoints."""
 
-import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -58,31 +57,25 @@ def list_alerts(application: str):
             has_analysis=comp.get('ai_analyzed', False),
         ))
 
+    from utils.conforma_utils import (
+        extract_violation_rules, fetch_exceptions_by_policy,
+        policy_url as _policy_url, categorize_policy,
+        count_unique_violations, compute_exception_coverage_details,
+    )
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     conforma_violations = []
     conforma_failing = _conforma_repo().find_unresolved_component_names(application)
-    triage_jira = {}
-    try:
-        for item in _triage_repo().get_active_items(application):
-            jk = item.get('jira_key')
-            if jk:
-                for c in item.get('components', []):
-                    if c not in triage_jira:
-                        triage_jira[c] = jk
-    except Exception:
-        pass
-    ec_policy_base = os.environ.get('GITLAB_EC_POLICY_URL', '')
+    triage_jira = _triage_repo().build_jira_map(application)
     for comp_name in sorted(conforma_failing):
         details = _conforma_repo().get_violation_details(comp_name, application)
         if details:
             scenario = details.get('scenario', '')
-            policy_url = None
-            if ec_policy_base and scenario:
-                import re
-                m = re.search(r'conforma-(.+)-single-component', scenario)
-                if m:
-                    policy_name = m.group(1)
-                    policy_url = '{}/{}.yaml'.format(ec_policy_base, policy_name)
             jira_key = details.get('jira_key') or triage_jira.get(comp_name)
+            rules = extract_violation_rules(details.get('violation_summary', ''))
+            cov = compute_exception_coverage_details(
+                rules, scenario, exceptions_by_policy)
+            uv_count, _ = count_unique_violations(
+                details.get('violation_summary', ''))
             conforma_violations.append(FailureSummary(
                 component=comp_name,
                 status='Conforma Violation',
@@ -93,10 +86,20 @@ def list_alerts(application: str):
                 has_logs=details.get('violation_summary') is not None,
                 has_analysis=details.get('ai_analyzed', False),
                 violations_count=details.get('violations_count', 0),
+                unique_violations=uv_count or None,
                 warnings_count=details.get('warnings_count', 0),
                 scenario=scenario,
-                policy_url=policy_url,
+                category=categorize_policy(scenario),
+                policy_url=_policy_url(scenario),
                 jira_key=jira_key,
+                exception_coverage=cov['coverage'],
+                exception_coverage_stage=cov['stage'],
+                exception_coverage_prod=cov['prod'],
+                exception_env_tag=cov['env_tag'],
+                policy_url_stage=cov['policy_url_stage'],
+                policy_url_prod=cov['policy_url_prod'],
+                uncovered_rules_stage=cov['uncovered_rules_stage'],
+                uncovered_rules_prod=cov['uncovered_rules_prod'],
             ))
 
     nightly_warnings = []

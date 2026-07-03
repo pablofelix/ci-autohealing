@@ -332,7 +332,9 @@ class VerdictCorrelator:
                 try:
                     pr_files = self._get_pr_files(owner, repo, pr['number'])
                     pr_data['files_changed'] = pr_files
-                except Exception:
+                except Exception as e:
+                    logger.warning("Failed to fetch files for PR #%s: %s",
+                                   pr['number'], e)
                     pr_data['files_changed'] = []
             enriched_prs.append(pr_data)
 
@@ -391,5 +393,5 @@ class VerdictCorrelator:
                 ))
                 conn.commit()
         except Exception:
-            logger.debug("Failed to record resolution evidence for %s",
-                         component_name, exc_info=True)
+            logger.warning("Failed to record resolution evidence for %s",
+                           component_name, exc_info=True)

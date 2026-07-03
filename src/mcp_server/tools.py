@@ -158,33 +158,46 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
         ))
 
     conforma_violations = []
-    triage_jira = {}
-    try:
-        for item in _triage_repo().get_active_items(application):
-            jk = item.get('jira_key')
-            if jk:
-                for c in item.get('components', []):
-                    if c not in triage_jira:
-                        triage_jira[c] = jk
-    except Exception:
-        pass
+    triage_jira = _triage_repo().build_jira_map(application)
+    from utils.conforma_utils import (
+        extract_violation_rules, fetch_exceptions_by_policy,
+        policy_url as _policy_url, categorize_policy,
+        count_unique_violations, compute_exception_coverage_details,
+    )
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     summaries = _conforma_repo().get_violation_summaries(application)
     for s in summaries:
         comp_name = s['component_name']
+        scenario = s.get('scenario', '')
         jira_key = s.get('jira_key') or triage_jira.get(comp_name)
+        rules = extract_violation_rules(s.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        uv_count, _ = count_unique_violations(s.get('violation_summary', ''))
         conforma_violations.append(FailureSummary(
             component=comp_name,
             status='Conforma Violation',
-            error_type=s.get('scenario'),
+            error_type=scenario,
             first_seen=s.get('first_detected_at', datetime.utcnow()),
             last_seen=s.get('last_updated_at', datetime.utcnow()),
             occurrence_count=1,
             has_logs=s.get('violation_summary') is not None,
             has_analysis=s.get('ai_analyzed', False),
             violations_count=s.get('violations_count', 0),
+            unique_violations=uv_count or None,
             warnings_count=s.get('warnings_count', 0),
-            scenario=s.get('scenario'),
+            scenario=scenario,
+            category=categorize_policy(scenario),
+            policy_url=_policy_url(scenario),
             jira_key=jira_key,
+            exception_coverage=cov['coverage'],
+            exception_coverage_stage=cov['stage'],
+            exception_coverage_prod=cov['prod'],
+            exception_env_tag=cov['env_tag'],
+            policy_url_stage=cov['policy_url_stage'],
+            policy_url_prod=cov['policy_url_prod'],
+            uncovered_rules_stage=cov['uncovered_rules_stage'],
+            uncovered_rules_prod=cov['uncovered_rules_prod'],
         ))
 
     all_dates = ([f.last_seen for f in build_failures] +
@@ -264,17 +277,49 @@ def get_violation(
         application: Which version to query
         include_details: Include violation_details JSONB
     """
+    from utils.conforma_utils import (
+        extract_policy_from_scenario, policy_url,
+        extract_violation_rules, compute_violation_coverage,
+        fetch_exceptions_by_policy, lookup_exceptions,
+        count_unique_violations,
+    )
     row = _conforma_repo().get_violation_details(component, application)
     if not row:
         return None
 
     konflux = _konflux_url(row.get('pipelinerun_name', ''))
     details = row.get('violation_details') if include_details else None
+    scenario = row['scenario']
+    policy_name = extract_policy_from_scenario(scenario)
+
+    cov_fields = {}
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    if exceptions_by_policy:
+        rules = extract_violation_rules(row.get('violation_summary', ''))
+        cov = compute_violation_coverage(
+            rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
+        if cov:
+            cov_fields = {
+                'exception_coverage': cov['coverage'],
+                'covered_rules': cov['covered_rules'],
+                'uncovered_rules': cov['uncovered_rules'],
+                'matching_exceptions': cov['matching_exceptions'],
+            }
+
+    uv_count, uv_rules = count_unique_violations(row.get('violation_summary', ''))
+    vr_list = [
+        r['rule'] + (':' + r['detail'] if r['detail'] else '')
+        for r in uv_rules
+    ]
 
     return ConformaViolationDetails(
         component=row['component_name'],
-        scenario=row['scenario'],
+        scenario=scenario,
+        policy_name=policy_name,
+        policy_url=policy_url(scenario),
         violations_count=row['violations_count'],
+        unique_violations=uv_count or None,
+        violation_rules=vr_list or None,
         warnings_count=row['warnings_count'],
         successes_count=row['successes_count'],
         violation_summary=row.get('violation_summary', ''),
@@ -284,6 +329,7 @@ def get_violation(
         snapshot_name=row.get('snapshot_name'),
         konflux_url=konflux,
         first_detected_at=row.get('first_detected_at', datetime.utcnow()),
+        **cov_fields,
     )
 
 
@@ -309,10 +355,46 @@ def get_analysis(
     return _row_to_analysis(row)
 
 
+def _extract_from_analysis_json(analysis_json):
+    """Extract evidence_references, source_transparency, and fix_action_type from analysis_json JSONB."""
+    evidence = []
+    transparency = None
+    fix_action_type = None
+    if not analysis_json:
+        return evidence, transparency, fix_action_type
+    try:
+        data = analysis_json if isinstance(analysis_json, (list, dict)) else json.loads(analysis_json)
+        if isinstance(data, dict) and 'tool_calls' in data:
+            items = data['tool_calls']
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            inp = item.get('input', item)
+            for ref in inp.get('evidence_references', []):
+                if isinstance(ref, dict):
+                    evidence.append(ref)
+            st = inp.get('source_transparency')
+            if isinstance(st, dict):
+                transparency = st
+            fat = inp.get('fix_action_type')
+            if fat and isinstance(fat, str):
+                fix_action_type = fat
+            if evidence or transparency or fix_action_type:
+                break
+    except Exception:
+        pass
+    return evidence, transparency, fix_action_type
+
+
 def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:
     files = row.get('recommended_files') or []
     if isinstance(files, str):
         files = [f.strip() for f in files.split(",") if f.strip()]
+    evidence, transparency, fix_action_type = _extract_from_analysis_json(row.get('analysis_json'))
     return AnalysisDetails(
         type=row['analysis_type'],
         component=row['component_name'],
@@ -322,12 +404,15 @@ def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:
         confidence_score=float(row.get('confidence_score') or 0),
         recommended_fix=row.get('recommended_fix', ''),
         recommended_files=files,
+        fix_action_type=fix_action_type,
         can_auto_fix=bool(row.get('can_auto_fix')),
         requires_human_review=bool(row.get('requires_human_review')),
         analyzed_at=row.get('analyzed_at', datetime.utcnow()),
         langfuse_trace_url=row.get('langfuse_trace_url'),
         tokens_used=row.get('tokens_used') or 0,
         cost_usd=float(row.get('cost_usd') or 0),
+        evidence_references=evidence,
+        source_transparency=transparency,
     )
 
 
@@ -683,26 +768,175 @@ def resolve_triage_item(
 
 
 @mcp.tool()
-def get_conforma_categories(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+def get_conforma_categories(
+    application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get violation categories with counts across all failing components.
 
     Returns a summary of which Conforma policy rules are failing and how many
-    components are affected by each.
+    components are affected by each. Includes high-level grouping by artifact
+    type (FBC, Components, Charts) matching the conforma-reporter Slack format.
+
+    Pass reporter_env/reporter_build_type to fetch from the conforma-reporter
+    instead of cluster data.
+
+    Args:
+        application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter
+        reporter_build_type: 'latest', 'nightly', or 'release_day'
     """
+    if reporter_env or reporter_build_type:
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        from cli.config import app_to_reporter_branch
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        data = fetch_reporter_violations(branch, env=env, build_type=build_type)
+        groups = {}
+        for v in data:
+            cat = 'Components'
+            if cat not in groups:
+                groups[cat] = {'components': 0, 'violations': 0}
+            groups[cat]['components'] += 1
+            groups[cat]['violations'] += v.get('unique_violations', 0)
+        for cat in ('FBC', 'Components', 'Charts'):
+            groups.setdefault(cat, {'components': 0, 'violations': 0})
+        return {
+            'application': application,
+            'source': '{}/{}'.format(env, build_type),
+            'groups': groups,
+            'categories': {},
+        }
     from repositories.conforma_repository import ConformaRepository
+    from utils.conforma_utils import (
+        extract_policy_from_scenario, extract_violation_rules,
+        compute_violation_coverage, fetch_exceptions_by_policy,
+        lookup_exceptions, categorize_policy, count_unique_violations,
+    )
     repo = ConformaRepository(_db_connection())
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     comps = repo.find_unresolved_component_names(application)
     categories = {}
+    groups = {}
     for comp in comps:
         details = repo.get_violation_details(comp, application)
         if details:
             scenario = details.get('scenario', 'unknown')
             if scenario not in categories:
-                categories[scenario] = {'count': 0, 'components': [], 'total_violations': 0}
+                categories[scenario] = {
+                    'count': 0,
+                    'components': [],
+                    'total_violations': 0,
+                    'total_image_violations': 0,
+                    'policy_name': extract_policy_from_scenario(scenario),
+                    'category': categorize_policy(scenario),
+                    'covered_count': 0,
+                    'uncovered_count': 0,
+                }
             categories[scenario]['count'] += 1
             categories[scenario]['components'].append(comp)
-            categories[scenario]['total_violations'] += details.get('violations_count', 0)
-    return {"application": application, "categories": categories}
+            uv_count, _ = count_unique_violations(details.get('violation_summary', ''))
+            categories[scenario]['total_violations'] += uv_count
+            categories[scenario]['total_image_violations'] += details.get('violations_count', 0)
+            if exceptions_by_policy:
+                policy_name = categories[scenario]['policy_name']
+                rules = extract_violation_rules(details.get('violation_summary', ''))
+                cov = compute_violation_coverage(
+                    rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
+                if cov and cov['coverage'] == 'fully_covered':
+                    categories[scenario]['covered_count'] += 1
+                elif cov:
+                    categories[scenario]['uncovered_count'] += 1
+            cat = categorize_policy(scenario)
+            if cat not in groups:
+                groups[cat] = {
+                    'components': 0,
+                    'unique_violations': 0,
+                    'image_violations': 0,
+                }
+            groups[cat]['components'] += 1
+            groups[cat]['unique_violations'] += uv_count
+            groups[cat]['image_violations'] += details.get('violations_count', 0)
+    for cat in ('FBC', 'Components', 'Charts'):
+        groups.setdefault(cat, {
+            'components': 0,
+            'unique_violations': 0,
+            'image_violations': 0,
+        })
+    return {
+        "application": application,
+        "groups": groups,
+        "categories": categories,
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_conforma_rules(
+    application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Get violations grouped by rule with affected components and solutions.
+
+    Each rule entry includes the rule code, title, solution text (when available
+    from conforma-reporter), the list of affected component names, and a count.
+    Sorted by component count descending.
+
+    Pass reporter_env/reporter_build_type to fetch from conforma-reporter.
+
+    Args:
+        application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter
+        reporter_build_type: 'latest', 'nightly', or 'release_day'
+    """
+    if reporter_env or reporter_build_type:
+        from clients.conforma_reporter_client import fetch_reporter_rules
+        from cli.config import app_to_reporter_branch
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        rules = fetch_reporter_rules(branch, env=env, build_type=build_type)
+        return {
+            'application': application,
+            'source': '{}/{}'.format(env, build_type),
+            'total_rules': len(rules),
+            'rules': rules,
+        }
+    from repositories.conforma_repository import ConformaRepository
+    from utils.conforma_utils import count_unique_violations
+    repo = ConformaRepository(_db_connection())
+    violations = repo.get_violation_summaries(application)
+    rules_map = {}
+    for v in violations:
+        comp = v.get('component_name', '')
+        _, uv_rules = count_unique_violations(v.get('violation_summary', ''))
+        for r in uv_rules:
+            rule = r['rule']
+            if rule not in rules_map:
+                rules_map[rule] = {
+                    'rule': rule,
+                    'title': '',
+                    'solution': '',
+                    'components': [],
+                    'violation_rows': 0,
+                }
+            if comp not in rules_map[rule]['components']:
+                rules_map[rule]['components'].append(comp)
+            rules_map[rule]['violation_rows'] += 1
+    result = []
+    for entry in rules_map.values():
+        entry['components'] = sorted(entry['components'])
+        entry['count'] = len(entry['components'])
+        result.append(entry)
+    result.sort(key=lambda r: (-r['count'], r['rule']))
+    return {
+        'application': application,
+        'total_rules': len(result),
+        'rules': result,
+    }
 
 
 @mcp.tool()
@@ -1121,22 +1355,85 @@ def get_fix_history(days: int = 30) -> Dict[str, Any]:
 @async_tool
 def get_conforma_report(
     application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get Conforma violations report for an application.
 
+    By default returns cluster data. Pass reporter_env/reporter_build_type to
+    fetch from the conforma-reporter (GitHub) instead — useful for stage policy
+    or nightly build violations that the cluster doesn't run.
+
     Args:
         application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter instead of cluster
+        reporter_build_type: 'latest', 'nightly', or 'release_day' — build type filter
     """
+    if reporter_env or reporter_build_type:
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        from cli.config import app_to_reporter_branch
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        violations = fetch_reporter_violations(branch, env=env, build_type=build_type)
+        source = '{}/{}'.format(env, build_type)
+        return {
+            'application': application,
+            'source': source,
+            'total_violations': len(violations),
+            'violations': violations,
+        }
+    from utils.conforma_utils import (
+        extract_policy_from_scenario, policy_url,
+        enrich_with_coverage, fetch_exceptions_by_policy,
+        categorize_policy, count_unique_violations,
+    )
     conforma_repo = _conforma_repo()
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     failing = conforma_repo.find_unresolved_component_names(application)
     violations = []
+    total_unique = 0
+    groups = {}
     for comp_name in sorted(failing):
         details = conforma_repo.get_violation_details(comp_name, application)
         if details:
+            scenario = details.get('scenario', '')
+            details['policy_name'] = extract_policy_from_scenario(scenario)
+            details['policy_url'] = policy_url(scenario)
+            details['category'] = categorize_policy(scenario)
+            uv_count, uv_rules = count_unique_violations(
+                details.get('violation_summary', ''))
+            details['unique_violations'] = uv_count
+            details['violation_rules'] = [
+                r['rule'] + (':' + r['detail'] if r['detail'] else '')
+                for r in uv_rules
+            ]
+            total_unique += uv_count
+            cat = details['category']
+            if cat not in groups:
+                groups[cat] = {'components': 0, 'unique_violations': 0}
+            groups[cat]['components'] += 1
+            groups[cat]['unique_violations'] += uv_count
             violations.append(details)
+    enrich_with_coverage(violations, exceptions_by_policy)
+    by_policy = {}
+    coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
+    for v in violations:
+        pn = v.get('policy_name', 'unknown')
+        by_policy.setdefault(pn, 0)
+        by_policy[pn] += 1
+        cov = v.get('exception_coverage')
+        if cov in coverage_summary:
+            coverage_summary[cov] += 1
+    for cat in ('FBC', 'Components', 'Charts'):
+        groups.setdefault(cat, {'components': 0, 'unique_violations': 0})
     return {
         'application': application,
         'total_violations': len(violations),
+        'total_unique_violations': total_unique,
+        'groups': groups,
+        'violations_by_policy': by_policy,
+        'coverage_summary': coverage_summary if exceptions_by_policy else None,
         'violations': violations,
     }
 
@@ -1378,7 +1675,12 @@ def export_markdown(
     if violation:
         lines = [f"## Conforma Violation: {violation['component_name']}"]
         lines.append(f"\n**Scenario:** {violation['scenario']}")
-        lines.append(f"**Violations:** {violation['violations_count']} violations, {violation['warnings_count']} warnings")
+        from utils.conforma_utils import count_unique_violations as _cuv
+        _uvc, _uvr = _cuv(violation.get('violation_summary', ''))
+        if _uvc:
+            lines.append(f"**Violations:** {_uvc} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings")
+        else:
+            lines.append(f"**Violations:** {violation['violations_count']} violations, {violation['warnings_count']} warnings")
         lines.append(f"**First Seen:** {violation.get('first_detected_at')}")
         if ai:
             lines.append(f"\n### AI Analysis ({int(ai.confidence_score * 100)}% confidence)")
@@ -1520,7 +1822,12 @@ def export_slack(
         konflux = _konflux_url(violation.get('pipelinerun_name', ''))
         text = f":warning: *Conforma Violation: {violation['component_name']}*\n"
         text += f"Scenario: {violation['scenario']}\n"
-        text += f"Violations: {violation['violations_count']} | Warnings: {violation['warnings_count']}\n"
+        from utils.conforma_utils import count_unique_violations as _cuv2
+        _uvc2, _ = _cuv2(violation.get('violation_summary', ''))
+        if _uvc2:
+            text += f"Violations: {_uvc2} unique ({violation['violations_count']} per-image) | Warnings: {violation['warnings_count']}\n"
+        else:
+            text += f"Violations: {violation['violations_count']} | Warnings: {violation['warnings_count']}\n"
         if ai:
             text += f"\n:robot_face: *AI Analysis* ({int(ai.confidence_score * 100)}% confidence)\n"
             text += f"Category: `{ai.failure_category}`\n"
@@ -1536,27 +1843,100 @@ def export_slack(
 def lookup_image(image_ref: str) -> Dict[str, Any]:
     """Given a quay.io image URL or sha256 digest, find which component produced it.
 
+    Searches build records (DB), cluster components, and Quay registry manifests.
+    For per-architecture SHA digests from EC violations, resolves back to the
+    component via manifest list inspection.
+
     Args:
         image_ref: Image URL, sha256 digest, or partial digest
     """
     db_matches = _build_repo().find_by_image(image_ref)
 
     cluster_matches = []
+    all_comps = []
+    url_component = None
     try:
         from clients.kubernetes import KubernetesClient
         kc = KubernetesClient(namespace=NAMESPACE)
         all_comps = kc.list_components()
         term = image_ref.lower()
         cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+
+        if not cluster_matches and '/' in image_ref:
+            path = image_ref.split('/')[-1].split('@')[0].split(':')[0]
+            if path:
+                url_component = path
+                cluster_matches = [c for c in all_comps if c.get('name', '') == path]
+                if not cluster_matches:
+                    import re
+                    core = re.sub(r'-(rhel[0-9]+|v[0-9]+-[0-9]+-.*|ea-[0-9]+.*)$', '', path)
+                    if core and core != path:
+                        cluster_matches = [c for c in all_comps
+                                           if c.get('name', '').startswith(core)]
     except Exception:
         pass
 
-    return {
+    quay_match = None
+    if not db_matches and not cluster_matches:
+        try:
+            from clients.registry_client import RegistryClient
+            rc = RegistryClient()
+            target_digest = image_ref.strip()
+            if not target_digest.startswith('sha256:') and '@sha256:' in image_ref:
+                target_digest = image_ref.split('@')[-1]
+
+            if target_digest.startswith('sha256:') and len(target_digest) >= 20:
+                if '/' in image_ref and '@' in image_ref:
+                    registry, repository, _ = rc.parse_image_ref(image_ref)
+                    result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+                    if result:
+                        comp_name = repository.rsplit('/', 1)[-1] if '/' in repository else repository
+                        result['component'] = comp_name
+                        quay_match = result
+                if not quay_match:
+                    for comp in all_comps[:20]:
+                        ci = comp.get('container_image', '')
+                        if not ci:
+                            continue
+                        registry, repository, _ = rc.parse_image_ref(ci)
+                        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+                        if result:
+                            result['component'] = comp.get('name', '')
+                            quay_match = result
+                            break
+        except Exception:
+            pass
+
+    total = len(db_matches) + len(cluster_matches) + (1 if quay_match else 0)
+    result = {
         'query': image_ref,
         'db_matches': db_matches,
         'cluster_matches': cluster_matches,
-        'total_matches': len(db_matches) + len(cluster_matches),
+        'total_matches': total,
     }
+    if url_component:
+        result['url_component'] = url_component
+    if quay_match:
+        result['quay_match'] = quay_match
+    return result
+
+
+@mcp.tool()
+@async_tool
+def get_snapshot_freshness(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Check snapshot images against latest builds to detect stale/failed images.
+
+    For each component in the latest Snapshot, checks whether its image matches
+    the most recent build. Flags components where the latest build failed (snapshot
+    has a pre-failure image) or a newer successful build exists. Use this to diagnose
+    verify-conforma failures caused by stale snapshot images.
+
+    Args:
+        application: Which version to query
+    """
+    from proactive.health_monitor import HealthMonitor
+    monitor = HealthMonitor(db=None)
+    return monitor.check_snapshot_freshness(application)
 
 
 @mcp.tool()
@@ -1949,7 +2329,12 @@ def _format_conforma_jira(violation: Dict[str, Any], analysis: Optional[Dict[str
     lines.append(f"|Component|{comp}|")
     lines.append("|Status|Policy Violation|")
     lines.append(f"|Scenario|{violation['scenario']}|")
-    lines.append(f"|Violations|{violation['violations_count']} violations, {violation['warnings_count']} warnings|")
+    from utils.conforma_utils import count_unique_violations as _cuv3
+    _uvc3, _ = _cuv3(violation.get('violation_summary', ''))
+    if _uvc3:
+        lines.append(f"|Violations|{_uvc3} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings|")
+    else:
+        lines.append(f"|Violations|{violation['violations_count']} violations, {violation['warnings_count']} warnings|")
     lines.append(f"|PipelineRun|[{pr_name}|{konflux}]|")
     if violation.get('snapshot_name'):
         lines.append(f"|Snapshot|{violation['snapshot_name']}|")

@@ -78,6 +78,7 @@ class FeatureWeightService:
         feature_dict = features.to_dict()
         delta = LEARNING_RATE if was_correct else -LEARNING_RATE
 
+        pending_updates = {}
         try:
             with self._db.connection() as conn:
                 cursor = conn.cursor()
@@ -98,12 +99,13 @@ class FeatureWeightService:
                             last_updated = NOW()
                     """, (name, new_weight, new_sample, new_weight))
 
-                    self._weights[name] = FeatureWeight(
+                    pending_updates[name] = FeatureWeight(
                         feature_name=name, weight=new_weight, sample_size=new_sample
                     )
                 conn.commit()
+                self._weights.update(pending_updates)
         except Exception:
-            logger.debug("Failed to update feature weights", exc_info=True)
+            logger.warning("Failed to update feature weights", exc_info=True)
 
     def get_feature_importance(self):
         """Return features sorted by weight (highest first)."""

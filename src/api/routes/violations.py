@@ -25,17 +25,7 @@ def _triage_repo():
 
 def _triage_jira_map(application):
     """Build component→jira_key map from all active triage items (single query)."""
-    jira_map = {}
-    try:
-        for item in _triage_repo().get_active_items(application):
-            jk = item.get('jira_key')
-            if jk:
-                for c in item.get('components', []):
-                    if c not in jira_map:
-                        jira_map[c] = jk
-    except Exception:
-        pass
-    return jira_map
+    return _triage_repo().build_jira_map(application)
 
 
 def _konflux_url(pr_name: str) -> str:

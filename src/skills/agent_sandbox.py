@@ -56,7 +56,24 @@ class LocalSandbox(ToolSandbox):
         self._max_output = max_output_bytes
         self._temp_dir = None
 
+    DENIED_PATTERNS = (
+        'rm -rf /', 'rm -rf ~', 'mkfs', 'dd if=',
+        'curl ', 'wget ', 'nc ', 'ncat ',
+        '> /etc/', '> /dev/', 'chmod 777',
+        'eval $(', '| bash', '| sh',
+    )
+
     def execute(self, command, timeout=60, language='bash'):
+        cmd_lower = command.lower().strip()
+        for pattern in self.DENIED_PATTERNS:
+            if pattern in cmd_lower:
+                logger.warning("Sandbox denied command matching '%s': %.120s",
+                               pattern, command)
+                return SandboxResult(
+                    exit_code=-1, stdout='',
+                    stderr='Command denied: matches restricted pattern "{}"'.format(pattern),
+                )
+
         if language == 'python':
             cmd = ['python3', '-c', command]
         else:
@@ -145,5 +162,10 @@ class LocalSandbox(ToolSandbox):
 
     def _resolve_path(self, path):
         if os.path.isabs(path):
-            return path
-        return os.path.join(self._working_dir, path)
+            resolved = os.path.realpath(path)
+        else:
+            resolved = os.path.realpath(os.path.join(self._working_dir, path))
+        working_real = os.path.realpath(self._working_dir)
+        if not resolved.startswith(working_real + os.sep) and resolved != working_real:
+            raise ValueError("Path escapes sandbox: {}".format(path))
+        return resolved

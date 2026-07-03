@@ -1038,13 +1038,17 @@ class ReleaseFailureAnalyzer:
                         if h['error']:
                             sections.append("    Error: {}".format(h['error']))
 
-                # Nudge PRs
+                # Nudge PRs with clickable URLs
                 nudge_prs = data.get('nudge_prs', [])
                 if nudge_prs:
                     sections.append("Nudge PRs in rhods-operator:")
                     for pr in nudge_prs:
-                        sections.append("  - PR #{}: {} [{}]".format(
-                            pr['number'], pr['title'], pr['state']))
+                        pr_url = pr.get('html_url', '')
+                        if not pr_url and GITHUB_OPERATOR_OWNER and GITHUB_OPERATOR_REPO:
+                            pr_url = 'https://github.com/{}/{}/pull/{}'.format(
+                                GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO, pr['number'])
+                        sections.append("  - PR #{}: {} [{}] — {}".format(
+                            pr['number'], pr['title'], pr['state'], pr_url))
 
                 sections.append("")
 
@@ -1095,6 +1099,8 @@ class ReleaseFailureAnalyzer:
         if GITHUB_OPERATOR_OWNER and GITHUB_OPERATOR_REPO:
             sections.append("- operator-nudging.yaml: https://github.com/{}/{}/blob/main/{}".format(
                 GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO, OPERATOR_NUDGING_PATH))
+            sections.append("- Nudge PRs search: https://github.com/{}/{}/pulls?q=nudge".format(
+                GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO))
         if GITHUB_BUILD_CONFIG_OWNER and GITHUB_BUILD_CONFIG_REPO:
             sections.append("- Build-Config repo: https://github.com/{}/{}".format(
                 GITHUB_BUILD_CONFIG_OWNER, GITHUB_BUILD_CONFIG_REPO))
@@ -1103,6 +1109,20 @@ class ReleaseFailureAnalyzer:
         if context.get('ec_policies'):
             for ec in context['ec_policies']:
                 sections.append("- EC policy: {}".format(ec['path']))
+
+        # Dynamic URLs from enrichment (nudge PRs, quay images)
+        if enrichment:
+            sections.append("\n### Component-specific URLs (use in evidence_references)")
+            for comp, data in enrichment.items():
+                nudge_prs = data.get('nudge_prs', [])
+                for pr in nudge_prs:
+                    pr_url = pr.get('html_url', '')
+                    if not pr_url and GITHUB_OPERATOR_OWNER and GITHUB_OPERATOR_REPO:
+                        pr_url = 'https://github.com/{}/{}/pull/{}'.format(
+                            GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO, pr['number'])
+                    if pr_url:
+                        sections.append("- Nudge PR #{} ({}): {}".format(
+                            pr['number'], comp, pr_url))
 
         # Institutional memory: include known patterns for this failure type
         pattern_section = self._format_pattern_section(context)
@@ -1132,7 +1152,9 @@ class ReleaseFailureAnalyzer:
         sections.append("- Identify the specific team that owns the fix")
         sections.append("- Include source_transparency: list what data you used, what was missing, and what limitations affect your diagnosis")
         sections.append("- Set fix_action_type: rebuild, file_change, config_change, multi_step, investigation_needed, or other")
-        sections.append("- If SOURCE IMAGE VERIFICATION shows violation SHA missing but green build present → fix_action_type MUST be rebuild")
+        sections.append("- If SOURCE IMAGE VERIFICATION shows violation SHA missing but green build present → fix is nudging update + propagation (multi_step), NOT rebuild")
+        sections.append("- If BOTH violation and green build SHAs lack source images → fix_action_type MUST be investigation_needed")
+        sections.append("- Include verification commands in recommended_fix: specific skopeo/curl/gh commands using the actual SHAs and component names from this context")
 
         user_prompt = '\n'.join(sections)
         return (SYSTEM_PROMPT, user_prompt)
@@ -1375,25 +1397,45 @@ class ReleaseFailureAnalyzer:
         return analysis
 
     def _annotate_fix_status(self, analysis, context):
-        """Append fix-status notes when enrichment data shows a fix is already in progress."""
+        """Append fix-status notes and verification snippets after LLM analysis."""
         notes = []
+        snippets = []
         enrichment = context.get('violation_enrichment', {})
 
         for component, data in enrichment.items():
             nudge_prs = data.get('nudge_prs', [])
             merged = [p for p in nudge_prs if p.get('state') == 'closed']
             open_prs = [p for p in nudge_prs if p.get('state') == 'open']
+
             if merged:
+                pr = merged[0]
+                pr_num = pr.get('number', '?')
                 notes.append('- Nudge PR #{} for {} was recently merged — fix may already be propagating'.format(
-                    merged[0].get('number', '?'), component))
+                    pr_num, component))
+                # Warn about nightly overwrite risk
+                source_status = data.get('source_image_status', {})
+                v_check = source_status.get('violation_sha', {})
+                if v_check.get('exists') is False:
+                    notes.append(
+                        '  WARNING: If quay tag-latest still points to the bad build, '
+                        'the nightly operator-processor may overwrite this nudge PR. '
+                        'A fresh rebuild is the definitive fix.'
+                    )
             elif open_prs:
                 notes.append('- Nudge PR #{} for {} is open — fix is in progress'.format(
                     open_prs[0].get('number', '?'), component))
 
-            builds = data.get('build_history', [])
-            if builds and builds[0].get('status') == 'success':
-                notes.append('- {} has a recent successful build ({}); a rebuild may already resolve this'.format(
-                    component, builds[0].get('build_id', '?')[:8]))
+            # Check if latest build already succeeded (rebuild not needed)
+            builds_with_sha = data.get('builds_with_sha', [])
+            if builds_with_sha:
+                latest = builds_with_sha[0]
+                if latest.get('status') in ('Completed', 'Succeeded'):
+                    green_sha = latest.get('image_sha', '')[:16]
+                    notes.append('- {} latest build {} is green (sha: {}...) — automated nudge should pick it up'.format(
+                        component, latest.get('name', '?'), green_sha))
+
+            # Verification snippets from enrichment data
+            self._build_verification_snippets(snippets, component, data, context)
 
         triage_items = context.get('triage_items', [])
         if triage_items:
@@ -1402,11 +1444,59 @@ class ReleaseFailureAnalyzer:
                 notes.append('- Triage item #{} is actively tracking this issue'.format(
                     active[0].get('id', '?')))
 
+        suffix_parts = []
         if notes:
-            fix_status = '\n\nFix Status (auto-detected):\n' + '\n\n'.join(notes)
-            analysis['recommended_fix'] = analysis.get('recommended_fix', '') + fix_status
+            suffix_parts.append('\n\nFix Status (auto-detected):\n' + '\n\n'.join(notes))
+        if snippets:
+            suffix_parts.append('\n\nVerification commands:\n' + '\n\n'.join(snippets))
+
+        if suffix_parts:
+            analysis['recommended_fix'] = analysis.get('recommended_fix', '') + ''.join(suffix_parts)
 
         return analysis
+
+    def _build_verification_snippets(self, snippets, component, data, context):
+        """Generate copy-pasteable verification commands from enrichment data."""
+        violation_sha = data.get('violation_sha', '')
+        green_build = data.get('latest_green_build', {})
+        green_sha = green_build.get('image_sha', '')
+
+        # Source image check for violation SHA
+        if violation_sha and violation_sha.startswith('sha256:'):
+            image_refs = context.get('violations_summary', [])
+            image_ref = ''
+            for v in image_refs:
+                ref = v.get('image_ref', '')
+                if component.replace('-', '') in ref.replace('-', ''):
+                    image_ref = ref.split('@')[0] if '@' in ref else ref
+                    break
+            if image_ref:
+                snippets.append(
+                    '- Check source image for violation SHA:\n'
+                    '  skopeo inspect --raw docker://{}@{}'.format(image_ref, violation_sha)
+                )
+
+        # Nudging yaml and PR checks
+        if GITHUB_OPERATOR_OWNER and GITHUB_OPERATOR_REPO:
+            comp_short = re.sub(r'-v\d+-\d+.*$', '', component)
+            snippets.append(
+                '- Check current nudging SHA for {}:\n'
+                '  curl -sL "https://raw.githubusercontent.com/{}/{}/main/{}" | grep -A2 "{}"'.format(
+                    component, GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO,
+                    OPERATOR_NUDGING_PATH, comp_short)
+            )
+            snippets.append(
+                '- Check recent nudge PRs:\n'
+                '  gh pr list -R {}/{} --search "{} nudge" --state all --limit 5'.format(
+                    GITHUB_OPERATOR_OWNER, GITHUB_OPERATOR_REPO, comp_short)
+            )
+
+        # Green build SHA for fix reference
+        if green_sha:
+            snippets.append(
+                '- Latest green build SHA for fix reference:\n'
+                '  {} (build: {})'.format(green_sha, green_build.get('name', '?'))
+            )
 
     def _get_existing_analysis(self, release_name):
         return self.ai_repo.get_analysis_for_release(release_name)

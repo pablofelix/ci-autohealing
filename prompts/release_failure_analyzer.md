@@ -147,6 +147,13 @@ Even after step 1 is fixed, steps 2-5 must all re-execute (typically requires a 
 - After nudging fix: retrigger the nightly build to propagate through the full chain (operator-nudging → bundle CSV → catalog → FBC fragment)
 - Verify the FBC fragment build uses the correct SHA before re-triggering the stage release
 
+**CRITICAL — Manual nudge PRs can be overwritten:**
+A manual nudge PR (updating operator-nudging.yaml) will be OVERWRITTEN by the next nightly operator-processor run if the quay.io tag-latest still points to the bad build. This happened with PR #33945 — the manual fix was correct but the nightly re-nudged the stale SHA.
+
+To prevent this, ALWAYS recommend one of:
+- (Preferred) Trigger a fresh rebuild of the component FIRST. Once it succeeds, quay tag-latest points to a good build. The next automated nudge picks it up correctly. This is the definitive fix.
+- (Faster but fragile) Manual nudge PR + IMMEDIATE retrigger of the nightly build BEFORE the next automated operator-processor cycle (runs daily ~UTC midnight). This is a race condition — if the nightly runs before propagation completes, the fix is overwritten.
+
 **Owner identification**: 
 - Immediate fix: RHOAI RelEng (update nudging.yaml, retrigger nightly)
 - Root cause: Component team that owns the failed build (e.g., odh-workbench team)
@@ -211,6 +218,25 @@ Use this to answer: "Is the snapshot using a stale/broken build?" If SHA MISMATC
 - With nudging file: you can verify the exact SHA the nightly baked in
 - With triage + health: you can assess scope and whether investigation is already underway
 
+**Conditional rules for SOURCE IMAGE VERIFICATION data:**
+When the context includes SOURCE IMAGE VERIFICATION results, apply these rules:
+
+- If violation_sha source image is MISSING and green_build_sha source image is PRESENT:
+  Root cause MUST state: "Latest green build {build_name} (SHA {sha}) has a valid source image but the snapshot uses a stale SHA from a timed-out build."
+  Fix MUST prioritize: "Update operator-nudging.yaml to use SHA {green_sha}" as the PRIMARY action.
+  A rebuild is NOT necessary when the green build already has a valid source image — only config propagation through the nudging chain is needed.
+  fix_action_type should be "multi_step" (nudge update → nightly propagation → FBC rebuild → re-release).
+
+- If BOTH violation_sha AND green_build_sha source images are MISSING:
+  This means the source-build task may be systematically broken for this component.
+  fix_action_type should be "investigation_needed".
+  Root cause should note: "Both the violation build and the latest green build lack source images — the source-build pipeline task may be failing silently."
+
+- If violation_sha source image is PRESENT (unexpected for source_image.exists):
+  This is unusual — the source image exists but Conforma still flagged it.
+  Root cause should note: "Source image appears to exist for the violation SHA. The Conforma check may be using a different registry or the image may have been pushed after the Conforma run."
+  Confidence should be lower (0.55-0.65) — further investigation needed.
+
 **Confidence boost from enriched data:**
 - SHA MISMATCH confirmed via build history: +0.05 confidence
 - Nudging file shows stale SHA: +0.05 confidence
@@ -260,6 +286,13 @@ Generate 2-3 competing hypotheses before selecting your primary diagnosis.
 
 List hypotheses in the differential_diagnosis field, descending by confidence.
 First hypothesis becomes your primary diagnosis.
+
+**MANDATORY for build_artifact_missing and policy_source_image categories:**
+When the failure involves missing source images or stale build artifacts, you MUST generate at least 3 hypotheses covering these scenarios:
+- H1: Stale nudge from timed-out build — operator-processor picked up a PipelineRunTimeout build's SHA because it was tag-latest on quay
+- H2: Nudge PR never created for latest green build — the green build completed but operator-processor never ran or failed
+- H3: Quay tag-latest overwritten by partial build — a later build pushed its image (without source) after the green build, making it tag-latest
+Rank by evidence from build history, nudging file, and source image verification. Cite specific SHAs and build names.
 
 ## Fix Verification
 
@@ -373,6 +406,22 @@ Examples:
 - {type: "config", url: "https://github.com/red-hat-data-services/rhods-operator/blob/main/build/operator-nudging.yaml", description: "operator-nudging.yaml line 212: SHA sha256:0c11f8ed... for workbench component"}
 - {type: "config", url: "https://gitlab.cee.redhat.com/.../ReleasePlanAdmission/rpa-file.yaml", description: "RPA mapping file where component name should be corrected"}
 - {type: "log", url: "", description: "step-detailed-report: [Violation] source_image.exists on ImageRef quay.io/rhoai/odh-workbench@sha256:..."}
+
+## Verification and Fix Commands (REQUIRED in recommended_fix)
+
+After your fix recommendation bullets, include a "Verification steps" section with concrete commands the user can copy-paste to verify the problem and apply the fix. Use the specific SHAs, component names, and URLs from the context.
+
+**Verification command templates (adapt to the specific case):**
+- Check source image existence: "skopeo inspect --raw docker://quay.io/rhoai/{component}@{violation_sha} | jq '.mediaType'" or "cosign verify-attestation --type spdx {image_ref}"
+- Check nudging.yaml SHA: "curl -sL 'https://raw.githubusercontent.com/{owner}/{repo}/{branch}/build/operator-nudging.yaml' | grep {component_short}"
+- Check nudge PRs: "gh pr list -R {owner}/{repo} --search '{component_short} nudge' --state merged --limit 5"
+- Check build status: "oc get pipelinerun -n {namespace} -l appstudio.openshift.io/component={component} --sort-by=.metadata.creationTimestamp | tail -5"
+
+**Fix command templates:**
+- Trigger rebuild: "ic rebuild {component} --application {application}" or link to the Konflux UI trigger page
+- View latest builds: "ic get builds {component}" or Konflux UI URL
+
+Format as plain text with dash bullets. Use the ACTUAL values from context — never use placeholders like {component} in the output. If you don't have a value, omit that command rather than leaving a placeholder.
 
 ## Fix Verification (CRITICAL)
 

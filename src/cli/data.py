@@ -143,11 +143,9 @@ def get_alerts(application=None):
         })
 
     from utils.conforma_utils import (
-        extract_policy_from_scenario, extract_violation_rules,
-        fetch_exceptions_by_policy, policy_url as _policy_url,
-        categorize_policy, count_unique_violations,
-        compute_coverage_by_env, policy_env,
-        _counterpart_policy, policy_url_with_line,
+        extract_violation_rules, fetch_exceptions_by_policy,
+        policy_url as _policy_url, categorize_policy,
+        count_unique_violations, compute_exception_coverage_details,
     )
     from cli import config as cfg
     exceptions_by_policy = fetch_exceptions_by_policy(cfg.NAMESPACE)
@@ -158,40 +156,9 @@ def get_alerts(application=None):
         comp_name = s['component_name']
         scenario = s.get('scenario', '')
         jira_key = s.get('jira_key') or jira_map.get(comp_name)
-        exc_coverage = None
-        exc_stage = None
-        exc_prod = None
-        exc_env_tag = None
-        policy_url_stage = None
-        policy_url_prod = None
-        covered_rules_stage = []
-        covered_rules_prod = []
-        uncovered_rules_stage = []
-        uncovered_rules_prod = []
-        if exceptions_by_policy:
-            rules = extract_violation_rules(s.get('violation_summary', ''))
-            env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
-            stage_cov = (env_cov.get('stage') or {}).get('coverage')
-            prod_cov = (env_cov.get('prod') or {}).get('coverage')
-            exc_stage = stage_cov
-            exc_prod = prod_cov
-            exc_env_tag = env_cov.get('combined_tag')
-            exc_coverage = stage_cov or prod_cov
-            covered_rules_stage = (env_cov.get('stage') or {}).get('covered_rules', [])
-            covered_rules_prod = (env_cov.get('prod') or {}).get('covered_rules', [])
-            all_rules = set(rules) if rules else set()
-            uncovered_rules_stage = sorted(all_rules - set(covered_rules_stage)) if stage_cov else []
-            uncovered_rules_prod = sorted(all_rules - set(covered_rules_prod)) if prod_cov else []
-            policy_name = extract_policy_from_scenario(scenario)
-            counterpart = _counterpart_policy(policy_name)
-            if stage_cov in ('fully_covered', 'partially_covered'):
-                stage_pname = policy_name if policy_env(policy_name) == 'stage' else counterpart
-                stage_rules = (env_cov.get('stage') or {}).get('covered_rules', [])
-                policy_url_stage = policy_url_with_line(stage_pname, stage_rules)
-            if prod_cov in ('fully_covered', 'partially_covered'):
-                prod_pname = policy_name if policy_env(policy_name) == 'prod' else counterpart
-                prod_rules = (env_cov.get('prod') or {}).get('covered_rules', [])
-                policy_url_prod = policy_url_with_line(prod_pname, prod_rules)
+        rules = extract_violation_rules(s.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
         uv_count, _ = count_unique_violations(s.get('violation_summary', ''))
         conforma_violations.append({
             'component': comp_name,
@@ -209,16 +176,16 @@ def get_alerts(application=None):
             'category': categorize_policy(scenario),
             'policy_url': _policy_url(scenario),
             'jira_key': jira_key,
-            'exception_coverage': exc_coverage,
-            'exception_coverage_stage': exc_stage,
-            'exception_coverage_prod': exc_prod,
-            'exception_env_tag': exc_env_tag,
-            'policy_url_stage': policy_url_stage,
-            'policy_url_prod': policy_url_prod,
-            'covered_rules_stage': covered_rules_stage,
-            'covered_rules_prod': covered_rules_prod,
-            'uncovered_rules_stage': uncovered_rules_stage,
-            'uncovered_rules_prod': uncovered_rules_prod,
+            'exception_coverage': cov['coverage'],
+            'exception_coverage_stage': cov['stage'],
+            'exception_coverage_prod': cov['prod'],
+            'exception_env_tag': cov['env_tag'],
+            'policy_url_stage': cov['policy_url_stage'],
+            'policy_url_prod': cov['policy_url_prod'],
+            'covered_rules_stage': cov['covered_rules_stage'],
+            'covered_rules_prod': cov['covered_rules_prod'],
+            'uncovered_rules_stage': cov['uncovered_rules_stage'],
+            'uncovered_rules_prod': cov['uncovered_rules_prod'],
         })
 
     now = datetime.utcnow().isoformat()
@@ -266,7 +233,7 @@ def get_conforma_violations(application=None, reporter_env=None, reporter_build_
     from utils.conforma_utils import (
         extract_policy_from_scenario, extract_violation_rules, policy_url,
         enrich_with_coverage, fetch_exceptions_by_policy,
-        compute_coverage_by_env,
+        compute_exception_coverage_details,
     )
     from cli import config as cfg
     conforma_repo = get_repo(ConformaRepository)
@@ -280,19 +247,16 @@ def get_conforma_violations(application=None, reporter_env=None, reporter_build_
         scenario = v.get('scenario', '')
         v['policy_name'] = extract_policy_from_scenario(scenario)
         v['policy_url'] = policy_url(scenario)
-        if exceptions_by_policy:
-            rules = extract_violation_rules(v.get('violation_summary', ''))
-            env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
-            v['exception_coverage_stage'] = (env_cov.get('stage') or {}).get('coverage')
-            v['exception_coverage_prod'] = (env_cov.get('prod') or {}).get('coverage')
-            v['exception_env_tag'] = env_cov.get('combined_tag')
-            stage_cov = v['exception_coverage_stage']
-            prod_cov = v['exception_coverage_prod']
-            v['covered_rules_stage'] = (env_cov.get('stage') or {}).get('covered_rules', [])
-            v['covered_rules_prod'] = (env_cov.get('prod') or {}).get('covered_rules', [])
-            all_rules = set(rules) if rules else set()
-            v['uncovered_rules_stage'] = sorted(all_rules - set(v['covered_rules_stage'])) if stage_cov else []
-            v['uncovered_rules_prod'] = sorted(all_rules - set(v['covered_rules_prod'])) if prod_cov else []
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        v['exception_coverage_stage'] = cov['stage']
+        v['exception_coverage_prod'] = cov['prod']
+        v['exception_env_tag'] = cov['env_tag']
+        v['covered_rules_stage'] = cov['covered_rules_stage']
+        v['covered_rules_prod'] = cov['covered_rules_prod']
+        v['uncovered_rules_stage'] = cov['uncovered_rules_stage']
+        v['uncovered_rules_prod'] = cov['uncovered_rules_prod']
     enrich_with_coverage(violations, exceptions_by_policy)
     return violations
 
