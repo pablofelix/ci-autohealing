@@ -1,20 +1,19 @@
 """Tests for tekton_parsers pure functions."""
 
+from models import BuildStatus
 from tekton_parsers import (
-    extract_taskrun_names,
-    extract_failed_step_names,
     build_taskrun_detail,
+    classify_build_status,
+    classify_pipelinerun_status,
+    extract_conforma_component_info,
     extract_error_from_logs,
     extract_failed_step_from_logs,
+    extract_failed_step_names,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
-    classify_pipelinerun_status,
-    classify_build_status,
-    extract_conforma_component_info,
+    extract_taskrun_names,
     extract_verify_taskrun_name,
 )
-from models import BuildStatus
-
 
 # -- extract_taskrun_names --
 

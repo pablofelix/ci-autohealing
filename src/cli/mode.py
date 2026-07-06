@@ -44,6 +44,4 @@ def ensure_cluster():
     if ic_config.get_mode() == 'cluster':
         from cli.data import require_data
         return require_data()
-    if has_api():
-        return True
-    return False
+    return bool(has_api())

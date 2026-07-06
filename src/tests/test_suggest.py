@@ -1,6 +1,6 @@
 """Tests for fuzzy matching and suggestions."""
 
-from cli.suggest import suggest_match, format_suggestion, _edit_distance
+from cli.suggest import _edit_distance, format_suggestion, suggest_match
 
 
 class TestEditDistance:

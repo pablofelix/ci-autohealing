@@ -11,7 +11,6 @@ import sys
 import psycopg2
 import psycopg2.extras
 
-
 _DB_CONTAINER = os.environ.get('DB_CONTAINER', 'ci-autohealing-db')
 _DB_NAME = os.environ.get('DB_NAME', 'konflux_monitoring')
 _DB_USER = os.environ.get('DB_USER', 'postgres')
@@ -52,7 +51,7 @@ def check_db():
 
 def require_db():
     if not check_db():
-        from cli.formatting import red, cyan
+        from cli.formatting import cyan, red
         print(red('Error: database is not running ({})'.format(_DB_CONTAINER)),
               file=sys.stderr)
         print(cyan('Start it: docker start {}'.format(_DB_CONTAINER)),

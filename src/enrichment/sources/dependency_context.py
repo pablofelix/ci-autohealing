@@ -7,8 +7,8 @@ Analyzes commit diffs to identify changes in dependency manifests:
 - Others: Gemfile, pom.xml, Cargo.toml
 """
 
-from typing import Any, Dict, Optional
 import json
+from typing import Any, Dict, Optional
 
 from config import CollectorConfig
 from enrichment.context_source import ContextSource

@@ -1,7 +1,9 @@
 """Tests for BuildFailureCollector pure functions."""
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
+
 from collectors.build_failure_collector import BuildFailureCollector
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 

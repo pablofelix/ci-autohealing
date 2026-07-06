@@ -9,10 +9,11 @@ Checks:
 """
 
 import sys
-from config import CollectorConfig
+
 from clients.github_client import GitHubClient
-from repositories import DatabaseConnection
+from config import CollectorConfig
 from logger import setup_logger
+from repositories import DatabaseConnection
 
 logger = setup_logger(__name__)
 

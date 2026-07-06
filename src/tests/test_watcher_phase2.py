@@ -184,8 +184,9 @@ class TestJiraPollLoop(unittest.TestCase):
         daemon._run_jira_poll()
 
     def test_jira_poll_calls_poller(self):
-        from config import JiraConfig, LLMConfig
         from dataclasses import replace
+
+        from config import JiraConfig, LLMConfig
         config = _make_config()
         config = replace(
             config,

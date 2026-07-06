@@ -10,8 +10,8 @@ import signal
 import sys
 
 from config import CollectorConfig
-from worker.pipeline import PipelineStep, WorkerPipeline
 from worker.health import start_health_server
+from worker.pipeline import PipelineStep, WorkerPipeline
 
 
 def _build_pipeline(config):

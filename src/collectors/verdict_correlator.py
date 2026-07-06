@@ -9,8 +9,8 @@ Pure comparison logic is separated from I/O (GitHub API, DB) per STYLE.md.
 import os
 from datetime import datetime, timedelta
 
-from logger import setup_logger
 from clients.github_client import GitHubClient, parse_github_repo
+from logger import setup_logger
 from repositories.ai_analysis_repository import AIAnalysisRepository
 
 logger = setup_logger(__name__)

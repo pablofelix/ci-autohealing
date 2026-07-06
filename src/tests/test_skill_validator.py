@@ -3,8 +3,8 @@
 import os
 from unittest.mock import patch
 
+from skills.models import IcMetadata, SkillMetadata
 from skills.validator import SkillValidator, check_prerequisites
-from skills.models import SkillMetadata, IcMetadata
 
 
 def _make_skill(tmp_path, name='test-skill', description='A test skill',

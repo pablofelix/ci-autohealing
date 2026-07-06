@@ -206,8 +206,9 @@ class WatchDaemon:
         """Full poll for one application — mirrors cron steps 1-2."""
         logger.info("[%s] Running fallback full poll...", app)
         try:
-            from collectors.status_synchronizer import get_failing_build_components
             from dataclasses import replace
+
+            from collectors.status_synchronizer import get_failing_build_components
             app_config = replace(self.config,
                                  k8s=replace(self.config.k8s, application_name=app))
             await asyncio.to_thread(get_failing_build_components, app_config)
@@ -250,7 +251,7 @@ class WatchDaemon:
                 await self._fallback_poll(app)
 
     def _default_handler_factory(self, app):
-        from repositories import DatabaseConnection, BuildFailureRepository
+        from repositories import BuildFailureRepository, DatabaseConnection
         from watcher.handlers import BuildEventHandler, ComponentEventHandler
 
         db = self.db_pool or DatabaseConnection(self.config.db.connection_string)

@@ -4,16 +4,16 @@
 Use collectors.status_synchronizer.get_failing_build_components for the implementation.
 """
 
-import sys
 import json
+import sys
 import time
 
-from config import CollectorConfig
-from repositories import DatabaseConnection, BuildFailureRepository, SyncStatusRepository
 from clients import TektonResultsClient
-from openshift_auth import is_logged_in
 from collectors.status_synchronizer import get_failing_build_components
+from config import CollectorConfig
 from logger import setup_logger
+from openshift_auth import is_logged_in
+from repositories import BuildFailureRepository, DatabaseConnection, SyncStatusRepository
 
 logger = setup_logger(__name__)
 

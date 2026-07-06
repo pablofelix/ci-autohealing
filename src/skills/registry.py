@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from skills.models import SkillEntry, SkillMetadata, SourceEntry
@@ -54,7 +54,7 @@ class SkillRegistry:
             name=name,
             url=url,
             commit=commit,
-            added_at=datetime.now(timezone.utc).isoformat(),
+            added_at=datetime.now(UTC).isoformat(),
             local_path=local_path,
             branch=branch,
         )

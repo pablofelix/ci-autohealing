@@ -3,7 +3,7 @@
 import requests
 
 from clients.pipeline_source import PipelineRunSource
-from openshift_auth import get_openshift_token, discover_kubearchive_api_url, create_authenticated_session
+from openshift_auth import create_authenticated_session, discover_kubearchive_api_url, get_openshift_token
 
 
 class KubeArchiveClient(PipelineRunSource):

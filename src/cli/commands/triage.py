@@ -25,13 +25,14 @@ def triage(ctx, output_json):
 def triage_show(ctx, show_all, output_json):
     """Show current triage items and untracked failures."""
     import json as json_mod
+
     from cli import ic_config
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
 
     is_json = output_json or ctx.obj.get('json')
 
     if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_triage_items
+        from cli.data import get_triage_items, require_data
         if not require_data():
             return
         data = get_triage_items()
@@ -654,6 +655,7 @@ def _find_resolution_build(component_name, fail_time):
 def _get_jira_client():
     """Create a JiraClient from environment config."""
     import os
+
     from clients.jira_client import JiraClient
 
     base_url = os.environ.get('JIRA_BASE_URL', 'https://issues.redhat.com')

@@ -5,8 +5,12 @@ import tempfile
 import unittest
 
 from clients.blob_store import (
-    BlobStore, make_blob_key, should_offload, resolve_blob_fields,
-    get_blob_store, BLOB_THRESHOLD,
+    BLOB_THRESHOLD,
+    BlobStore,
+    get_blob_store,
+    make_blob_key,
+    resolve_blob_fields,
+    should_offload,
 )
 
 

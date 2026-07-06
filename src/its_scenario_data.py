@@ -4,10 +4,10 @@
 Outputs JSON to stdout for consumption by the ic shell script.
 """
 
+import argparse
 import json
 import logging
 import sys
-import argparse
 from collections import Counter
 
 from clients.konflux_client import KonfluxClient

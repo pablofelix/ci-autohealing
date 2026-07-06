@@ -14,9 +14,9 @@ Example:
 
 from typing import Any, Dict, List
 
-from patterns.pattern_matcher import PatternMatcher, PatternMatch
-from repositories.error_pattern_repository import ErrorPatternRepository
 from logger import setup_logger
+from patterns.pattern_matcher import PatternMatch, PatternMatcher
+from repositories.error_pattern_repository import ErrorPatternRepository
 
 logger = setup_logger(__name__)
 

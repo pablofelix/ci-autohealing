@@ -14,7 +14,7 @@ from repositories.ai_analysis_repository import AIAnalysisRepository
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.error_pattern_repository import ErrorPatternRepository
-from repositories.repository_factory import get_repository, get_pool
+from repositories.repository_factory import get_pool, get_repository
 from repositories.resolution_attempt_repository import ResolutionAttemptRepository
 
 router = APIRouter(tags=["applications"])

@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List
 from enum import Enum
+from typing import List, Optional
 
 
 class BuildStatus(Enum):

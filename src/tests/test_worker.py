@@ -1,14 +1,14 @@
 """Tests for the worker pipeline."""
 
 import json
-import time
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.request import urlopen
 
-from worker.pipeline import PipelineStep, WorkerPipeline
 from worker.health import start_health_server
+from worker.pipeline import PipelineStep, WorkerPipeline
 
 
 class TestPipelineStep(unittest.TestCase):

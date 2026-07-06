@@ -1,9 +1,15 @@
 #!/bin/bash
-# Pre-commit hook: rh-pre-commit (secrets) + ruff (lint) + pytest (tests).
+# Pre-commit hook: delegates to lefthook if installed, falls back to direct checks.
 # Install: git config core.hooksPath .githooks
 
 set -e
 
+# Prefer lefthook — it runs checks in parallel
+if command -v lefthook > /dev/null 2>&1; then
+    exec lefthook run pre-commit
+fi
+
+# Fallback: run checks sequentially (same as lefthook.yml)
 PYTHON="${PYTHON:-python3.11}"
 ROOT=$(git rev-parse --show-toplevel)
 COLLECTORS="$ROOT/src"
@@ -24,6 +30,15 @@ $PYTHON -m ruff check "$COLLECTORS/" --exclude='__pycache__'
 echo "=== pre-commit: style (STYLE.md) ==="
 cd "$ROOT"
 bash scripts/check-style.sh
+
+echo "=== pre-commit: security (bandit) ==="
+if command -v bandit > /dev/null 2>&1; then
+    bandit -r src/ -q --skip B101,B404 -x src/tests
+elif $PYTHON -m bandit --version > /dev/null 2>&1; then
+    $PYTHON -m bandit -r src/ -q --skip B101,B404 -x src/tests
+else
+    echo "bandit not installed, skipping security scan" >&2
+fi
 
 echo "=== pre-commit: tests ==="
 cd "$ROOT"

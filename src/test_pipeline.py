@@ -15,13 +15,13 @@ from config import CollectorConfig
 from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
 from enrichment.sources.dependency_context import DependencyContextSource
 from enrichment.sources.related_failures import RelatedFailuresSource
+from logger import setup_logger
 from patterns.category_matcher import CategoryBasedMatcher
 from patterns.pattern_matching_service import PatternMatchingService
 from repositories.connection import DatabaseConnection
 from repositories.context_enrichment_repository import ContextEnrichmentRepository
 from repositories.error_pattern_repository import ErrorPatternRepository
 from services.batch_analysis_service import BatchAnalysisService
-from logger import setup_logger
 
 logger = setup_logger(__name__)
 

@@ -115,7 +115,7 @@ class LocalSandbox(ToolSandbox):
     def read_file(self, path):
         resolved = self._resolve_path(path)
         try:
-            with open(resolved, 'r') as f:
+            with open(resolved) as f:
                 content = f.read()
             return SandboxResult(
                 exit_code=0,

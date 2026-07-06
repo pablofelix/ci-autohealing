@@ -26,13 +26,13 @@ from pathlib import Path
 # Add parent directory to path so we can import project modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import CollectorConfig
 from clients.github_client import GitHubClient, parse_github_repo
 from clients.jira_client import JiraClient
 from clients.llm_provider import create_llm_provider
-from repositories.connection import DatabaseConnection
+from config import CollectorConfig
 from logger import setup_logger
 from prompt_loader import load_prompt
+from repositories.connection import DatabaseConnection
 
 logger = setup_logger(__name__)
 
@@ -62,10 +62,9 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
     Returns (failure_row, analysis_row). Either can be None.
     failure_row includes enriched_context, pattern_data, and previous_attempts.
     """
-    with db_conn.connection() as conn:
-        with conn.cursor() as cur:
-            if failure_id:
-                cur.execute("""
+    with db_conn.connection() as conn, conn.cursor() as cur:
+        if failure_id:
+            cur.execute("""
                     SELECT id, component_name, repository_url, branch, commit_sha,
                            error_type, error_message, failed_step_name,
                            LEFT(build_logs, 50000) as build_logs,
@@ -73,8 +72,8 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
                     FROM build_failures
                     WHERE id = %s
                 """, (failure_id,))
-            else:
-                cur.execute("""
+        else:
+            cur.execute("""
                     SELECT id, component_name, repository_url, branch, commit_sha,
                            error_type, error_message, failed_step_name,
                            LEFT(build_logs, 50000) as build_logs,
@@ -87,14 +86,14 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
                     LIMIT 1
                 """, (component, application))
 
-            row = cur.fetchone()
-            if not row:
-                return None, None
+        row = cur.fetchone()
+        if not row:
+            return None, None
 
-            cols = [d[0] for d in cur.description]
-            failure = dict(zip(cols, row))
+        cols = [d[0] for d in cur.description]
+        failure = dict(zip(cols, row))
 
-            cur.execute("""
+        cur.execute("""
                 SELECT a.failure_category, a.confidence_score, a.root_cause,
                        a.recommended_fix, a.recommended_files, a.can_auto_fix,
                        a.requires_human_review,
@@ -107,23 +106,23 @@ def load_failure_and_analysis(db_conn, failure_id=None, component=None, applicat
                 LIMIT 1
             """, (failure['id'],))
 
-            analysis_row = cur.fetchone()
-            analysis = None
-            if analysis_row:
-                analysis_cols = [d[0] for d in cur.description]
-                analysis = dict(zip(analysis_cols, analysis_row))
+        analysis_row = cur.fetchone()
+        analysis = None
+        if analysis_row:
+            analysis_cols = [d[0] for d in cur.description]
+            analysis = dict(zip(analysis_cols, analysis_row))
 
-            cur.execute("""
+        cur.execute("""
                 SELECT attempt_number, changes_description, files_modified,
                        was_successful, verification_notes, status, pr_url
                 FROM resolution_attempts
                 WHERE build_failure_id = %s
                 ORDER BY attempt_number ASC
             """, (failure['id'],))
-            prev_cols = [d[0] for d in cur.description]
-            failure['previous_attempts'] = [
-                dict(zip(prev_cols, r)) for r in cur.fetchall()
-            ]
+        prev_cols = [d[0] for d in cur.description]
+        failure['previous_attempts'] = [
+            dict(zip(prev_cols, r)) for r in cur.fetchall()
+        ]
 
     return failure, analysis
 
@@ -514,18 +513,17 @@ def load_conforma_and_analysis(db_conn, conforma_id=None, component=None, applic
 
     Returns (conforma_row, analysis_row). Either can be None.
     """
-    with db_conn.connection() as conn:
-        with conn.cursor() as cur:
-            if conforma_id:
-                cur.execute("""
+    with db_conn.connection() as conn, conn.cursor() as cur:
+        if conforma_id:
+            cur.execute("""
                     SELECT id, component_name, repository_url, scenario,
                            violations_count, warnings_count, violation_summary,
                            violation_details, commit_sha, application
                     FROM conforma_results
                     WHERE id = %s
                 """, (conforma_id,))
-            else:
-                cur.execute("""
+        else:
+            cur.execute("""
                     SELECT id, component_name, repository_url, scenario,
                            violations_count, warnings_count, violation_summary,
                            violation_details, commit_sha, application
@@ -537,14 +535,14 @@ def load_conforma_and_analysis(db_conn, conforma_id=None, component=None, applic
                     LIMIT 1
                 """, (component, application))
 
-            row = cur.fetchone()
-            if not row:
-                return None, None
+        row = cur.fetchone()
+        if not row:
+            return None, None
 
-            cols = [d[0] for d in cur.description]
-            conforma = dict(zip(cols, row))
+        cols = [d[0] for d in cur.description]
+        conforma = dict(zip(cols, row))
 
-            cur.execute("""
+        cur.execute("""
                 SELECT failure_category, confidence_score, root_cause,
                        recommended_fix, can_auto_fix, requires_human_review
                 FROM ai_analysis
@@ -553,11 +551,11 @@ def load_conforma_and_analysis(db_conn, conforma_id=None, component=None, applic
                 LIMIT 1
             """, (conforma['id'],))
 
-            analysis_row = cur.fetchone()
-            analysis = None
-            if analysis_row:
-                analysis_cols = [d[0] for d in cur.description]
-                analysis = dict(zip(analysis_cols, analysis_row))
+        analysis_row = cur.fetchone()
+        analysis = None
+        if analysis_row:
+            analysis_cols = [d[0] for d in cur.description]
+            analysis = dict(zip(analysis_cols, analysis_row))
 
     return conforma, analysis
 
@@ -1611,7 +1609,7 @@ def _open_tty():
     if sys.stdin.isatty():
         return sys.stdin
     try:
-        return open('/dev/tty', 'r')
+        return open('/dev/tty')
     except OSError:
         return sys.stdin
 

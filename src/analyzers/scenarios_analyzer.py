@@ -7,10 +7,10 @@ misconfigurations, coverage gaps, and improvement opportunities.
 import os
 import time
 
-from logger import setup_logger
 from clients.konflux_client import KonfluxClient
-from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from clients.llm_provider import create_llm_provider
+from logger import setup_logger
 from prompt_loader import load_prompt
 
 logger = setup_logger(__name__)
@@ -145,6 +145,7 @@ Use the record_scenarios_analysis tool. Focus on:
 
     def parse_analysis_response(self, llm_response):
         from pydantic import ValidationError
+
         from analyzers.models import ScenariosAnalysisResult
 
         if not llm_response.tool_calls:

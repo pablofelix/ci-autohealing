@@ -1,7 +1,9 @@
 """Tests for ConformaViolationCollector parsing functions."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+
 from collectors.conforma_violation_collector import ConformaViolationCollector
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 

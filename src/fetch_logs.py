@@ -5,8 +5,8 @@ Used by `ic describe component` when logs are not yet in the database.
 Uses Tekton Results (most reliable) with KubeArchive as fallback.
 """
 
-import sys
 import json
+import sys
 import time
 
 from config import CollectorConfig

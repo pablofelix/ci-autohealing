@@ -7,12 +7,12 @@ Responsibilities:
 4. Track pattern usage statistics
 """
 
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from patterns.pattern_matcher import PatternMatcher, PatternMatch
-from repositories.error_pattern_repository import ErrorPatternRepository
 from logger import setup_logger
+from patterns.pattern_matcher import PatternMatch, PatternMatcher
+from repositories.error_pattern_repository import ErrorPatternRepository
 
 logger = setup_logger(__name__)
 

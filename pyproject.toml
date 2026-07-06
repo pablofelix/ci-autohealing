@@ -14,6 +14,7 @@ authors = [{name = "Pablo Estevez"}]
 dependencies = [
     "click>=8.0",
     "requests>=2.20",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]

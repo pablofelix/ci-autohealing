@@ -3,7 +3,6 @@
 import json
 
 
-
 class SyncStatusRepository:
     """All SQL operations on the sync_status table."""
 

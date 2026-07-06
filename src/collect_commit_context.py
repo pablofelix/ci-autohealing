@@ -8,8 +8,9 @@ Requires GITHUB_TOKEN environment variable.
 """
 
 import sys
-from config import CollectorConfig
+
 from collectors.commit_context_collector import CommitContextCollector
+from config import CollectorConfig
 from logger import setup_logger
 
 logger = setup_logger(__name__)

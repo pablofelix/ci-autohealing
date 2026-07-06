@@ -1,8 +1,10 @@
 """Unit tests for KubeArchive API client."""
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, Mock, patch
+
 import requests
+
 from clients.kubearchive import KubeArchiveClient
 
 

@@ -6,10 +6,10 @@ component image against Pyxis to determine if it exists in the target
 registry. Outputs JSON to stdout for consumption by the ic shell script.
 """
 
+import argparse
 import json
 import logging
 import sys
-import argparse
 
 from kubernetes import client
 

@@ -5,10 +5,10 @@ import tempfile
 import textwrap
 import unittest
 
-from skills.models import IcMetadata, SkillEntry, SkillMetadata, SourceEntry
-from skills.loader import _parse_yaml_simple, discover_skills, parse_skill_md
-from skills.registry import SkillRegistry
 from skills.known_sources import KNOWN_SOURCES, resolve_source
+from skills.loader import _parse_yaml_simple, discover_skills, parse_skill_md
+from skills.models import IcMetadata, SkillEntry, SkillMetadata, SourceEntry
+from skills.registry import SkillRegistry
 
 
 class TestSkillMetadata(unittest.TestCase):
@@ -288,7 +288,7 @@ class TestKnownSources(unittest.TestCase):
     def test_known_sources_catalog(self):
         self.assertIn('aiops-infra', KNOWN_SOURCES)
         self.assertIn('ai-helpers', KNOWN_SOURCES)
-        for name, info in KNOWN_SOURCES.items():
+        for _name, info in KNOWN_SOURCES.items():
             self.assertIn('url', info)
             self.assertIn('description', info)
 

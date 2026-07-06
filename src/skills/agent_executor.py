@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from skills.agent_config import AgentConfig
 from skills.agent_sandbox import LocalSandbox
@@ -105,7 +105,7 @@ class AgentExecutor:
 
     def execute(self):
         """Run the agent loop and return ExecutionResult."""
-        started = datetime.now(timezone.utc).isoformat()
+        started = datetime.now(UTC).isoformat()
 
         skill_md_path = os.path.join(self.skill.path, 'SKILL.md')
         try:

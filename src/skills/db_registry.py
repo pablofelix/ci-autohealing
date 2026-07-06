@@ -5,7 +5,7 @@ registry when DB is unavailable (local dev without database).
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from skills.models import SkillEntry, SkillMetadata, SourceEntry
@@ -22,7 +22,7 @@ class DatabaseSkillRegistry:
 
     def add_source(self, name: str, url: str, commit: str, local_path: str,
                    branch: Optional[str] = None) -> SourceEntry:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self.db.connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -224,7 +224,7 @@ class DatabaseSkillRegistry:
                 result.stderr[:10000] if result.stderr else None,
                 json.dumps({}),
                 getattr(result, 'triggered_by', 'cli'),
-                result.started_at or datetime.now(timezone.utc).isoformat(),
+                result.started_at or datetime.now(UTC).isoformat(),
                 getattr(result, 'component_name', None),
                 getattr(result, 'application', None),
                 getattr(result, 'triage_item_id', None),

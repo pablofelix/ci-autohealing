@@ -71,7 +71,7 @@ class _TextExtractor(html.parser.HTMLParser):
 
 
 def _cache_path(url):
-    key = hashlib.md5(url.encode()).hexdigest()[:12]
+    key = hashlib.md5(url.encode()).hexdigest()[:12]  # noqa: S324
     return CACHE_DIR / f'{key}.txt'
 
 

@@ -6,8 +6,8 @@ Use collectors.conforma_violation_collector.ConformaViolationCollector for the i
 
 import sys
 
-from config import CollectorConfig
 from collectors.conforma_violation_collector import ConformaViolationCollector
+from config import CollectorConfig
 
 
 def main():

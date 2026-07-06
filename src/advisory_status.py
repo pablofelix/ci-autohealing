@@ -5,10 +5,10 @@ Fetches advisory lifecycle data (QE, REL_PREP, SHIPPED_LIVE) from Pyxis
 for release tracking. Outputs JSON to stdout.
 """
 
+import argparse
 import json
 import logging
 import sys
-import argparse
 
 from clients.pyxis_client import PyxisClient
 from logger import setup_logger

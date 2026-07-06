@@ -36,7 +36,7 @@ def is_autonomous_enabled():
 
 def activate_autonomous(confirmed_by='cli'):
     """Activate autonomous mode with audit trail."""
-    from cli.ic_config import load, _save
+    from cli.ic_config import _save, load
     cfg = load()
     cfg[_ACTIVATION_LOG_KEY] = time.time()
     cfg['autonomous_confirmed_by'] = confirmed_by
@@ -48,7 +48,7 @@ def activate_autonomous(confirmed_by='cli'):
 
 def deactivate_autonomous():
     """Deactivate autonomous mode."""
-    from cli.ic_config import load, _save
+    from cli.ic_config import _save, load
     cfg = load()
     cfg.pop(_ACTIVATION_LOG_KEY, None)
     cfg.pop('autonomous_confirmed_by', None)

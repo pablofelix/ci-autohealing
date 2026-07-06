@@ -7,14 +7,14 @@ Provides:
 """
 
 import time
-from datetime import datetime
 from dataclasses import replace
+from datetime import datetime
 
-from logger import setup_logger
-from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubernetesClient, TektonResultsClient
 from clients.pipelinerun_query import query_pipelineruns
-from models import Component, BuildStatus
+from logger import setup_logger
+from models import BuildStatus, Component
+from repositories import BuildFailureRepository, DatabaseConnection
 from tekton_parsers import classify_build_status
 
 logger = setup_logger(__name__)

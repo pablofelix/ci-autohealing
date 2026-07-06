@@ -1,7 +1,8 @@
 """Unit tests for data models."""
 
 import unittest
-from models import BuildStatus, TaskRun, PipelineRun, Component, ScanResult
+
+from models import BuildStatus, Component, PipelineRun, ScanResult, TaskRun
 
 
 class TestBuildStatus(unittest.TestCase):
@@ -140,8 +141,8 @@ class TestComponent(unittest.TestCase):
 
     def test_from_file(self):
         """Test loading components from file."""
-        import tempfile
         import os
+        import tempfile
 
         # Create temporary file
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:

@@ -1,6 +1,6 @@
 """Tests for HealthMonitor stale nightly build detection."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -49,7 +49,7 @@ class TestNightlyComponentDerivation:
 
 class TestStaleNightlyBuilds:
     def test_stale_build_returns_warning(self, monitor, mock_db):
-        stale_time = datetime.now(timezone.utc) - timedelta(hours=30)
+        stale_time = datetime.now(UTC) - timedelta(hours=30)
         _setup_cursor(mock_db, [
             ('rhoai-fbc-fragment-v3-5-ea-2', 'rhoai-v3-5-ea-2',
              stale_time, None, 'healthy'),
@@ -76,7 +76,7 @@ class TestStaleNightlyBuilds:
         assert 'no successful build on record' in warnings[0].message
 
     def test_very_stale_is_critical(self, monitor, mock_db):
-        stale_time = datetime.now(timezone.utc) - timedelta(hours=50)
+        stale_time = datetime.now(UTC) - timedelta(hours=50)
         _setup_cursor(mock_db, [
             ('rhoai-fbc-fragment-v3-5-ea-2', 'rhoai-v3-5-ea-2',
              stale_time, None, 'failing'),
@@ -112,7 +112,7 @@ class TestStaleNightlyBuilds:
         assert warnings[0].severity == 'warning'
 
     def test_evidence_contains_row_data(self, monitor, mock_db):
-        stale_time = datetime.now(timezone.utc) - timedelta(hours=30)
+        stale_time = datetime.now(UTC) - timedelta(hours=30)
         _setup_cursor(mock_db, [
             ('rhoai-fbc-fragment-v3-5-ea-2', 'rhoai-v3-5-ea-2',
              stale_time, None, 'healthy'),
@@ -122,7 +122,7 @@ class TestStaleNightlyBuilds:
         assert warnings[0].evidence['application'] == 'rhoai-v3-5-ea-2'
 
     def test_multiple_stale_components(self, monitor, mock_db):
-        stale_time = datetime.now(timezone.utc) - timedelta(hours=30)
+        stale_time = datetime.now(UTC) - timedelta(hours=30)
         _setup_cursor(mock_db, [
             ('rhoai-fbc-fragment-v3-5-ea-2', 'rhoai-v3-5-ea-2',
              stale_time, None, 'healthy'),

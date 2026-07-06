@@ -4,7 +4,7 @@ Pure functions that extract boolean features from analysis context.
 Used by the confidence pipeline to compute feature-weighted scores.
 """
 
-from dataclasses import dataclass, fields, asdict
+from dataclasses import asdict, dataclass, fields
 
 
 @dataclass(frozen=True)

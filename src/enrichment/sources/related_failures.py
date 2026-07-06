@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Optional
 
 from config import CollectorConfig
 from enrichment.context_source import ContextSource
-from repositories.connection import DatabaseConnection
 from logger import setup_logger
+from repositories.connection import DatabaseConnection
 
 logger = setup_logger(__name__)
 

@@ -6,6 +6,7 @@ to global accuracy when sample size is too small.
 
 import time
 from dataclasses import dataclass
+
 from logger import setup_logger
 
 logger = setup_logger(__name__)
