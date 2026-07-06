@@ -151,8 +151,14 @@ Even after step 1 is fixed, steps 2-5 must all re-execute (typically requires a 
 A manual nudge PR (updating operator-nudging.yaml) will be OVERWRITTEN by the next nightly operator-processor run if the quay.io tag-latest still points to the bad build. This happened with PR #33945 — the manual fix was correct but the nightly re-nudged the stale SHA.
 
 To prevent this, ALWAYS recommend one of:
-- (Preferred) Trigger a fresh rebuild of the component FIRST. Once it succeeds, quay tag-latest points to a good build. The next automated nudge picks it up correctly. This is the definitive fix.
+- (Preferred) Trigger a fresh rebuild of the component using "ic rebuild {component}" or "kubectl annotate components/{component} -n {namespace} build.appstudio.openshift.io/request=trigger-pac-build --overwrite". Once it succeeds, quay tag-latest points to a good build. The next automated nudge picks it up correctly. This is the definitive fix.
 - (Faster but fragile) Manual nudge PR + IMMEDIATE retrigger of the nightly build BEFORE the next automated operator-processor cycle (runs daily ~UTC midnight). This is a race condition — if the nightly runs before propagation completes, the fix is overwritten.
+
+**IMPORTANT — bundle-patch.yaml vs operator-nudging.yaml:**
+bundle-patch.yaml (RHOAI-Build-Config) can have stale digests — 100+ entries may not match operator-nudging.yaml. This is NORMAL and NOT the cause of source_image.exists failures. The operator-processor.py updates operator-nudging.yaml (not bundle-patch.yaml) from Quay.io at runtime. The Konflux snapshot SHA (what verify-conforma checks) comes from the nudging chain, not from bundle-patch.yaml. Do NOT conflate bundle-patch.yaml staleness with the actual failure. Focus on which SHA the snapshot contains and whether that SHA's build completed successfully.
+
+**PipelineRunTimeout → guaranteed source_image.exists failure:**
+When a build times out (PipelineRunTimeout status), the container image may still be pushed to Quay (partial push during the build), but the source-build task never completes, so no source image is generated. If operator-processor then picks up this SHA as tag-latest on Quay, it gets nudged into the release chain. The source_image.exists check will always fail for such SHAs — this is a guaranteed failure, not intermittent.
 
 **Owner identification**: 
 - Immediate fix: RHOAI RelEng (update nudging.yaml, retrigger nightly)
@@ -418,7 +424,10 @@ After your fix recommendation bullets, include a "Verification steps" section wi
 - Check build status: "oc get pipelinerun -n {namespace} -l appstudio.openshift.io/component={component} --sort-by=.metadata.creationTimestamp | tail -5"
 
 **Fix command templates:**
-- Trigger rebuild: "ic rebuild {component} --application {application}" or link to the Konflux UI trigger page
+- Trigger rebuild (preferred — CLI): "ic rebuild {component}" — annotates the Component CR to trigger a fresh Konflux build with full nudge propagation
+- Trigger rebuild (kubectl): "kubectl annotate components/{component} -n {namespace} build.appstudio.openshift.io/request=trigger-pac-build --overwrite"
+- Trigger rebuild (Konflux UI): Go to Activity → Pipeline runs → find latest on-push pipeline → three-dot menu → Rerun
+- Trigger rebuild (git comment): Comment "/retest" on the latest commit on the component's branch — NOTE: /retest does NOT trigger nudging PRs, so use ic rebuild or kubectl annotate when nudge propagation is needed
 - View latest builds: "ic get builds {component}" or Konflux UI URL
 
 Format as plain text with dash bullets. Use the ACTUAL values from context — never use placeholders like {component} in the output. If you don't have a value, omit that command rather than leaving a placeholder.

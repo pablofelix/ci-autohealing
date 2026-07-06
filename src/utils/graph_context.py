@@ -4,8 +4,8 @@ Returns short, formatted strings — never dumps the whole graph.
 Fails silently if Neo4j is unavailable (returns empty strings).
 """
 
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -138,14 +138,18 @@ def domain_concepts_context(concept_names):
 
 
 def conforma_context(violation):
-    """Build targeted Neo4j context for a conforma violation analysis.
+    """Build targeted context for a conforma violation analysis.
 
-    Extracts violated rule names from the summary, looks up matching
-    PolicyRule nodes, and returns a short prompt section.
+    Tries the DB rule catalog first (175+ rules); falls back to Neo4j
+    PolicyRule nodes if the catalog is unavailable or empty.
     """
     from utils.conforma_utils import extract_violation_rules
     summary = violation.get('violation_summary', '') or ''
     rules = extract_violation_rules(summary)
+    if not rules:
+        return ""
+
+    # Neo4j fallback (catalog context is now handled by the analyzer)
     rule_keys = _map_rules_to_policy_keys(rules)
     return policy_rules_context(rule_keys)
 

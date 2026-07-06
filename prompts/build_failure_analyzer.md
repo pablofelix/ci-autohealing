@@ -146,6 +146,15 @@ List 2-3 hypotheses in descending confidence. First hypothesis = your primary di
 Each hypothesis: hypothesis (one sentence), category (failure_category value), confidence (0-1),
 supporting_evidence (Tier 1-2 citations), contradicting_evidence (weakening evidence).
 
+## Rebuild Commands (when fix is a retrigger/rebuild)
+
+When the fix requires retriggering the build (e.g., transient infra failure, timeout, flaky test), include actionable commands:
+- CLI: "ic rebuild {component}" — triggers a fresh Konflux build
+- kubectl: "kubectl annotate components/{component} -n {namespace} build.appstudio.openshift.io/request=trigger-pac-build --overwrite"
+- Konflux UI: Activity → Pipeline runs → find latest on-push pipeline → three-dot menu → Rerun
+
+Use the ACTUAL component name from context, never leave placeholders.
+
 ## Fix Verification
 
 Before recommending a fix, check context for signs it's already applied:

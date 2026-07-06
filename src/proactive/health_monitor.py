@@ -7,9 +7,8 @@ before failures fully manifest. CVE checks query the OCI registry for SARIF data
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Dict
-
-from datetime import datetime, timezone
 
 from logger import setup_logger
 
@@ -56,6 +55,7 @@ class HealthMonitor:
         warnings.extend(self.get_cve_warnings())
         warnings.extend(self.get_stale_nightly_builds())
         warnings.extend(self.get_stale_warnings())
+        warnings.extend(self.get_pcc_freshness_warnings())
         return warnings
 
     def get_degrading_components(self):
@@ -265,7 +265,7 @@ class HealthMonitor:
             rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
 
         warnings = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for r in rows:
             last_build = r['last_successful_build']
             if last_build is None:
@@ -274,7 +274,7 @@ class HealthMonitor:
                     r['component_name'], r['application'] or '?')
             else:
                 if last_build.tzinfo is None:
-                    last_build = last_build.replace(tzinfo=timezone.utc)
+                    last_build = last_build.replace(tzinfo=UTC)
                 hours_ago = (now - last_build).total_seconds() / 3600
                 severity = 'critical' if hours_ago >= 48 else 'warning'
                 msg = '{} ({}) — last successful build {:.0f}h ago ({})'.format(
@@ -427,6 +427,8 @@ class HealthMonitor:
         except Exception:
             pass
 
+        pcc_freshness = self._check_pcc_freshness()
+
         return {
             'application': application,
             'fbc_component': fbc_name,
@@ -436,7 +438,118 @@ class HealthMonitor:
             'blockers': blockers,
             'blockers_count': len(blockers),
             'gha_validation': gha_validation,
+            'pcc_freshness': pcc_freshness,
         }
+
+    def get_pcc_freshness_warnings(self):
+        """Generate HealthWarning entries if the PCC cache is stale."""
+        pcc = self._check_pcc_freshness()
+        if not pcc or pcc.get('status') != 'stale':
+            return []
+
+        missing = pcc.get('missing_versions', [])
+        preview = ', '.join(missing[:5])
+        if len(missing) > 5:
+            preview += ' (+{} more)'.format(len(missing) - 5)
+
+        return [HealthWarning(
+            component_name='pcc-cache',
+            application='(release-infra)',
+            signal_type='pcc_stale',
+            severity='critical',
+            message='PCC cache is stale — {} version(s) in registry not in cache: {}. '
+                    'FBC fragment builds will produce catalogs missing these versions. '
+                    'Run regen-pcc-cache workflow in RHOAI-Build-Config.'.format(
+                        len(missing), preview),
+            evidence=pcc,
+        )]
+
+    def _check_pcc_freshness(self):
+        """Check if the PCC (Pre-Computed Catalog) cache is up to date.
+
+        Compares the shipped versions cached in RHOAI-Build-Config against
+        the actual bundle tags published in registry.redhat.io. If the registry
+        has versions not present in the PCC cache, the FBC fragment builds will
+        produce catalogs missing those versions — potentially pruning shipped
+        releases from the operator channel.
+
+        Returns a dict with status ('fresh', 'stale', 'unknown'), details,
+        and the last regen-pcc-cache workflow run info.
+        """
+        build_config_owner = os.environ.get(
+            'GITHUB_BUILD_CONFIG_OWNER', 'red-hat-data-services')
+        build_config_repo = os.environ.get(
+            'GITHUB_BUILD_CONFIG_REPO', 'RHOAI-Build-Config')
+        token = os.environ.get('GITHUB_TOKEN', '')
+
+        if not token:
+            return None
+
+        result = {
+            'status': 'unknown',
+            'cached_versions': 0,
+            'registry_versions': 0,
+            'missing_versions': [],
+            'last_regen': None,
+        }
+
+        try:
+            from clients.github_client import GitHubClient
+            gh = GitHubClient(token=token)
+
+            runs = gh.get_workflow_runs(
+                build_config_owner, build_config_repo,
+                'regen-pcc-cache.yaml', limit=1)
+            if runs:
+                latest = runs[0]
+                result['last_regen'] = {
+                    'conclusion': latest.get('conclusion'),
+                    'date': latest.get('created_at'),
+                    'url': latest.get('html_url'),
+                }
+
+            cached_content = gh.get_file_content(
+                build_config_owner, build_config_repo,
+                'pcc/shipped_rhoai_versions_granular.txt')
+            if not cached_content:
+                logger.debug("PCC freshness: could not read shipped versions file")
+                return result
+
+            cached_versions = set()
+            for line in cached_content.strip().splitlines():
+                tag = line.strip()
+                if tag:
+                    cached_versions.add(tag)
+            result['cached_versions'] = len(cached_versions)
+
+            from clients.registry_client import RegistryClient
+            rc = RegistryClient()
+            registry_tags = rc.list_tags(
+                'registry.redhat.io', 'rhoai/odh-operator-bundle')
+
+            if not registry_tags:
+                logger.debug("PCC freshness: could not list registry tags "
+                             "(may need registry.redhat.io credentials)")
+                return result
+
+            registry_versions = {t for t in registry_tags if t.startswith('v')}
+            result['registry_versions'] = len(registry_versions)
+
+            missing = sorted(registry_versions - cached_versions)
+            result['missing_versions'] = missing
+
+            if missing:
+                result['status'] = 'stale'
+                logger.warning(
+                    "PCC cache is stale: %d version(s) in registry.redhat.io "
+                    "not in PCC cache: %s", len(missing), ', '.join(missing[:5]))
+            else:
+                result['status'] = 'fresh'
+
+        except Exception as exc:
+            logger.debug("PCC freshness check failed: %s", exc)
+
+        return result
 
     def get_stale_components(self, application=None, use_cache=True,
                               diagnose=True):

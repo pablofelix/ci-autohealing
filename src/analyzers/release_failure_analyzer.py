@@ -13,19 +13,23 @@ import time
 
 from kubernetes import client
 
-from logger import setup_logger
-from repositories import (
-    DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository,
-    BuildFailureRepository, ConformaRepository, TriageRepository,
-)
-from clients.llm_provider import create_llm_provider
-from clients.langfuse_tracker import LangfuseTracker
-from clients.kubearchive import KubeArchiveClient
 from clients.github_client import GitHubClient
 from clients.gitlab_client import GitLabClient
+from clients.kubearchive import KubeArchiveClient
+from clients.langfuse_tracker import LangfuseTracker
+from clients.llm_provider import create_llm_provider
 from clients.tekton_results import TektonResultsClient
-from prompt_loader import load_prompt
+from logger import setup_logger
 from openshift_auth import _ensure_k8s_config
+from prompt_loader import load_prompt
+from repositories import (
+    AIAnalysisRepository,
+    BuildFailureRepository,
+    ConformaRepository,
+    DatabaseConnection,
+    ErrorPatternRepository,
+    TriageRepository,
+)
 
 logger = setup_logger(__name__)
 
@@ -400,27 +404,20 @@ class ReleaseFailureAnalyzer:
                     except Exception as e:
                         logger.debug("    %s: failed TaskRun lookup error: %s", component, e)
 
-            # Source image verification for source_image.exists violations
-            self._enrich_source_image_status(comp_data, violation_sha, context)
+            # Artifact health verification (all 4: sig, src, att, sbom)
+            self._enrich_artifact_health(comp_data, violation_sha, context)
 
             enriched[component] = comp_data
 
         context['violation_enrichment'] = enriched
 
-    def _enrich_source_image_status(self, comp_data, violation_sha, context):
-        """Check source image existence for violation SHA and latest green build SHA.
+    def _enrich_artifact_health(self, comp_data, violation_sha, context):
+        """Check all OCI artifacts (.sig, .src, .att, .sbom) for violated component.
 
-        Uses RegistryClient to query quay.io referrers API and .src tag convention.
-        Results help the AI distinguish between 'needs rebuild' vs 'needs config change'.
+        Uses RegistryClient to query referrers API and tag conventions.
+        Results help the AI diagnose incomplete builds (e.g., timeout builds
+        that published signed images without source containers).
         """
-        violations_summary = context.get('violations_summary', [])
-        has_source_violation = any(
-            'source_image' in v.get('rule', '') or 'source_image' in v.get('message', '')
-            for v in violations_summary
-        )
-        if not has_source_violation:
-            return
-
         try:
             from clients.registry_client import RegistryClient
             client = RegistryClient()
@@ -428,8 +425,8 @@ class ReleaseFailureAnalyzer:
             return
 
         component = comp_data.get('component', '')
+        violations_summary = context.get('violations_summary', [])
 
-        # Determine registry/repository from violation image refs
         image_ref = ''
         for v in violations_summary:
             ref = v.get('image_ref', '')
@@ -443,32 +440,45 @@ class ReleaseFailureAnalyzer:
         if not registry or not repository:
             return
 
-        source_checks = {}
+        artifact_checks = {}
 
         # Check violation SHA
         if violation_sha and violation_sha.startswith('sha256:'):
-            result = client.check_source_image(registry, repository, violation_sha)
-            source_checks['violation_sha'] = {
+            health = client.check_artifact_health(registry, repository, violation_sha)
+            artifact_checks['violation_sha'] = {
                 'digest': violation_sha[:20] + '...',
-                **result,
+                **health,
             }
-            logger.info("    %s: source image for violation SHA: %s (%s)",
-                        component, result.get('exists'), result.get('method'))
+            logger.info("    %s: artifact health for violation SHA: healthy=%s missing=%s",
+                        component, health.get('healthy'), health.get('missing'))
 
         # Check latest green build SHA
         green_build = comp_data.get('latest_green_build', {})
         green_sha = green_build.get('image_sha', '')
         if green_sha and green_sha.startswith('sha256:'):
-            result = client.check_source_image(registry, repository, green_sha)
-            source_checks['green_build_sha'] = {
+            health = client.check_artifact_health(registry, repository, green_sha)
+            artifact_checks['green_build_sha'] = {
                 'digest': green_sha[:20] + '...',
                 'build_name': green_build.get('name', ''),
-                **result,
+                **health,
             }
-            logger.info("    %s: source image for green build SHA: %s (%s)",
-                        component, result.get('exists'), result.get('method'))
+            logger.info("    %s: artifact health for green build SHA: healthy=%s missing=%s",
+                        component, health.get('healthy'), health.get('missing'))
 
-        if source_checks:
+        if artifact_checks:
+            comp_data['artifact_health'] = artifact_checks
+            # Backward compat: populate source_image_status from .src artifact
+            source_checks = {}
+            for key, check in artifact_checks.items():
+                src_art = check.get('artifacts', {}).get('src', {})
+                source_checks[key] = {
+                    'digest': check.get('digest', ''),
+                    'exists': src_art.get('exists'),
+                    'method': src_art.get('method', ''),
+                    'details': src_art.get('details', ''),
+                }
+                if key == 'green_build_sha':
+                    source_checks[key]['build_name'] = check.get('build_name', '')
             comp_data['source_image_status'] = source_checks
 
     def _enrich_application_context(self, context):
@@ -582,6 +592,20 @@ class ReleaseFailureAnalyzer:
                     logger.info("    %s: %d nudge PR(s)", component, len(nudge_prs))
             except Exception as e:
                 logger.debug("    %s: PR lookup error: %s", component, e)
+
+    def _enrich_with_readiness_checks(self, context):
+        """Run pre-release and post-stage readiness checks for context."""
+        application = context.get('application', '')
+        if not application:
+            return
+        try:
+            from api.routes.releases import _run_readiness_checks
+            checks = _run_readiness_checks(application)
+            context['readiness_checks'] = checks
+            non_pass = [c for c in checks if c.get('status') not in ('PASS', 'SKIP')]
+            logger.info("  Readiness: %d checks, %d non-passing", len(checks), len(non_pass))
+        except Exception as e:
+            logger.warning("  Readiness checks failed: %s", e)
 
     def _derive_branch(self, application):
         """Derive the GitHub branch name from application name.
@@ -733,6 +757,30 @@ class ReleaseFailureAnalyzer:
             else:
                 logger.warning("    Snapshot not found (may be GC'd)")
 
+        # 3b. Artifact health for all snapshot components
+        if context.get('snapshot_components'):
+            logger.info("  Checking artifact health for snapshot components")
+            try:
+                from clients.registry_client import RegistryClient
+                rc = RegistryClient()
+                batch_components = [
+                    {'name': c['name'], 'containerImage': c['image']}
+                    for c in context['snapshot_components']
+                ]
+                health_results = rc.check_artifact_health_batch(batch_components, timeout=90)
+                context['artifact_health'] = health_results
+                unhealthy = [name for name, h in health_results.items()
+                             if not h.get('healthy')]
+                if unhealthy:
+                    logger.info("    %d/%d components have incomplete artifacts: %s",
+                                len(unhealthy), len(batch_components),
+                                ', '.join(unhealthy[:5]))
+                else:
+                    logger.info("    All %d components have complete artifacts",
+                                len(batch_components))
+            except Exception as e:
+                logger.warning("  Artifact health check failed: %s", e)
+
         # 4. Get RPA mappings from GitLab
         if context.get('release_plan'):
             logger.info("  Fetching RPA mappings from GitLab")
@@ -812,6 +860,9 @@ class ReleaseFailureAnalyzer:
 
         # 9. Check for nudge PRs for violated components
         self._enrich_with_component_prs(context)
+
+        # 10. Run readiness checks for pre-release/post-stage context
+        self._enrich_with_readiness_checks(context)
 
         return context
 
@@ -986,31 +1037,54 @@ class ReleaseFailureAnalyzer:
                         sections.append(">> SHA MISMATCH: Snapshot uses a {} build, not the latest green build.".format(
                             data['violation_build']['status']))
 
-                # Source image verification results
-                source_status = data.get('source_image_status', {})
-                if source_status:
-                    sections.append("SOURCE IMAGE VERIFICATION:")
-                    for key, check in source_status.items():
+                # Artifact health verification (all 4: sig, src, att, sbom)
+                artifact_data = data.get('artifact_health', {})
+                if artifact_data:
+                    sections.append("ARTIFACT HEALTH VERIFICATION:")
+                    for key, check in artifact_data.items():
                         label = 'Violation SHA' if key == 'violation_sha' else 'Green Build SHA'
-                        exists = check.get('exists')
-                        if exists is True:
-                            status_str = 'PRESENT'
-                        elif exists is False:
-                            status_str = 'MISSING'
-                        else:
-                            status_str = 'UNKNOWN'
-                        sections.append("  {} ({}): source image {} — {}".format(
+                        arts = check.get('artifacts', {})
+                        parts = []
+                        for art_type in ('sig', 'src', 'att', 'sbom'):
+                            art = arts.get(art_type, {})
+                            exists = art.get('exists')
+                            if exists is True:
+                                parts.append('.{}=PRESENT'.format(art_type))
+                            elif exists is False:
+                                parts.append('.{}=MISSING'.format(art_type))
+                            else:
+                                parts.append('.{}=UNKNOWN'.format(art_type))
+                        healthy = check.get('healthy', False)
+                        status = 'HEALTHY' if healthy else 'INCOMPLETE ({})'.format(
+                            ', '.join('.{}'.format(m) for m in check.get('missing', [])))
+                        sections.append("  {} ({}): {}  — {}".format(
                             label, check.get('digest', '?'),
-                            status_str, check.get('details', '')))
-                    # Add diagnostic guidance
-                    v_check = source_status.get('violation_sha', {})
-                    g_check = source_status.get('green_build_sha', {})
-                    if v_check.get('exists') is False and g_check.get('exists') is True:
+                            '  '.join(parts), status))
+
+                    # Diagnostic guidance based on artifact patterns
+                    v_check = artifact_data.get('violation_sha', {})
+                    g_check = artifact_data.get('green_build_sha', {})
+                    v_arts = v_check.get('artifacts', {})
+                    g_arts = g_check.get('artifacts', {})
+
+                    v_sig = v_arts.get('sig', {}).get('exists')
+                    v_src = v_arts.get('src', {}).get('exists')
+                    g_src = g_arts.get('src', {}).get('exists')
+
+                    if v_sig is True and v_src is False:
+                        sections.append(">> DIAGNOSTIC: .sig PRESENT but .src MISSING on violation SHA.")
+                        sections.append(">> This is the TIMEOUT BUILD pattern: the build published and signed")
+                        sections.append(">>   the image but the source-build task never completed.")
+                        if g_src is True:
+                            sections.append(">> Green build has .src — a REBUILD will fix this.")
+                        elif g_src is False:
+                            sections.append(">> WARNING: Green build also lacks .src — rebuild may NOT fix this.")
+                    elif v_src is False and g_src is True:
                         sections.append(">> DIAGNOSTIC: Violation SHA has no source image but green build does.")
-                        sections.append(">> This confirms the fix is a REBUILD — the green build SHA has a valid source image.")
-                    elif v_check.get('exists') is False and g_check.get('exists') is False:
+                        sections.append(">> This confirms the fix is a REBUILD.")
+                    elif v_src is False and g_src is False:
                         sections.append(">> DIAGNOSTIC: BOTH SHAs lack source images.")
-                        sections.append(">> A simple rebuild may NOT fix this — the source-build task may be misconfigured or timing out consistently.")
+                        sections.append(">> A simple rebuild may NOT fix this — the source-build task may be misconfigured.")
 
                 # Build history with SHAs
                 builds = data.get('builds_with_sha', [])
@@ -1075,6 +1149,36 @@ class ReleaseFailureAnalyzer:
                 sections.append("- {} | {} | {}".format(
                     n.get('created_at', ''), n.get('status', ''),
                     n.get('pr_name', '')))
+
+        # Readiness checks (pre-release and post-stage automated checks)
+        readiness = context.get('readiness_checks', [])
+        if readiness:
+            pre = [c for c in readiness if c.get('phase') == 'pre-release']
+            post = [c for c in readiness if c.get('phase') == 'post-stage']
+            non_pass = [c for c in readiness if c.get('status') not in ('PASS', 'SKIP')]
+
+            sections.append("\n## Release Readiness Checks ({} total, {} non-passing)".format(
+                len(readiness), len(non_pass)))
+            sections.append("These automated checks ran against the application at analysis time.")
+            sections.append("FAIL/WARN results may correlate with the release failure.\n")
+
+            if pre:
+                sections.append("### Pre-Release")
+                for c in pre:
+                    sections.append("- [{}] {}: {}".format(
+                        c.get('status', '?'), c.get('name', '?'),
+                        c.get('detail', '')))
+                    if c.get('fix') and c.get('status') in ('FAIL', 'WARN'):
+                        sections.append("  Fix: {}".format(c['fix']))
+
+            if post:
+                sections.append("### Post-Stage")
+                for c in post:
+                    sections.append("- [{}] {}: {}".format(
+                        c.get('status', '?'), c.get('name', '?'),
+                        c.get('detail', '')))
+                    if c.get('fix') and c.get('status') in ('FAIL', 'WARN'):
+                        sections.append("  Fix: {}".format(c['fix']))
 
         # Triage items
         triage = context.get('triage_items', [])
@@ -1146,6 +1250,7 @@ class ReleaseFailureAnalyzer:
         sections.append("- Check operator-nudging.yaml to verify whether the nudging picked up the correct SHA")
         sections.append("- Cross-reference Active Triage Items to see if the issue is already being tracked")
         sections.append("- Include Nightly Build status and Application Health in your diagnosis context")
+        sections.append("- Check Release Readiness results: FAIL/WARN checks may explain the root cause (e.g., policy mismatch, stale snapshot, missing artifacts)")
         sections.append("- State ONLY what you observe in the evidence")
         sections.append("- Quote exact error messages from logs")
         sections.append("- Cite the source for every claim (log line, RPA file, bundle file, build history, nudging file)")
@@ -1213,6 +1318,7 @@ class ReleaseFailureAnalyzer:
     def parse_analysis_response(self, llm_response):
         """Extract structured analysis from LLMResponse.tool_calls."""
         from pydantic import ValidationError
+
         from analyzers.models import ReleaseAnalysisResult
 
         if not llm_response.tool_calls:
@@ -1336,6 +1442,26 @@ class ReleaseFailureAnalyzer:
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
                     tc.setdefault('input', {})['fix_action_type'] = fix_action
+                    break
+
+        # Embed artifact health for queryability in analysis_json
+        enrichment = context.get('violation_enrichment', {})
+        artifact_summaries = {}
+        for comp, data in enrichment.items():
+            health = data.get('artifact_health')
+            if health:
+                for key in ('violation_sha', 'green_build_sha'):
+                    entry = health.get(key, {})
+                    if entry:
+                        artifact_summaries.setdefault(comp, {})[key] = {
+                            'healthy': entry.get('healthy', False),
+                            'missing': entry.get('missing', []),
+                            'digest': entry.get('digest', ''),
+                        }
+        if artifact_summaries and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
+                    tc.setdefault('input', {})['artifact_health'] = artifact_summaries
                     break
 
         analysis_id = self.ai_repo.insert_release_analysis(
@@ -1497,6 +1623,12 @@ class ReleaseFailureAnalyzer:
                 '- Latest green build SHA for fix reference:\n'
                 '  {} (build: {})'.format(green_sha, green_build.get('name', '?'))
             )
+
+        # Rebuild command for the component
+        snippets.append(
+            '- Trigger rebuild:\n'
+            '  ic rebuild {}'.format(component)
+        )
 
     def _get_existing_analysis(self, release_name):
         return self.ai_repo.get_analysis_for_release(release_name)

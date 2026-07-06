@@ -12,12 +12,12 @@ import os
 import re
 import time
 
-from logger import setup_logger
-from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository, ErrorPatternRepository
 from clients.blob_store import get_blob_store, make_blob_key, should_offload
-from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from clients.llm_provider import create_llm_provider
+from logger import setup_logger
 from prompt_loader import load_prompt
+from repositories import AIAnalysisRepository, BuildFailureRepository, DatabaseConnection, ErrorPatternRepository
 
 logger = setup_logger(__name__)
 
@@ -246,10 +246,10 @@ class BuildFailureAnalyzer:
 
         try:
             from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
-            from enrichment.sources.dependency_context import DependencyContextSource
-            from enrichment.sources.related_failures import RelatedFailuresSource
             from enrichment.sources.build_history import BuildHistorySource
+            from enrichment.sources.dependency_context import DependencyContextSource
             from enrichment.sources.open_prs import OpenPRsSource
+            from enrichment.sources.related_failures import RelatedFailuresSource
 
             orchestrator = EnrichmentOrchestrator(self.config, self.db)
             orchestrator.register_source(DependencyContextSource(self.config))
@@ -715,8 +715,10 @@ class BuildFailureAnalyzer:
         except Exception:
             graph_section = ""
 
-        user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
+        release_context = self._get_release_context(failure)
 
+        user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
+{release_context}
 ## Component
 - Component: {component}
 - Repository: {repository}
@@ -794,11 +796,76 @@ Use these URLs in evidence_references when relevant:
             pattern_section=pattern_section,
             dep_updates=dep_updates_section,
             graph_context=graph_section,
+            release_context=release_context,
             logs=logs,
             dynamic_urls=self._build_dynamic_urls(failure),
         )
 
         return (SYSTEM_PROMPT, user_prompt)
+
+    def _get_release_context(self, failure):
+        """Build release timeline + blocker + systemic pattern context for AI prompt."""
+        lines = []
+        application = failure.get('application', '')
+
+        # Release timeline
+        try:
+            if application:
+                from api.routes.failures import _compute_freeze_countdown
+                from api.routes.releases import get_schedule
+                schedule = get_schedule(application)
+                countdown = _compute_freeze_countdown(schedule)
+                if countdown:
+                    lines.append('\n## Release Context')
+                    lines.append('- Phase: {}'.format(countdown.phase))
+                    lines.append('- Urgency: {}'.format(countdown.urgency))
+                    lines.append('- Timeline: {}'.format(countdown.message))
+                    if countdown.urgency in ('critical', 'high'):
+                        lines.append('- **NOTE: This failure is blocking a release with imminent deadline. Prioritize actionable fix recommendations.**')
+        except Exception:
+            pass
+
+        # Active blocker signals
+        try:
+            if application:
+                from api.routes.failures import list_blockers
+                blockers_result = list_blockers(application)
+                if blockers_result.critical_signals:
+                    lines.append('\n## Active Blocker Signals')
+                    for sig in blockers_result.critical_signals[:5]:
+                        lines.append('- {}'.format(sig))
+        except Exception:
+            pass
+
+        # Systemic pattern context — check if this component's error
+        # is part of a broader pattern affecting multiple components
+        try:
+            if application:
+                triage = self.build_repo.get_triage_summary(application)
+                from api.routes.failures import SYSTEMIC_PATTERNS
+                comp_name = failure.get('component_name', '')
+                error_text = ((failure.get('error_type', '') or '') + ' ' + comp_name).lower()
+                for pname, keywords in SYSTEMIC_PATTERNS:
+                    if any(kw in error_text for kw in keywords):
+                        affected = []
+                        for comp in triage.get('failing_components', []):
+                            other_error = ((comp.get('error_type', '') or '') + ' ' + comp.get('component', '')).lower()
+                            if any(kw in other_error for kw in keywords):
+                                affected.append(comp.get('component', ''))
+                        if len(affected) >= 2:
+                            lines.append('\n## Systemic Pattern Detected')
+                            lines.append('- Pattern: {} (affects {} components)'.format(
+                                pname.replace('_', ' '), len(affected)))
+                            lines.append('- Affected components: {}'.format(', '.join(affected[:10])))
+                            lines.append('- **Consider a coordinated fix across all affected components rather than individual fixes.**')
+                        break
+        except Exception:
+            pass
+
+        if lines:
+            lines.append('')
+            return '\n'.join(lines)
+        return ''
 
     def _build_dynamic_urls(self, failure):
         """Construct component-specific URLs for the AI to use in evidence_references."""
@@ -1021,6 +1088,7 @@ Use these URLs in evidence_references when relevant:
             ValueError: If tool_calls is empty, malformed, or validation fails
         """
         from pydantic import ValidationError
+
         from analyzers.models import AnalysisResult
 
         if not llm_response.tool_calls:

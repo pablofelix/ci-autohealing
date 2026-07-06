@@ -4,14 +4,17 @@ Analyzes Enterprise Contract compliance violations. Similar to BuildFailureAnaly
 but focused on policy compliance rather than code bugs.
 """
 
+import json
 import os
+import re
 import time
 
-from logger import setup_logger
-from repositories import DatabaseConnection, AIAnalysisRepository, ErrorPatternRepository
-from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from clients.llm_provider import create_llm_provider
+from logger import setup_logger
 from prompt_loader import load_prompt
+from repositories import AIAnalysisRepository, DatabaseConnection, ErrorPatternRepository
+from repositories.conforma_rule_catalog_repository import ConformaRuleCatalogRepository
 
 logger = setup_logger(__name__)
 
@@ -39,6 +42,13 @@ CONFORMA_ANALYSIS_TOOL = {
                     'policy_version_label',
                     'policy_fips_check',
                     'policy_deprecated_task',
+                    'policy_deprecated_image',
+                    'policy_slsa_provenance',
+                    'policy_snyk_error',
+                    'policy_labels',
+                    'policy_sbom_vendor_label',
+                    'policy_cpe_label',
+                    'policy_source_image',
                     'config_error',
                     'infrastructure'
                 ],
@@ -151,6 +161,7 @@ class ConformaAnalyzer:
         self._konflux_client = None
         self.ai_repo = ai_repo or AIAnalysisRepository(db)
         self.pattern_repo = ErrorPatternRepository(db)
+        self.catalog_repo = ConformaRuleCatalogRepository(db)
 
         # Create LLM provider from config
         if llm is None:
@@ -219,8 +230,10 @@ class ConformaAnalyzer:
         except Exception:
             graph_section = ""
 
-        user_prompt = """Analyze this Conforma (Enterprise Contract) compliance violation. Focus on identifying which policy is violated and the best path forward — fix vs. exception request.
+        release_context = self._get_release_context(violation)
 
+        user_prompt = """Analyze this Conforma (Enterprise Contract) compliance violation. Focus on identifying which policy is violated and the best path forward — fix vs. exception request.
+{release_context}
 ## Component
 - Component: {component}
 - Repository: {repository}
@@ -238,7 +251,7 @@ class ConformaAnalyzer:
 ```
 {summary}
 ```
-{pattern_section}{exclusion_section}{sarif_section}{graph_context}{tekton_files}
+{pattern_section}{exclusion_section}{sarif_section}{graph_context}{catalog_section}{tekton_files}
 Use the record_conforma_analysis tool. Remember:
 - Match against the 14 known patterns (hermetic build, unpinned task, package source, etc.)
 - Explain WHICH policy is violated and WHY
@@ -275,15 +288,58 @@ Use these URLs in evidence_references when relevant:
             exclusion_section=self._get_policy_exclusions(violation),
             sarif_section=self._get_sarif_context(violation),
             graph_context=graph_section,
+            release_context=release_context,
+            catalog_section=self._get_rule_catalog_context(violation),
             tekton_files=self._get_tekton_files(violation),
         )
 
         return (CONFORMA_SYSTEM_PROMPT, user_prompt)
 
+    def _get_release_context(self, violation):
+        """Build release timeline + blocker + systemic pattern context for AI prompt."""
+        lines = []
+        application = violation.get('application', '')
+
+        # Release timeline
+        try:
+            if application:
+                from api.routes.failures import _compute_freeze_countdown
+                from api.routes.releases import get_schedule
+                schedule = get_schedule(application)
+                countdown = _compute_freeze_countdown(schedule)
+                if countdown:
+                    lines.append('\n## Release Context')
+                    lines.append('- Phase: {}'.format(countdown.phase))
+                    lines.append('- Urgency: {}'.format(countdown.urgency))
+                    lines.append('- Timeline: {}'.format(countdown.message))
+                    if countdown.urgency in ('critical', 'high'):
+                        lines.append('- **NOTE: This violation is blocking a release with imminent deadline. Prioritize fix over exception request if feasible.**')
+        except Exception:
+            pass
+
+        # Active blocker signals
+        try:
+            if application:
+                from api.routes.failures import list_blockers
+                blockers_result = list_blockers(application)
+                if blockers_result.critical_signals:
+                    lines.append('\n## Active Blocker Signals')
+                    for sig in blockers_result.critical_signals[:5]:
+                        lines.append('- {}'.format(sig))
+                    lines.append('- **If this violation maps to an active blocker, note the connection in your analysis.**')
+        except Exception:
+            pass
+
+        if lines:
+            lines.append('')
+            return '\n'.join(lines)
+        return ''
+
     def _get_doc_refs(self, violation):
         """Generate policy URL references for the LLM context."""
         from utils.conforma_utils import (
-            extract_violation_rules, extract_policy_from_scenario,
+            extract_policy_from_scenario,
+            extract_violation_rules,
             policy_url_with_line,
         )
         refs = []
@@ -301,13 +357,13 @@ Use these URLs in evidence_references when relevant:
         return '\n'.join(refs)
 
     def _get_tekton_files(self, violation):
-        """Fetch .tekton file names from GitHub for this component."""
+        """Fetch .tekton pipeline content and prefetch config from GitHub."""
         repo = violation.get('repository', '')
         component = violation.get('component_name', '')
         if not repo or not component:
             return ''
         try:
-            from clients.github_client import parse_github_repo, GitHubClient
+            from clients.github_client import GitHubClient, parse_github_repo
             parsed = parse_github_repo(repo)
             if not parsed:
                 return ''
@@ -315,11 +371,30 @@ Use these URLs in evidence_references when relevant:
             gh = GitHubClient()
 
             branch = violation.get('branch', '')
-            if not branch:
-                branch = 'konflux-{}'.format(component)
-            listing = gh.get_directory_listing(owner, repo_name, '.tekton', ref=branch)
-            if not listing:
-                listing = gh.get_directory_listing(owner, repo_name, '.tekton')
+            refs_to_try = []
+            if branch:
+                refs_to_try.append(branch)
+            commit = violation.get('commit_sha', '')
+            if commit:
+                refs_to_try.append(commit)
+            app = violation.get('application', '')
+            if app:
+                m = re.match(r'rhoai-v(\d+)-(\d+)(?:-(ea|rc)-(\d+))?$', app)
+                if m:
+                    release_branch = 'rhoai-{}.{}'.format(m.group(1), m.group(2))
+                    if m.group(3):
+                        release_branch += '-{}.{}'.format(m.group(3), m.group(4))
+                    refs_to_try.append(release_branch)
+            refs_to_try.append('konflux-{}'.format(component))
+            refs_to_try.append(None)
+
+            listing = None
+            used_ref = None
+            for ref in refs_to_try:
+                listing = gh.get_directory_listing(owner, repo_name, '.tekton', ref=ref)
+                if listing:
+                    used_ref = ref
+                    break
             if not listing:
                 return ''
 
@@ -329,9 +404,103 @@ Use these URLs in evidence_references when relevant:
             lines = ['\n## Component Tekton Pipeline Files']
             for f in sorted(files):
                 lines.append('- .tekton/{}'.format(f))
+
+            push_file = next((f for f in files if 'push' in f), None)
+            if push_file:
+                lines.extend(self._extract_prefetch_context(
+                    gh, owner, repo_name, push_file, used_ref))
+
             return '\n'.join(lines)
         except Exception:
             return ''
+
+    def _extract_prefetch_context(self, gh, owner, repo_name, push_file, branch):
+        """Read push pipeline YAML and extract prefetch-input + related files."""
+        lines = []
+        try:
+            content = gh.get_file_content(
+                owner, repo_name, '.tekton/{}'.format(push_file), ref=branch)
+            if not content:
+                return lines
+
+            prefetch_match = re.search(
+                r'name:\s*prefetch-input\s*\n\s*value:\s*(.+?)(?:\n\s*- name:|\nstatus:)',
+                content, re.DOTALL)
+            if not prefetch_match:
+                return lines
+
+            raw = prefetch_match.group(1).strip()
+            lines.append('\n### Prefetch Configuration (from {})'.format(push_file))
+
+            if raw.startswith("'") or raw.startswith('"'):
+                raw = raw[1:-1] if raw[-1] in ('"', "'") else raw[1:]
+            try:
+                prefetch = json.loads(raw)
+            except json.JSONDecodeError:
+                raw_clean = re.sub(r'#.*$', '', raw, flags=re.MULTILINE).strip()
+                raw_clean = re.sub(r',\s*]', ']', raw_clean)
+                try:
+                    prefetch = json.loads(raw_clean)
+                except json.JSONDecodeError:
+                    lines.append('```\n{}\n```'.format(raw[:2000]))
+                    return lines
+
+            if isinstance(prefetch, dict):
+                prefetch = [prefetch]
+
+            for entry in prefetch:
+                pkg_type = entry.get('type', '?')
+                path = entry.get('path', '.')
+                lines.append('- Type: {}, Path: {}'.format(pkg_type, path))
+                if entry.get('binary'):
+                    lines.append('- **BINARY WHEELS ENABLED**: `"binary": {}`'.format(
+                        json.dumps(entry['binary'])))
+                    lines.append('  > This causes `hermeto:pip:package:binary=true` on every '
+                                 'prefetched package, triggering '
+                                 'sbom_spdx.disallowed_package_attributes violations.')
+                if entry.get('allow_binary'):
+                    lines.append('- allow_binary: {}'.format(entry['allow_binary']))
+                req_files = entry.get('requirements_files', [])
+                build_files = entry.get('requirements_build_files', [])
+                if req_files:
+                    lines.append('- Requirements: {}'.format(', '.join(req_files)))
+                if build_files:
+                    lines.append('- Build requirements: {}'.format(', '.join(build_files)))
+                elif pkg_type == 'pip' and entry.get('binary'):
+                    lines.append('- **No requirements_build_files configured** — '
+                                 'needed to compile from source instead of using binary wheels')
+
+                if pkg_type == 'pip' and path != '.':
+                    self._check_repo_build_files(
+                        gh, owner, repo_name, path, req_files, branch, lines)
+
+        except Exception as exc:
+            logger.debug("Prefetch context extraction failed: %s", exc)
+        return lines
+
+    @staticmethod
+    def _check_repo_build_files(gh, owner, repo_name, path, req_files, branch, lines):
+        """Check if build-requirements files exist in the repo but aren't configured."""
+        try:
+            for req in req_files:
+                req_dir = req.rsplit('/', 1)[0] if '/' in req else ''
+                search_dir = '{}/{}'.format(path, req_dir).rstrip('/')
+                dir_listing = gh.get_directory_listing(
+                    owner, repo_name, search_dir, ref=branch)
+                if not dir_listing:
+                    continue
+                build_files = [f for f in dir_listing
+                               if 'build' in f.lower() and 'req' in f.lower()]
+                if build_files:
+                    lines.append('\n### Unused Build Requirements Files Found')
+                    lines.append('> These files exist in the repo but are NOT referenced '
+                                 'in prefetch-input. Adding them as '
+                                 '`requirements_build_files` would allow Hermeto to '
+                                 'compile from source instead of downloading binary wheels.')
+                    for bf in build_files:
+                        lines.append('- {}/{}'.format(search_dir, bf))
+        except Exception:
+            pass
 
     @staticmethod
     def _match_tekton_files(component, listing):
@@ -367,6 +536,41 @@ Use these URLs in evidence_references when relevant:
         if doc:
             parts.append("### Relevant Documentation\n{}\n".format(doc[:2000]))
         return '\n'.join(parts)
+
+    def _get_rule_catalog_context(self, violation):
+        """Look up violated rules in the conforma_rule_catalog for rich context."""
+        try:
+            from utils.conforma_utils import extract_violation_rules
+            summary = violation.get('violation_summary', '') or ''
+            rules = extract_violation_rules(summary)
+            if not rules:
+                return ''
+            rule_ids = [r.replace('.', '__') for r in rules]
+            entries = self.catalog_repo.get_by_rule_ids(rule_ids)
+            if not entries:
+                return ''
+            has_reporter_fix = any(e.get('reporter_solution') for e in entries)
+            header = '\n## Conforma Rule Catalog (matched {} of {} violated rules)'.format(
+                len(entries), len(rules))
+            if has_reporter_fix:
+                header += '\n> **High-confidence evidence**: RHOAI-specific fixes below come from the verified conforma-reporter resolution guide. Boost confidence by +0.15 when these fixes apply.'
+            lines = [header]
+            for e in entries:
+                lines.append('### {}'.format(e['rule_name']))
+                lines.append('- Rule: `{}`  (package: {}, policy: {})'.format(
+                    e['rule_id'].replace('__', '.'), e['rule_package'], e.get('policy_type', '?')))
+                if e.get('description'):
+                    lines.append('- What it checks: {}'.format(e['description'][:300]))
+                if e.get('reporter_solution'):
+                    lines.append('- RHOAI-specific fix (VERIFIED): {}'.format(e['reporter_solution'][:500]))
+                elif e.get('typical_fix'):
+                    lines.append('- Generic fix: {}'.format(e['typical_fix'][:300]))
+                if e.get('doc_url'):
+                    lines.append('- Docs: {}'.format(e['doc_url']))
+            return '\n'.join(lines) + '\n'
+        except Exception as exc:
+            logger.debug("Rule catalog lookup failed: %s", exc)
+            return ''
 
     def _get_policy_exclusions(self, violation):
         """Fetch EC policy exclusions relevant to this violation's scenario."""
@@ -466,6 +670,7 @@ Use these URLs in evidence_references when relevant:
             ValueError: If tool_calls is empty, malformed, or validation fails
         """
         from pydantic import ValidationError
+
         from analyzers.models import ConformaAnalysisResult
 
         if not llm_response.tool_calls:

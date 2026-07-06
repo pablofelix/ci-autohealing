@@ -9,6 +9,31 @@ from anthropic import Anthropic
 from clients.llm_provider import LLMProvider, LLMResponse
 
 
+def _parse_response(response):
+    """Parse Anthropic response blocks into LLMResponse format."""
+    tool_calls = []
+    content_text = ''
+
+    for block in response.content:
+        if block.type == 'tool_use':
+            tool_calls.append({
+                'id': block.id,
+                'name': block.name,
+                'input': block.input,
+            })
+        elif block.type == 'text':
+            content_text = block.text
+
+    return LLMResponse(
+        content=content_text,
+        tool_calls=tool_calls,
+        model=response.model,
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        stop_reason=response.stop_reason,
+    )
+
+
 class AnthropicDirectProvider(LLMProvider):
     """Claude via the direct Anthropic API.
 
@@ -39,28 +64,23 @@ class AnthropicDirectProvider(LLMProvider):
             kwargs['tool_choice'] = {'type': 'any'}
 
         response = self._client.messages.create(**kwargs)
+        return _parse_response(response)
 
-        # Parse response blocks into LLMResponse format
-        tool_calls = []
-        content_text = ''
+    def create_conversation(self, system, messages, tools=None, max_tokens=4096):
+        """Multi-turn conversation for agent-mode tool_use loops."""
+        kwargs = {
+            'model': self._model,
+            'max_tokens': max_tokens,
+            'system': system,
+            'messages': messages,
+        }
 
-        for block in response.content:
-            if block.type == 'tool_use':
-                tool_calls.append({
-                    'name': block.name,
-                    'input': block.input,
-                })
-            elif block.type == 'text':
-                content_text = block.text
+        if tools:
+            kwargs['tools'] = tools
+            kwargs['tool_choice'] = {'type': 'auto'}
 
-        return LLMResponse(
-            content=content_text,
-            tool_calls=tool_calls,
-            model=response.model,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            stop_reason=response.stop_reason,
-        )
+        response = self._client.messages.create(**kwargs)
+        return _parse_response(response)
 
     def model_name(self):
         """Return model identifier for tracking."""
