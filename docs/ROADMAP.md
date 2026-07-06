@@ -457,6 +457,115 @@ Goal: track and assist component onboarding into RHOAI Konflux workspace, reduci
 
 ---
 
+## Phase 16: Build & Release AI Quality (next)
+
+Goal: apply the same regression testing and config analysis approach that improved the conforma AI analyzer (from 41% to target 80%+ accuracy) to build failures and release failures. Use existing AI triage tracker data as ground truth.
+
+**Context from conforma work (Phase 11-12):**
+- ConformaRegressionTester found 41% accuracy, 0.02 calibration, config_error catch-all at 0%
+- ConfigAnalyzer found 9 actionable findings at 91% confidence (expired exceptions, disabled ITS scenarios)
+- Pattern: resolved violations with AI analysis → compare predicted vs actual → identify weaknesses → improve prompts
+
+### 16a — Build Failure Regression Tester
+
+Test `BuildFailureAnalyzer` predictions against resolved build failures as ground truth.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `BuildRegressionTester` — compare AI predictions vs actual resolutions | `src/analyzers/build_regression.py` | planned |
+| Query resolved failures with AI analysis (build_failures + ai_analysis JOIN) | Repository | planned |
+| Evaluate failure_category accuracy (AI predicted vs resolution pattern) | Analyzer | planned |
+| Evaluate can_auto_fix accuracy (was it actually auto-fixable?) | Analyzer | planned |
+| Compute calibration score (confidence vs correctness correlation) | Analyzer | planned |
+| Coverage gap detection (failure patterns with 0% AI coverage) | Analyzer | planned |
+| Improvement suggestions (catch-all overuse, low-confidence categories) | Analyzer | planned |
+| CLI: `ic ai regression --type build [--app APP] [--limit N]` | CLI | planned |
+| MCP: `get_build_regression()` | MCP tool | planned |
+
+**Key metrics to compute:**
+- Accuracy by failure_category (dependency_issue, build_config, test_failure, etc.)
+- Auto-fix calibration (marked auto-fixable vs actually resolved by rebuild/retry)
+- Confidence calibration curve per category
+- Coverage: % of resolved failures that had AI analysis
+
+**Ground truth mapping:**
+- Resolved failures where `resolution_type = 'rebuild'` or `'retry'` → should have `can_auto_fix=True`
+- Failures resolved by PR merge → check if `recommended_fix` mentioned the right fix type
+- Failures with multiple AI analyses → compare oldest vs newest for improvement tracking
+
+### 16b — Release Failure Regression Tester
+
+Test `ReleaseFailureAnalyzer` predictions against resolved release failures.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `ReleaseRegressionTester` — compare AI vs resolution for release failures | `src/analyzers/release_regression.py` | planned |
+| Query release attempts with AI analysis that later succeeded | Repository | planned |
+| Evaluate root cause accuracy (verify-conforma vs infra vs config) | Analyzer | planned |
+| Track resolution path (which violations were actually fixed vs excepted) | Analyzer | planned |
+| SHA tracing accuracy (did AI correctly identify stale SHAs?) | Analyzer | planned |
+| CLI: `ic ai regression --type release [--app APP]` | CLI | planned |
+| MCP: `get_release_regression()` | MCP tool | planned |
+
+**Release-specific metrics:**
+- Was the release blocker correctly identified? (wrong component → wasted investigation time)
+- SHA mismatch detection accuracy (AI flagged stale SHA that was actually the issue)
+- Exception recommendation accuracy (AI suggested exception → was it the right call?)
+- Enrichment source impact (analyses WITH build history vs WITHOUT — accuracy delta)
+
+### 16c — Build/Release Config Analyzer
+
+LLM-powered audit of build pipeline and release configuration, similar to `ConfigAnalyzer` for conforma.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `BuildConfigAnalyzer` — audit build pipeline configuration | `src/analyzers/build_config_analyzer.py` | planned |
+| Detect stale components (no build triggered despite new commits) | Analyzer | planned |
+| Detect misconfigured nudging (component in nudging.yaml but builds failing) | Analyzer | planned |
+| Detect quota issues (build stuck in pending > 30 min) | Analyzer | planned |
+| Detect recurring transient failures (same component, same error, rebuild fixes) | Analyzer | planned |
+| Auto-rebuild candidates for builds (transient failures: OOM, network, registry) | Analyzer | planned |
+| `ReleaseConfigAnalyzer` — audit release configuration | `src/analyzers/release_config_analyzer.py` | planned |
+| Detect release blockers from conforma violations (map violations → release gate) | Analyzer | planned |
+| Detect PCC cache staleness (stale advisories blocking release) | Analyzer | planned |
+| Detect missing conforma exceptions before release window | Analyzer | planned |
+| CLI: `ic ai analyze-config --type build` / `--type release` | CLI | planned |
+| MCP: `get_build_config_analysis()` / `get_release_config_analysis()` | MCP tool | planned |
+
+**Build config findings categories:**
+- `stale_component`: component building from old commits (nudge not working)
+- `recurring_transient`: same failure > 3 times in 7 days, always resolved by rebuild
+- `quota_bottleneck`: builds queuing > 30 min regularly
+- `missing_webhook`: push events not triggering builds
+- `build_chain_broken`: upstream component failing, blocking downstream
+
+**Release config findings categories:**
+- `conforma_blocker`: unresolved violations that will block the release gate
+- `pcc_cache_stale`: PCC cache not regenerated after last release
+- `missing_exception`: violation needs exception before release window
+- `sha_drift`: release candidate SHA doesn't match latest green build
+- `nightly_broken`: nightly builds failing, hiding regression
+
+### 16d — Unified Regression CLI
+
+Extend `ic ai regression` to support all failure types from a single command.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `--type conforma\|build\|release\|all` flag | CLI | planned |
+| Combined quality dashboard: `ic ai quality` | CLI | planned |
+| Weekly quality report with trends | CLI | planned |
+| Export training data for model improvement | `ic ai export-training-data --type build` | planned |
+
+**Implementation order:**
+1. Build regression tester (most data available — hundreds of resolved failures)
+2. Release regression tester (fewer data points but higher impact per analysis)
+3. Build config analyzer (directly actionable — finds auto-rebuild candidates)
+4. Release config analyzer (directly actionable — finds release blockers early)
+5. Unified CLI and weekly quality report
+
+---
+
 ## Current Release Status (updated 2026-07-06)
 
 **RHAI 3.5 schedule (from Product Pages):**
