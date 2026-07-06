@@ -39,6 +39,57 @@ class JiraClient:
     def _api(self, path):
         return '{}/rest/api/{}/{}'.format(self._base_url, JIRA_API_VERSION, path)
 
+    def check_token_health(self):
+        """Verify the Jira API token is valid by calling the /myself endpoint.
+
+        Returns dict with:
+          status: 'valid', 'expired', 'forbidden', 'unreachable', 'missing'
+          user: display name if valid
+          message: human-readable description
+        """
+        if not self._session.auth or not self._session.auth[1]:
+            return {
+                'status': 'missing',
+                'user': None,
+                'message': 'JIRA_TOKEN environment variable is not set',
+            }
+        try:
+            resp = self._session.get(self._api('myself'), timeout=10)
+        except requests.RequestException as e:
+            return {
+                'status': 'unreachable',
+                'user': None,
+                'message': 'Jira API unreachable: {}'.format(str(e)[:100]),
+            }
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                'status': 'valid',
+                'user': data.get('displayName', ''),
+                'message': 'Token valid, authenticated as {}'.format(
+                    data.get('displayName', 'unknown')),
+            }
+        if resp.status_code == 401:
+            return {
+                'status': 'expired',
+                'user': None,
+                'message': 'Jira token expired or invalid (HTTP 401). '
+                           'Regenerate at Jira > Profile > Personal Access Tokens.',
+            }
+        if resp.status_code == 403:
+            return {
+                'status': 'forbidden',
+                'user': None,
+                'message': 'Jira token lacks permissions (HTTP 403). '
+                           'Check token scopes.',
+            }
+        return {
+            'status': 'expired',
+            'user': None,
+            'message': 'Jira API returned HTTP {} — token may be invalid'.format(
+                resp.status_code),
+        }
+
     def create_issue(self, summary, description_text, issue_type='Bug',
                      priority=None, labels=None, components=None):
         """Create a Jira issue and return the created issue dict (key, id, url).
@@ -171,6 +222,24 @@ class JiraClient:
         """Return a single comment dict by ID, or None if not found."""
         return self._get('issue/{}/comment/{}'.format(jira_key, comment_id))
 
+    def get_issue(self, jira_key):
+        """Return full issue details: key, summary, description, status, comments."""
+        data = self._get('issue/{}?fields=summary,description,status,comment'.format(
+            jira_key))
+        if not data:
+            return None
+        fields = data.get('fields', {})
+        status_obj = fields.get('status', {})
+        comments_data = fields.get('comment', {})
+        return {
+            'key': data.get('key', jira_key),
+            'summary': fields.get('summary', ''),
+            'description': fields.get('description', ''),
+            'status': status_obj.get('name', ''),
+            'status_category': status_obj.get('statusCategory', {}).get('key', ''),
+            'comments': comments_data.get('comments', []),
+        }
+
     def get_issue_status(self, jira_key):
         """Return the status category key for a Jira issue.
 
@@ -183,3 +252,57 @@ class JiraClient:
             return data['fields']['status']['statusCategory']['key']
         except (KeyError, TypeError):
             return None
+
+    def search_blockers(self, project, fix_versions=None, max_results=50):
+        """Search for Blocker-priority issues in a project.
+
+        Returns list of dicts with key, summary, status, assignee, created, updated,
+        priority, resolution, and labels.
+        """
+        jql_parts = ['project = "{}" AND priority = Blocker'.format(project)]
+        if fix_versions:
+            versions = ', '.join('"{}"'.format(v) for v in fix_versions)
+            jql_parts.append('fixVersion IN ({})'.format(versions))
+        jql = ' AND '.join(jql_parts) + ' ORDER BY updated DESC'
+
+        fields = 'summary,status,assignee,created,updated,priority,resolution,labels'
+        data = self._get('search?jql={}&fields={}&maxResults={}'.format(
+            jql, fields, max_results))
+        if not data:
+            return []
+
+        results = []
+        for issue in data.get('issues', []):
+            f = issue.get('fields', {})
+            status_obj = f.get('status', {})
+            assignee_obj = f.get('assignee')
+            results.append({
+                'key': issue.get('key', ''),
+                'summary': f.get('summary', ''),
+                'status': status_obj.get('name', ''),
+                'status_category': status_obj.get('statusCategory', {}).get('key', ''),
+                'assignee': assignee_obj.get('displayName', '') if assignee_obj else None,
+                'created': f.get('created', ''),
+                'updated': f.get('updated', ''),
+                'resolution': (f.get('resolution') or {}).get('name'),
+                'labels': f.get('labels', []),
+            })
+        return results
+
+    def get_issue_changelog(self, jira_key, max_results=50):
+        """Return changelog entries for a Jira issue (status changes, reassignments)."""
+        data = self._get('issue/{}?expand=changelog&fields=summary'.format(jira_key))
+        if not data:
+            return []
+        changelog = data.get('changelog', {}).get('histories', [])
+        entries = []
+        for history in changelog[-max_results:]:
+            for item in history.get('items', []):
+                entries.append({
+                    'created': history.get('created', ''),
+                    'author': history.get('author', {}).get('displayName', ''),
+                    'field': item.get('field', ''),
+                    'from': item.get('fromString', ''),
+                    'to': item.get('toString', ''),
+                })
+        return entries

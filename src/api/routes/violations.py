@@ -5,11 +5,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 
-from mcp_server.models import ConformaViolationDetails
+from mcp_server.models import (
+    ConformaViolationDetails,
+    ExceptionLifecycleSummary,
+    ExceptionStatus,
+)
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 from repositories.triage_repository import TriageRepository
-
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
 
 router = APIRouter(tags=["violations"])
@@ -46,22 +49,40 @@ def list_violations(
     from api.validators import validate_application_name
     application = validate_application_name(application)
     if reporter_env or reporter_build_type:
-        from clients.conforma_reporter_client import fetch_reporter_violations
         from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
         branch = app_to_reporter_branch(application)
         env = reporter_env or 'prod'
         build_type = reporter_build_type or 'latest'
         return fetch_reporter_violations(branch, env=env, build_type=build_type)
-    from utils.conforma_utils import count_unique_violations, categorize_policy
+    from utils.conforma_utils import (
+        categorize_policy,
+        compute_blocks,
+        compute_coverage_by_env,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        policy_env,
+    )
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     for v in violations:
         if not v.get('jira_key'):
             v['jira_key'] = jira_map.get(v.get('component_name'))
         uv_count, _ = count_unique_violations(v.get('violation_summary', ''))
         v['unique_violations'] = uv_count or None
-        v['category'] = categorize_policy(v.get('scenario', ''))
+        scenario = v.get('scenario', '')
+        v['category'] = categorize_policy(scenario)
+        pname = extract_policy_from_scenario(scenario)
+        v['policy_env'] = policy_env(pname)
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
+        cov_stage = (env_cov.get('stage') or {}).get('coverage')
+        cov_prod = (env_cov.get('prod') or {}).get('coverage')
+        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
     return violations
 
 
@@ -78,8 +99,8 @@ def get_conforma_report(
     from api.validators import validate_application_name
     application = validate_application_name(application)
     if reporter_env or reporter_build_type:
-        from clients.conforma_reporter_client import fetch_reporter_violations
         from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
         branch = app_to_reporter_branch(application)
         env = reporter_env or 'prod'
         build_type = reporter_build_type or 'latest'
@@ -91,9 +112,15 @@ def get_conforma_report(
             'violations': violations,
         }
     from utils.conforma_utils import (
-        extract_policy_from_scenario, enrich_with_coverage,
-        fetch_exceptions_by_policy, categorize_policy,
+        categorize_policy,
+        compute_blocks,
+        compute_coverage_by_env,
         count_unique_violations,
+        enrich_with_coverage,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        policy_env,
     )
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
@@ -105,6 +132,7 @@ def get_conforma_report(
             v['jira_key'] = jira_map.get(v.get('component_name'))
         v['policy_name'] = extract_policy_from_scenario(v.get('scenario', ''))
         v['category'] = categorize_policy(v.get('scenario', ''))
+        v['policy_env'] = policy_env(v['policy_name'])
         uv_count, _ = count_unique_violations(v.get('violation_summary', ''))
         v['unique_violations'] = uv_count or None
         total_unique += uv_count
@@ -115,6 +143,13 @@ def get_conforma_report(
         groups[cat]['unique_violations'] += uv_count
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     enrich_with_coverage(violations, exceptions_by_policy)
+    for v in violations:
+        scenario = v.get('scenario', '')
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
+        cov_stage = (env_cov.get('stage') or {}).get('coverage')
+        cov_prod = (env_cov.get('prod') or {}).get('coverage')
+        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
     coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
     for v in violations:
         cov = v.get('exception_coverage')
@@ -142,8 +177,8 @@ def list_violation_rules(
     from api.validators import validate_application_name
     application = validate_application_name(application)
     if reporter_env or reporter_build_type:
-        from clients.conforma_reporter_client import fetch_reporter_rules
         from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_rules
         branch = app_to_reporter_branch(application)
         env = reporter_env or 'prod'
         build_type = reporter_build_type or 'latest'
@@ -181,9 +216,16 @@ def list_violation_rules(
 def get_violation(component: str, application: str, include_details: bool = True):
     """Full Conforma policy violation details."""
     from utils.conforma_utils import (
-        extract_policy_from_scenario, extract_violation_rules,
-        compute_violation_coverage, fetch_exceptions_by_policy,
-        lookup_exceptions, count_unique_violations,
+        compute_blocks,
+        compute_violation_coverage,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        lookup_exceptions,
+    )
+    from utils.conforma_utils import (
+        policy_env as _policy_env,
     )
     row = _conforma_repo().get_violation_details(component, application)
     if not row:
@@ -230,10 +272,19 @@ def get_violation(component: str, application: str, include_details: bool = True
         for r in uv_rules
     ]
 
+    p_env = _policy_env(policy_name)
+    blocks = compute_blocks(
+        scenario,
+        cov_fields.get('exception_coverage_stage'),
+        cov_fields.get('exception_coverage_prod'),
+    )
+
     return ConformaViolationDetails(
         component=row['component_name'],
         scenario=scenario,
         policy_name=policy_name,
+        policy_env=p_env,
+        blocks=blocks,
         violations_count=row['violations_count'],
         unique_violations=uv_count or None,
         violation_rules=vr_list or None,
@@ -247,4 +298,72 @@ def get_violation(component: str, application: str, include_details: bool = True
         konflux_url=konflux,
         first_detected_at=row.get('first_detected_at', datetime.utcnow()),
         **cov_fields,
+    )
+
+
+@router.get("/exceptions/lifecycle", response_model=ExceptionLifecycleSummary)
+def get_exception_lifecycle():
+    """Track EC policy exception lifecycle across all policies.
+
+    Returns all exceptions with their status: active, expiring_soon (<7 days),
+    or expired (past effectiveUntil date). Helps identify exceptions that should
+    be cleaned up (expired) or that need urgent root-cause fixes (expiring soon).
+    """
+    from utils.conforma_utils import fetch_exceptions_by_policy
+
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    if not exceptions_by_policy:
+        return ExceptionLifecycleSummary(
+            total_exceptions=0, permanent=0, active_temporary=0,
+            expiring_soon=0, expired=0, exceptions=[])
+
+    all_exceptions = []
+    perm_count = 0
+    active_temp = 0
+    expiring_count = 0
+    expired_count = 0
+
+    for policy_name, exc_list in exceptions_by_policy.items():
+        for exc in exc_list:
+            is_permanent = exc.get('permanent', False)
+            days_left = exc.get('days_left')
+
+            if is_permanent:
+                status = 'active'
+                perm_count += 1
+            elif days_left is not None and days_left < 0:
+                status = 'expired'
+                expired_count += 1
+            elif days_left is not None and days_left < 7:
+                status = 'expiring_soon'
+                expiring_count += 1
+                active_temp += 1
+            else:
+                status = 'active'
+                active_temp += 1
+
+            all_exceptions.append(ExceptionStatus(
+                rule=exc.get('value', ''),
+                policy=policy_name,
+                permanent=is_permanent,
+                effective_until=exc.get('effectiveUntil'),
+                days_left=days_left,
+                status=status,
+                reference=exc.get('reference'),
+                gitlab_link=exc.get('gitlab_link'),
+            ))
+
+    all_exceptions.sort(key=lambda e: (
+        e.status != 'expired',
+        e.status != 'expiring_soon',
+        e.days_left if e.days_left is not None else 9999,
+    ))
+
+    return ExceptionLifecycleSummary(
+        total_exceptions=len(all_exceptions),
+        permanent=perm_count,
+        active_temporary=active_temp,
+        expiring_soon=expiring_count,
+        expired=expired_count,
+        exceptions=all_exceptions,
     )

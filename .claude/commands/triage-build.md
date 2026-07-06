@@ -15,6 +15,27 @@ Use MCP tools (`mcp__ic__*`) for structured data, CLI (`ic`) as fallback. Works 
 
 The working directory is: .
 
+### Educational Mode
+
+When presenting findings, explain Konflux concepts in simple terms for engineers who may not be familiar with the platform. Use the Konflux docs MCP to look up and cite documentation links.
+
+**How to fetch docs:**
+1. `mcp__konflux-docs__list_doc_sources()` — get available doc URLs
+2. `mcp__konflux-docs__fetch_docs(url)` — fetch specific doc page
+
+**Key concepts to explain when they appear:**
+- **PipelineRun**: A Kubernetes resource representing a single build execution. Contains multiple TaskRuns (steps) that run sequentially or in parallel. Status can be Completed, Failed, or PipelineRunTimeout.
+- **TaskRun**: A single step within a PipelineRun (e.g., `clone`, `build-images`, `push`). When a build fails, the failed TaskRun tells you which step broke.
+- **Hermetic builds**: Konflux builds run without network access by default. All dependencies must be pre-fetched (prefetch step) before the build starts. This ensures reproducibility.
+- **Prefetch dependencies**: The `prefetch-dependencies` TaskRun resolves and downloads all dependencies (Go modules, pip packages, npm packages) before the hermetic build step runs. Failures here often mean a dependency can't be resolved.
+- **PipelineRunTimeout**: The build exceeded its time limit. The container image may be partially pushed to Quay, but source-build never completes — leading to guaranteed source_image.exists violations downstream.
+- **Component CR**: Defines what to build — the git repo, branch, Containerfile path, and build pipeline to use.
+
+Format explanations as:
+> **What is [concept]?** Brief explanation. [Learn more](doc-url)
+
+Fetch relevant Konflux documentation pages when explaining. Don't explain every concept every time — explain when a concept first appears or is central to the failure.
+
 ### Step 1: Check triage state and scan alerts
 
 **Using MCP tools (preferred):**
@@ -145,3 +166,4 @@ ic triage report 2>/dev/null
 - Logs are auto-filtered by error patterns — `--log` for full output
 - AI analysis in cluster mode: LLM local, results to cluster
 - ALWAYS track failures in `ic triage`
+- Use the Konflux docs MCP to explain concepts — your audience may not know Konflux

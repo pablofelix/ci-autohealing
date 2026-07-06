@@ -19,7 +19,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from openshift_auth import get_openshift_token, discover_openshift_api_url, create_authenticated_session
+from openshift_auth import create_authenticated_session, discover_openshift_api_url, get_openshift_token
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,20 @@ class TektonResultsClient:
         except requests.RequestException as e:
             logger.debug("Failed to fetch logs for %s: %s", record_name, e)
             return None
+
+    def get_taskrun_logs_by_name(self, taskrun_name):
+        """Fetch logs for a TaskRun by its metadata.name (not record name)."""
+        filter_expr = (
+            "data_type == 'tekton.dev/v1.TaskRun' && "
+            "data.metadata.name=='{}'".format(taskrun_name)
+        )
+        records = self._query_records(filter_expr, page_size=1)
+        if not records:
+            return None
+        record_name = records[0].get('name', '')
+        if record_name:
+            return self.get_taskrun_logs(record_name)
+        return None
 
     def find_failed_taskrun(self, pipelinerun_name):
         """Find the failed TaskRun in a PipelineRun and fetch its logs.

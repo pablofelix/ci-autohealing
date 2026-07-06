@@ -4,7 +4,7 @@ import logging
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from skills.models import ExecutionResult
 from skills.validator import SkillValidator, assess_risk, check_prerequisites, classify_risk
@@ -77,7 +77,8 @@ class SkillExecutor:
         self.triage_item_id = triage_item_id
 
     def _skill_dir(self):
-        return self.skill.path
+        from skills.models import resolve_working_dir
+        return resolve_working_dir(self.skill.path, self.skill.metadata.working_dir)
 
     def _skill_md_path(self):
         skill_md = os.path.join(self._skill_dir(), 'SKILL.md')
@@ -106,7 +107,7 @@ class SkillExecutor:
         return ExecutionResult(**kwargs)
 
     def execute(self):
-        started = datetime.now(timezone.utc).isoformat()
+        started = datetime.now(UTC).isoformat()
         risk = self.classify()
 
         prereqs = self.check_prerequisites()
