@@ -6,21 +6,27 @@ Each tool accepts an `application` parameter for multi-version support.
 
 import asyncio
 import json
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar
+from datetime import UTC, datetime
 from functools import wraps
+from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar
 
 from mcp_server import mcp
 from mcp_server.models import (
     AlertsSummary,
     AnalysisDetails,
     ApplicationInfo,
+    BlockersSummary,
+    BouncingIssuesSummary,
     BuildFailureDetails,
     ComponentHistoryResponse,
     ConformaViolationDetails,
     DashboardResponse,
+    ExceptionLifecycleSummary,
     FailureSummary,
+    FBCFragmentHistory,
+    FixPropagationSummary,
     HealthWarning,
+    JiraTokenHealth,
     SkillInfo,
     SkillPrerequisiteResult,
     SkillSourceInfo,
@@ -29,7 +35,6 @@ from mcp_server.models import (
     StatsResponse,
     TriageResponse,
 )
-
 from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, NAMESPACE
 
 DEFAULT_APPLICATION = APPLICATION_NAME
@@ -137,6 +142,8 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
     except Exception:
         pass
 
+    from api.routes.failures import _compute_age_signals
+
     build_failures = []
     for comp in triage.get('failing_components', []):
         component_name = comp['component']
@@ -144,38 +151,95 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
         if component_name in dep_updates:
             cause = 'dependency_update: {}'.format(dep_updates[component_name])
 
+        b_fs = comp.get('first_detected_at', datetime.utcnow())
+        b_ls = comp.get('last_updated_at', datetime.utcnow())
+        b_age, b_new, b_chg = _compute_age_signals(b_fs, b_ls)
         build_failures.append(FailureSummary(
             component=component_name,
             status=comp.get('status', 'Failed'),
             error_type=comp.get('error_type'),
-            first_seen=comp.get('first_detected_at', datetime.utcnow()),
-            last_seen=comp.get('last_updated_at', datetime.utcnow()),
+            first_seen=b_fs,
+            last_seen=b_ls,
             occurrence_count=comp.get('failure_count', 1),
             has_logs=comp.get('has_logs', False),
             has_context=comp.get('has_context', False),
             has_analysis=comp.get('ai_analyzed', False),
             possible_cause=cause,
+            age_hours=b_age,
+            is_new=b_new,
+            status_changed=b_chg,
         ))
 
+    from api.routes.failures import _detect_systemic_patterns
+    _detect_systemic_patterns(build_failures)
+
     conforma_violations = []
-    conforma_failing = _conforma_repo().find_unresolved_component_names(application)
-    for comp_name in sorted(conforma_failing):
-        details = _conforma_repo().get_violation_details(comp_name, application)
-        if details:
-            conforma_violations.append(FailureSummary(
-                component=comp_name,
-                status='Conforma Violation',
-                error_type=details.get('scenario'),
-                first_seen=details.get('first_detected_at', datetime.utcnow()),
-                last_seen=details.get('last_updated_at', datetime.utcnow()),
-                occurrence_count=1,
-                has_logs=details.get('violation_summary') is not None,
-                has_analysis=details.get('ai_analyzed', False),
-            ))
+    triage_jira = _triage_repo().build_jira_map(application)
+    from utils.conforma_utils import (
+        categorize_policy,
+        compute_exception_coverage_details,
+        count_unique_violations,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+    )
+    from utils.conforma_utils import (
+        policy_url as _policy_url,
+    )
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    summaries = _conforma_repo().get_violation_summaries(application)
+    for s in summaries:
+        comp_name = s['component_name']
+        scenario = s.get('scenario', '')
+        jira_key = s.get('jira_key') or triage_jira.get(comp_name)
+        rules = extract_violation_rules(s.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        uv_count, _ = count_unique_violations(s.get('violation_summary', ''))
+        c_fs = s.get('first_detected_at', datetime.utcnow())
+        c_ls = s.get('last_updated_at', datetime.utcnow())
+        c_age, c_new, c_chg = _compute_age_signals(c_fs, c_ls)
+        conforma_violations.append(FailureSummary(
+            component=comp_name,
+            status='Conforma Violation',
+            error_type=scenario,
+            first_seen=c_fs,
+            last_seen=c_ls,
+            occurrence_count=1,
+            age_hours=c_age,
+            is_new=c_new,
+            status_changed=c_chg,
+            has_logs=s.get('violation_summary') is not None,
+            has_analysis=s.get('ai_analyzed', False),
+            violations_count=s.get('violations_count', 0),
+            unique_violations=uv_count or None,
+            warnings_count=s.get('warnings_count', 0),
+            scenario=scenario,
+            category=categorize_policy(scenario),
+            policy_url=_policy_url(scenario),
+            jira_key=jira_key,
+            exception_coverage=cov['coverage'],
+            exception_coverage_stage=cov['stage'],
+            exception_coverage_prod=cov['prod'],
+            exception_env_tag=cov['env_tag'],
+            policy_url_stage=cov['policy_url_stage'],
+            policy_url_prod=cov['policy_url_prod'],
+            uncovered_rules_stage=cov['uncovered_rules_stage'],
+            uncovered_rules_prod=cov['uncovered_rules_prod'],
+        ))
 
     all_dates = ([f.last_seen for f in build_failures] +
                  [v.last_seen for v in conforma_violations])
     last_sync = max(all_dates) if all_dates else datetime.utcnow()
+
+    schedule = None
+    freeze_countdown = None
+    try:
+        from api.routes.failures import _compute_freeze_countdown
+        from api.routes.releases import get_schedule
+        schedule = get_schedule(application)
+        freeze_countdown = _compute_freeze_countdown(schedule)
+    except Exception:
+        pass
 
     return AlertsSummary(
         application=application,
@@ -183,7 +247,114 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
         conforma_violations=conforma_violations,
         total_count=len(build_failures) + len(conforma_violations),
         last_sync=last_sync,
+        release_schedule=schedule,
+        freeze_countdown=freeze_countdown,
     )
+
+
+@mcp.tool()
+@async_tool
+def check_jira_health() -> "JiraTokenHealth":
+    """Check if the Jira API token is valid and working.
+
+    Returns status (valid, expired, forbidden, unreachable, missing),
+    the authenticated user name, and a human-readable message.
+    Call this before relying on Jira data — an expired token silently
+    returns empty results (e.g., "0 blockers" when 50 exist).
+    """
+    from api.routes.failures import check_jira_health as _check
+    return _check()
+
+
+@mcp.tool()
+@async_tool
+def get_exception_lifecycle() -> "ExceptionLifecycleSummary":
+    """Track EC (Enterprise Contract) policy exception lifecycle.
+
+    Returns all exceptions with status: active, expiring_soon (<7 days), or
+    expired. Helps identify exceptions needing cleanup (expired) or urgent
+    root-cause fixes (expiring soon). Never default to creating new exceptions —
+    always fix the root cause first.
+    """
+    from api.routes.violations import get_exception_lifecycle as _get
+    return _get()
+
+
+@mcp.tool()
+@async_tool
+def get_fbc_history(
+    application: str = DEFAULT_APPLICATION,
+    limit: int = 20,
+) -> "FBCFragmentHistory":
+    """Track FBC (File-Based Catalog) fragment image SHAs over time.
+
+    Returns the build history for the FBC fragment component with image
+    digests. Helps trace which FBC SHA is current and map test runs to
+    specific builds — critical during RC testing when multiple SHAs may
+    be produced in a single day.
+
+    Args:
+        application: Which version to query.
+        limit: Max builds to return (default 20).
+    """
+    from api.routes.releases import get_fbc_history as _get
+    return _get(application, limit=limit)
+
+
+@mcp.tool()
+@async_tool
+def check_fix_propagation(
+    application: str = DEFAULT_APPLICATION,
+    days: int = 14,
+    target_branch: str = 'main',
+) -> "FixPropagationSummary":
+    """Check if resolved build failure fixes have propagated to the main branch.
+
+    Looks at recently resolved failures and verifies their fix commits exist
+    on the target branch. Flags fixes only on the release branch that haven't
+    been backported — a common source of regressions across releases.
+
+    Args:
+        application: Which version to query.
+        days: How many days back to check (default 14).
+        target_branch: Branch to verify fix exists on (default "main").
+    """
+    from api.routes.failures import check_fix_propagation as _check
+    return _check(application, days=days, target_branch=target_branch)
+
+
+@mcp.tool()
+@async_tool
+def list_blockers(application: str = DEFAULT_APPLICATION) -> "BlockersSummary":
+    """Get Jira blocker analysis: age, assignment, staleness signals.
+
+    Returns blockers with health signals: unassigned >24h, no updates >48h,
+    resolved-but-not-closed. Critical signals are highlighted for AI triage.
+
+    Args:
+        application: Which version to query. Use list_applications() to discover versions.
+    """
+    from api.routes.failures import list_blockers as _list_blockers
+    return _list_blockers(application)
+
+
+@mcp.tool()
+@async_tool
+def list_bouncing_issues(
+    application: str = DEFAULT_APPLICATION,
+    min_bounces: int = 2,
+) -> "BouncingIssuesSummary":
+    """Detect Jira issues that keep bouncing between teams without resolution.
+
+    Analyzes Jira changelog for component/assignee reassignments. Issues with
+    >= min_bounces changes are flagged — these need escalation or root cause triage.
+
+    Args:
+        application: Which version to query.
+        min_bounces: Minimum reassignment count to flag (default 2).
+    """
+    from api.routes.failures import list_bouncing_issues as _list_bouncing
+    return _list_bouncing(application, min_bounces=min_bounces)
 
 
 @mcp.tool()
@@ -250,17 +421,52 @@ def get_violation(
         application: Which version to query
         include_details: Include violation_details JSONB
     """
+    from utils.conforma_utils import (
+        compute_violation_coverage,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        lookup_exceptions,
+        policy_url,
+    )
     row = _conforma_repo().get_violation_details(component, application)
     if not row:
         return None
 
     konflux = _konflux_url(row.get('pipelinerun_name', ''))
     details = row.get('violation_details') if include_details else None
+    scenario = row['scenario']
+    policy_name = extract_policy_from_scenario(scenario)
+
+    cov_fields = {}
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    if exceptions_by_policy:
+        rules = extract_violation_rules(row.get('violation_summary', ''))
+        cov = compute_violation_coverage(
+            rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
+        if cov:
+            cov_fields = {
+                'exception_coverage': cov['coverage'],
+                'covered_rules': cov['covered_rules'],
+                'uncovered_rules': cov['uncovered_rules'],
+                'matching_exceptions': cov['matching_exceptions'],
+            }
+
+    uv_count, uv_rules = count_unique_violations(row.get('violation_summary', ''))
+    vr_list = [
+        r['rule'] + (':' + r['detail'] if r['detail'] else '')
+        for r in uv_rules
+    ]
 
     return ConformaViolationDetails(
         component=row['component_name'],
-        scenario=row['scenario'],
+        scenario=scenario,
+        policy_name=policy_name,
+        policy_url=policy_url(scenario),
         violations_count=row['violations_count'],
+        unique_violations=uv_count or None,
+        violation_rules=vr_list or None,
         warnings_count=row['warnings_count'],
         successes_count=row['successes_count'],
         violation_summary=row.get('violation_summary', ''),
@@ -270,6 +476,7 @@ def get_violation(
         snapshot_name=row.get('snapshot_name'),
         konflux_url=konflux,
         first_detected_at=row.get('first_detected_at', datetime.utcnow()),
+        **cov_fields,
     )
 
 
@@ -295,10 +502,46 @@ def get_analysis(
     return _row_to_analysis(row)
 
 
+def _extract_from_analysis_json(analysis_json):
+    """Extract evidence_references, source_transparency, and fix_action_type from analysis_json JSONB."""
+    evidence = []
+    transparency = None
+    fix_action_type = None
+    if not analysis_json:
+        return evidence, transparency, fix_action_type
+    try:
+        data = analysis_json if isinstance(analysis_json, (list, dict)) else json.loads(analysis_json)
+        if isinstance(data, dict) and 'tool_calls' in data:
+            items = data['tool_calls']
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            inp = item.get('input', item)
+            for ref in inp.get('evidence_references', []):
+                if isinstance(ref, dict):
+                    evidence.append(ref)
+            st = inp.get('source_transparency')
+            if isinstance(st, dict):
+                transparency = st
+            fat = inp.get('fix_action_type')
+            if fat and isinstance(fat, str):
+                fix_action_type = fat
+            if evidence or transparency or fix_action_type:
+                break
+    except Exception:
+        pass
+    return evidence, transparency, fix_action_type
+
+
 def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:
     files = row.get('recommended_files') or []
     if isinstance(files, str):
         files = [f.strip() for f in files.split(",") if f.strip()]
+    evidence, transparency, fix_action_type = _extract_from_analysis_json(row.get('analysis_json'))
     return AnalysisDetails(
         type=row['analysis_type'],
         component=row['component_name'],
@@ -308,12 +551,15 @@ def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:
         confidence_score=float(row.get('confidence_score') or 0),
         recommended_fix=row.get('recommended_fix', ''),
         recommended_files=files,
+        fix_action_type=fix_action_type,
         can_auto_fix=bool(row.get('can_auto_fix')),
         requires_human_review=bool(row.get('requires_human_review')),
         analyzed_at=row.get('analyzed_at', datetime.utcnow()),
         langfuse_trace_url=row.get('langfuse_trace_url'),
         tokens_used=row.get('tokens_used') or 0,
         cost_usd=float(row.get('cost_usd') or 0),
+        evidence_references=evidence,
+        source_transparency=transparency,
     )
 
 
@@ -643,6 +889,7 @@ def resolve_triage_item(
     item_id: int,
     resolution: str = '',
     pr_url: str = '',
+    verdict: str = '',
     application: str = DEFAULT_APPLICATION,
 ) -> Dict[str, Any]:
     """Resolve a triage item (mark investigation as complete).
@@ -651,34 +898,196 @@ def resolve_triage_item(
         item_id: Triage item ID to resolve
         resolution: Resolution description (e.g. "PR merged", "config fix applied")
         pr_url: URL of the fix PR (optional)
+        verdict: AI diagnosis accuracy — correct, partial, or incorrect (optional)
         application: Application name
     """
     repo = _triage_repo()
     repo.resolve_item(item_id, resolution=resolution, pr_url=pr_url)
+
+    if verdict and verdict in ('correct', 'partial', 'incorrect'):
+        item = repo.get_by_id(item_id)
+        if item and item.get('components'):
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            ai_repo = AIAnalysisRepository(_db_connection())
+            ai_repo.record_verdict(item['components'][0], application, verdict, verdict_by='mcp')
+
     return {"action": "resolved", "item_id": item_id, "resolution": resolution}
 
 
 @mcp.tool()
-def get_conforma_categories(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+def get_conforma_categories(
+    application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """Get violation categories with counts across all failing components.
 
     Returns a summary of which Conforma policy rules are failing and how many
-    components are affected by each.
+    components are affected by each. Includes high-level grouping by artifact
+    type (FBC, Components, Charts) matching the conforma-reporter Slack format.
+
+    Pass reporter_env/reporter_build_type to fetch from the conforma-reporter
+    instead of cluster data.
+
+    Args:
+        application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter
+        reporter_build_type: 'latest', 'nightly', or 'release_day'
     """
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        data = fetch_reporter_violations(branch, env=env, build_type=build_type)
+        groups = {}
+        for v in data:
+            cat = 'Components'
+            if cat not in groups:
+                groups[cat] = {'components': 0, 'violations': 0}
+            groups[cat]['components'] += 1
+            groups[cat]['violations'] += v.get('unique_violations', 0)
+        for cat in ('FBC', 'Components', 'Charts'):
+            groups.setdefault(cat, {'components': 0, 'violations': 0})
+        return {
+            'application': application,
+            'source': '{}/{}'.format(env, build_type),
+            'groups': groups,
+            'categories': {},
+        }
     from repositories.conforma_repository import ConformaRepository
+    from utils.conforma_utils import (
+        categorize_policy,
+        compute_violation_coverage,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        lookup_exceptions,
+    )
     repo = ConformaRepository(_db_connection())
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     comps = repo.find_unresolved_component_names(application)
     categories = {}
+    groups = {}
     for comp in comps:
         details = repo.get_violation_details(comp, application)
         if details:
             scenario = details.get('scenario', 'unknown')
             if scenario not in categories:
-                categories[scenario] = {'count': 0, 'components': [], 'total_violations': 0}
+                categories[scenario] = {
+                    'count': 0,
+                    'components': [],
+                    'total_violations': 0,
+                    'total_image_violations': 0,
+                    'policy_name': extract_policy_from_scenario(scenario),
+                    'category': categorize_policy(scenario),
+                    'covered_count': 0,
+                    'uncovered_count': 0,
+                }
             categories[scenario]['count'] += 1
             categories[scenario]['components'].append(comp)
-            categories[scenario]['total_violations'] += details.get('violations_count', 0)
-    return {"application": application, "categories": categories}
+            uv_count, _ = count_unique_violations(details.get('violation_summary', ''))
+            categories[scenario]['total_violations'] += uv_count
+            categories[scenario]['total_image_violations'] += details.get('violations_count', 0)
+            if exceptions_by_policy:
+                policy_name = categories[scenario]['policy_name']
+                rules = extract_violation_rules(details.get('violation_summary', ''))
+                cov = compute_violation_coverage(
+                    rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
+                if cov and cov['coverage'] == 'fully_covered':
+                    categories[scenario]['covered_count'] += 1
+                elif cov:
+                    categories[scenario]['uncovered_count'] += 1
+            cat = categorize_policy(scenario)
+            if cat not in groups:
+                groups[cat] = {
+                    'components': 0,
+                    'unique_violations': 0,
+                    'image_violations': 0,
+                }
+            groups[cat]['components'] += 1
+            groups[cat]['unique_violations'] += uv_count
+            groups[cat]['image_violations'] += details.get('violations_count', 0)
+    for cat in ('FBC', 'Components', 'Charts'):
+        groups.setdefault(cat, {
+            'components': 0,
+            'unique_violations': 0,
+            'image_violations': 0,
+        })
+    return {
+        "application": application,
+        "groups": groups,
+        "categories": categories,
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_conforma_rules(
+    application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Get violations grouped by rule with affected components and solutions.
+
+    Each rule entry includes the rule code, title, solution text (when available
+    from conforma-reporter), the list of affected component names, and a count.
+    Sorted by component count descending.
+
+    Pass reporter_env/reporter_build_type to fetch from conforma-reporter.
+
+    Args:
+        application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter
+        reporter_build_type: 'latest', 'nightly', or 'release_day'
+    """
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_rules
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        rules = fetch_reporter_rules(branch, env=env, build_type=build_type)
+        return {
+            'application': application,
+            'source': '{}/{}'.format(env, build_type),
+            'total_rules': len(rules),
+            'rules': rules,
+        }
+    from repositories.conforma_repository import ConformaRepository
+    from utils.conforma_utils import count_unique_violations
+    repo = ConformaRepository(_db_connection())
+    violations = repo.get_violation_summaries(application)
+    rules_map = {}
+    for v in violations:
+        comp = v.get('component_name', '')
+        _, uv_rules = count_unique_violations(v.get('violation_summary', ''))
+        for r in uv_rules:
+            rule = r['rule']
+            if rule not in rules_map:
+                rules_map[rule] = {
+                    'rule': rule,
+                    'title': '',
+                    'solution': '',
+                    'components': [],
+                    'violation_rows': 0,
+                }
+            if comp not in rules_map[rule]['components']:
+                rules_map[rule]['components'].append(comp)
+            rules_map[rule]['violation_rows'] += 1
+    result = []
+    for entry in rules_map.values():
+        entry['components'] = sorted(entry['components'])
+        entry['count'] = len(entry['components'])
+        result.append(entry)
+    result.sort(key=lambda r: (-r['count'], r['rule']))
+    return {
+        'application': application,
+        'total_rules': len(result),
+        'rules': result,
+    }
 
 
 @mcp.tool()
@@ -716,8 +1125,9 @@ def get_component_prs(component: str, state: str = "open", limit: int = 10) -> D
         limit: Maximum PRs to return (default: 10)
     """
     import os
-    from clients.kubernetes import KubernetesClient
+
     from clients.github_client import GitHubClient, parse_github_repo
+    from clients.kubernetes import KubernetesClient
     from openshift_auth import _ensure_k8s_config
     _ensure_k8s_config()
     kc = KubernetesClient(namespace=NAMESPACE)
@@ -810,8 +1220,8 @@ def get_health(application: str = DEFAULT_APPLICATION) -> List[Dict[str, Any]]:
     Args:
         application: Which version to query
     """
-    from repositories.repository_factory import get_pool
     from proactive.health_monitor import HealthMonitor
+    from repositories.repository_factory import get_pool
     monitor = HealthMonitor(get_pool())
     summary = monitor.get_component_health_summary()
     return summary or []
@@ -1007,8 +1417,8 @@ def get_health_warnings(application: str = DEFAULT_APPLICATION) -> List[HealthWa
     Args:
         application: Which version to query
     """
-    from repositories.repository_factory import get_pool
     from proactive.health_monitor import HealthMonitor
+    from repositories.repository_factory import get_pool
     monitor = HealthMonitor(get_pool())
     checks = monitor.run_checks()
     warnings = []
@@ -1097,22 +1507,88 @@ def get_fix_history(days: int = 30) -> Dict[str, Any]:
 @async_tool
 def get_conforma_report(
     application: str = DEFAULT_APPLICATION,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get Conforma violations report for an application.
 
+    By default returns cluster data. Pass reporter_env/reporter_build_type to
+    fetch from the conforma-reporter (GitHub) instead — useful for stage policy
+    or nightly build violations that the cluster doesn't run.
+
     Args:
         application: Which version to query
+        reporter_env: 'stage' or 'prod' — fetch from reporter instead of cluster
+        reporter_build_type: 'latest', 'nightly', or 'release_day' — build type filter
     """
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        violations = fetch_reporter_violations(branch, env=env, build_type=build_type)
+        source = '{}/{}'.format(env, build_type)
+        return {
+            'application': application,
+            'source': source,
+            'total_violations': len(violations),
+            'violations': violations,
+        }
+    from utils.conforma_utils import (
+        categorize_policy,
+        count_unique_violations,
+        enrich_with_coverage,
+        extract_policy_from_scenario,
+        fetch_exceptions_by_policy,
+        policy_url,
+    )
     conforma_repo = _conforma_repo()
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     failing = conforma_repo.find_unresolved_component_names(application)
     violations = []
+    total_unique = 0
+    groups = {}
     for comp_name in sorted(failing):
         details = conforma_repo.get_violation_details(comp_name, application)
         if details:
+            scenario = details.get('scenario', '')
+            details['policy_name'] = extract_policy_from_scenario(scenario)
+            details['policy_url'] = policy_url(scenario)
+            details['category'] = categorize_policy(scenario)
+            uv_count, uv_rules = count_unique_violations(
+                details.get('violation_summary', ''))
+            details['unique_violations'] = uv_count
+            details['violation_rules'] = [
+                r['rule'] + (':' + r['detail'] if r['detail'] else '')
+                for r in uv_rules
+            ]
+            total_unique += uv_count
+            cat = details['category']
+            if cat not in groups:
+                groups[cat] = {'components': 0, 'unique_violations': 0}
+            groups[cat]['components'] += 1
+            groups[cat]['unique_violations'] += uv_count
             violations.append(details)
+    enrich_with_coverage(violations, exceptions_by_policy)
+    by_policy = {}
+    coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
+    for v in violations:
+        pn = v.get('policy_name', 'unknown')
+        by_policy.setdefault(pn, 0)
+        by_policy[pn] += 1
+        cov = v.get('exception_coverage')
+        if cov in coverage_summary:
+            coverage_summary[cov] += 1
+    for cat in ('FBC', 'Components', 'Charts'):
+        groups.setdefault(cat, {'components': 0, 'unique_violations': 0})
     return {
         'application': application,
         'total_violations': len(violations),
+        'total_unique_violations': total_unique,
+        'groups': groups,
+        'violations_by_policy': by_policy,
+        'coverage_summary': coverage_summary if exceptions_by_policy else None,
         'violations': violations,
     }
 
@@ -1122,8 +1598,8 @@ def get_conforma_report(
 # ---------------------------------------------------------------------------
 
 def _db_connection():
-    from repositories.connection import DatabaseConnection
     from config import CollectorConfig
+    from repositories.connection import DatabaseConnection
     cfg = CollectorConfig.from_env()
     return DatabaseConnection(cfg.db)
 
@@ -1192,15 +1668,24 @@ def get_active_freeze() -> Optional[Dict[str, Any]]:
 @async_tool
 def get_release_readiness(
     application: str = DEFAULT_APPLICATION,
+    full: bool = False,
 ) -> Dict[str, Any]:
-    """Get release readiness assessment: build health, conforma, freeze status.
+    """Pre-release readiness checklist with infrastructure health checks.
 
-    Combines build failures, conforma violations, and freeze calendar
-    into a single readiness verdict (READY / AT_RISK / NOT_READY).
+    Returns a structured verdict (READY / AT_RISK / NOT_READY) with:
+    - Core checks: build failures, conforma violations, freeze status
+    - Infrastructure checks: FBC health, PCC cache, GHA nightly,
+      stale components, snapshot freshness, artifact health
+
+    Each check returns name, status (PASS/FAIL/WARN/SKIP), detail, and fix.
+    FAIL = blocker, WARN = risk, PASS = ok, SKIP = inconclusive.
 
     Args:
         application: Which version to query
+        full: Include slow checks (artifact health for all ~100 components, ~60s)
     """
+    from api.routes.releases import _run_readiness_checks
+
     build_repo = _build_repo()
     conforma_repo = _conforma_repo()
 
@@ -1222,6 +1707,15 @@ def get_release_readiness(
     if fail_count > 0:
         risks.append(f"{fail_count} component(s) with failing builds")
 
+    schedule = get_release_schedule.__wrapped__(application)
+
+    checks = _run_readiness_checks(application, full=full)
+    for check in checks:
+        if check['status'] == 'FAIL':
+            blockers.append(f"{check['name']}: {check['detail']}")
+        elif check['status'] == 'WARN':
+            risks.append(f"{check['name']}: {check['detail']}")
+
     if blockers:
         verdict = "NOT_READY"
     elif risks:
@@ -1229,17 +1723,18 @@ def get_release_readiness(
     else:
         verdict = "READY"
 
-    schedule = get_release_schedule.__wrapped__(application)
-
     return {
         'application': application,
         'verdict': verdict,
         'build_failures': fail_count,
         'conforma_violations': conforma_count,
+        'failing_components': sorted(failing),
+        'conforma_components': sorted(unresolved_conforma),
         'freeze': freeze,
         'blockers': blockers,
         'risks': risks,
         'schedule': schedule,
+        'checks': checks,
     }
 
 
@@ -1248,10 +1743,11 @@ def get_release_readiness(
 def get_release_schedule(
     application: str = DEFAULT_APPLICATION,
 ) -> Optional[Dict[str, Any]]:
-    """Get release milestone dates from Smartsheet cache.
+    """Get release milestone dates from Product Pages cache.
 
     Returns all milestone dates: planning freeze, feature freeze, code freeze,
     initial RC, release window, release date, and next release version.
+    Data sourced from Product Pages (Red Hat AI product, entity rhai-3.5).
 
     Args:
         application: Which version to query
@@ -1282,6 +1778,81 @@ def get_release_schedule(
         return result
 
 
+@mcp.tool()
+def get_onboarding_status(
+    application: str = DEFAULT_APPLICATION,
+) -> Optional[Dict[str, Any]]:
+    """Get onboarding status for all components in an application.
+
+    Returns per-component onboarding checks: repository, branch, container
+    image, PaC webhook, builds, nudges. Each component gets a score (0-100)
+    and overall status (complete/partial/incomplete). Includes Jira ticket
+    keys when available from triage tracking.
+
+    Use this to check which components are fully onboarded and which need work.
+
+    Args:
+        application: Application to check (e.g. rhoai-v3-5-ea-2)
+    """
+    from api.routes.onboarding import get_onboarding_status as _get
+    return _get(application)
+
+
+@mcp.tool()
+def get_onboarding_describe(
+    application: str = DEFAULT_APPLICATION,
+    component: str = "",
+    diff: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Describe step-by-step onboarding progress for a specific component.
+
+    Shows each onboarding step with status (done/pending/blocked/failed),
+    dates, build history, and nudge PRs. Detects whether the component is
+    ODH (upstream) or RHOAI (downstream) and uses the appropriate checklist.
+
+    When JIRA_TOKEN is set, also shows:
+    - Linked Jira tickets (RHOAI and ODH onboarding)
+    - Automation step progress from Jira labels
+    - PR/MR links extracted from bot comments
+    - Heuristic analysis with fix suggestions (component + automation)
+
+    Use diff=True to see expected vs actual for every step.
+
+    Args:
+        application: Application name
+        component: Component name to describe
+        diff: If True, include expected vs actual comparison for all steps
+    """
+    if not component:
+        return {'error': 'component parameter is required'}
+    from api.routes.onboarding import get_component_onboarding as _get
+    return _get(application, component, diff=diff)
+
+
+@mcp.tool()
+def analyze_onboarding(
+    application: str = DEFAULT_APPLICATION,
+    component: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Run AI analysis on a component's onboarding progress to diagnose blockers.
+
+    Fetches the full onboarding report (Konflux steps, automation steps, bot
+    error history, PR links, heuristic analysis) and feeds it to the LLM for
+    deep diagnosis. Returns root cause, category, fix recommendation, and
+    whether it can be auto-fixed.
+
+    Requires LLM_PROVIDER + credentials to be configured.
+
+    Args:
+        application: Application name
+        component: Component name to analyze
+    """
+    if not component:
+        return {'error': 'component parameter is required'}
+    from api.routes.onboarding import analyze_component_onboarding as _analyze
+    return _analyze(application, component)
+
+
 # ---------------------------------------------------------------------------
 # Export tools (formatting logic, backed by query tools above)
 # ---------------------------------------------------------------------------
@@ -1292,10 +1863,13 @@ def export_jira(
     component: str,
     application: str = DEFAULT_APPLICATION,
 ) -> str:
-    """Export failure or violation as Jira ticket markup.
+    """Export failure, violation, or release analysis as Jira ticket markup.
+
+    For releases, pass the release name as the component argument
+    (e.g., rhoai-v3-5-ea-2-stage-1783018561).
 
     Args:
-        component: Component name
+        component: Component name or release name
         application: Which version to query
     """
     failure = _build_repo().get_failure_details(component, application)
@@ -1307,6 +1881,10 @@ def export_jira(
     if violation:
         analysis = _ai_repo().get_analysis_by_component(component, application, 'conforma')
         return _format_conforma_jira(violation, analysis)
+
+    release_analysis = _ai_repo().get_analysis_for_release(component)
+    if release_analysis:
+        return _format_release_jira(component, release_analysis)
 
     return f"No unresolved failures found for component: {component} in {application}"
 
@@ -1354,7 +1932,12 @@ def export_markdown(
     if violation:
         lines = [f"## Conforma Violation: {violation['component_name']}"]
         lines.append(f"\n**Scenario:** {violation['scenario']}")
-        lines.append(f"**Violations:** {violation['violations_count']} violations, {violation['warnings_count']} warnings")
+        from utils.conforma_utils import count_unique_violations as _cuv
+        _uvc, _uvr = _cuv(violation.get('violation_summary', ''))
+        if _uvc:
+            lines.append(f"**Violations:** {_uvc} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings")
+        else:
+            lines.append(f"**Violations:** {violation['violations_count']} violations, {violation['warnings_count']} warnings")
         lines.append(f"**First Seen:** {violation.get('first_detected_at')}")
         if ai:
             lines.append(f"\n### AI Analysis ({int(ai.confidence_score * 100)}% confidence)")
@@ -1440,11 +2023,11 @@ def export_slack(
 
         first_detected = failure.get('first_detected_at')
         if first_detected:
-            from datetime import datetime, timezone
+            from datetime import datetime
             first = first_detected
             if hasattr(first, 'tzinfo') and (first.tzinfo is None):
-                first = first.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
+                first = first.replace(tzinfo=UTC)
+            now = datetime.now(UTC)
             days = (now - first).days
             if days == 0:
                 text += "Failing since: today\n"
@@ -1457,6 +2040,7 @@ def export_slack(
         if failure.get('repository_url'):
             try:
                 import os
+
                 from clients.github_client import GitHubClient, parse_github_repo
                 parsed = parse_github_repo(failure['repository_url'])
                 token = os.environ.get('GITHUB_TOKEN', '')
@@ -1496,7 +2080,12 @@ def export_slack(
         konflux = _konflux_url(violation.get('pipelinerun_name', ''))
         text = f":warning: *Conforma Violation: {violation['component_name']}*\n"
         text += f"Scenario: {violation['scenario']}\n"
-        text += f"Violations: {violation['violations_count']} | Warnings: {violation['warnings_count']}\n"
+        from utils.conforma_utils import count_unique_violations as _cuv2
+        _uvc2, _ = _cuv2(violation.get('violation_summary', ''))
+        if _uvc2:
+            text += f"Violations: {_uvc2} unique ({violation['violations_count']} per-image) | Warnings: {violation['warnings_count']}\n"
+        else:
+            text += f"Violations: {violation['violations_count']} | Warnings: {violation['warnings_count']}\n"
         if ai:
             text += f"\n:robot_face: *AI Analysis* ({int(ai.confidence_score * 100)}% confidence)\n"
             text += f"Category: `{ai.failure_category}`\n"
@@ -1512,27 +2101,100 @@ def export_slack(
 def lookup_image(image_ref: str) -> Dict[str, Any]:
     """Given a quay.io image URL or sha256 digest, find which component produced it.
 
+    Searches build records (DB), cluster components, and Quay registry manifests.
+    For per-architecture SHA digests from EC violations, resolves back to the
+    component via manifest list inspection.
+
     Args:
         image_ref: Image URL, sha256 digest, or partial digest
     """
     db_matches = _build_repo().find_by_image(image_ref)
 
     cluster_matches = []
+    all_comps = []
+    url_component = None
     try:
         from clients.kubernetes import KubernetesClient
         kc = KubernetesClient(namespace=NAMESPACE)
         all_comps = kc.list_components()
         term = image_ref.lower()
         cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+
+        if not cluster_matches and '/' in image_ref:
+            path = image_ref.split('/')[-1].split('@')[0].split(':')[0]
+            if path:
+                url_component = path
+                cluster_matches = [c for c in all_comps if c.get('name', '') == path]
+                if not cluster_matches:
+                    import re
+                    core = re.sub(r'-(rhel[0-9]+|v[0-9]+-[0-9]+-.*|ea-[0-9]+.*)$', '', path)
+                    if core and core != path:
+                        cluster_matches = [c for c in all_comps
+                                           if c.get('name', '').startswith(core)]
     except Exception:
         pass
 
-    return {
+    quay_match = None
+    if not db_matches and not cluster_matches:
+        try:
+            from clients.registry_client import RegistryClient
+            rc = RegistryClient()
+            target_digest = image_ref.strip()
+            if not target_digest.startswith('sha256:') and '@sha256:' in image_ref:
+                target_digest = image_ref.split('@')[-1]
+
+            if target_digest.startswith('sha256:') and len(target_digest) >= 20:
+                if '/' in image_ref and '@' in image_ref:
+                    registry, repository, _ = rc.parse_image_ref(image_ref)
+                    result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+                    if result:
+                        comp_name = repository.rsplit('/', 1)[-1] if '/' in repository else repository
+                        result['component'] = comp_name
+                        quay_match = result
+                if not quay_match:
+                    for comp in all_comps[:20]:
+                        ci = comp.get('container_image', '')
+                        if not ci:
+                            continue
+                        registry, repository, _ = rc.parse_image_ref(ci)
+                        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+                        if result:
+                            result['component'] = comp.get('name', '')
+                            quay_match = result
+                            break
+        except Exception:
+            pass
+
+    total = len(db_matches) + len(cluster_matches) + (1 if quay_match else 0)
+    result = {
         'query': image_ref,
         'db_matches': db_matches,
         'cluster_matches': cluster_matches,
-        'total_matches': len(db_matches) + len(cluster_matches),
+        'total_matches': total,
     }
+    if url_component:
+        result['url_component'] = url_component
+    if quay_match:
+        result['quay_match'] = quay_match
+    return result
+
+
+@mcp.tool()
+@async_tool
+def get_snapshot_freshness(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Check snapshot images against latest builds to detect stale/failed images.
+
+    For each component in the latest Snapshot, checks whether its image matches
+    the most recent build. Flags components where the latest build failed (snapshot
+    has a pre-failure image) or a newer successful build exists. Use this to diagnose
+    verify-conforma failures caused by stale snapshot images.
+
+    Args:
+        application: Which version to query
+    """
+    from proactive.health_monitor import HealthMonitor
+    monitor = HealthMonitor(db=None)
+    return monitor.check_snapshot_freshness(application)
 
 
 @mcp.tool()
@@ -1562,9 +2224,9 @@ def get_nightly_status(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]
     Args:
         application: Which version to query
     """
+    from config import CollectorConfig
     from proactive.health_monitor import HealthMonitor
     from repositories.connection import DatabaseConnection
-    from config import CollectorConfig
 
     cfg = CollectorConfig.from_env()
     db = DatabaseConnection(cfg.db)
@@ -1704,6 +2366,7 @@ def list_skill_sources() -> List[SkillSourceInfo]:
             name=src.name,
             url=src.url,
             commit=src.commit or None,
+            branch=src.branch,
             skill_count=source_counts.get(src.name, 0),
         )
         for src in sources
@@ -1924,7 +2587,12 @@ def _format_conforma_jira(violation: Dict[str, Any], analysis: Optional[Dict[str
     lines.append(f"|Component|{comp}|")
     lines.append("|Status|Policy Violation|")
     lines.append(f"|Scenario|{violation['scenario']}|")
-    lines.append(f"|Violations|{violation['violations_count']} violations, {violation['warnings_count']} warnings|")
+    from utils.conforma_utils import count_unique_violations as _cuv3
+    _uvc3, _ = _cuv3(violation.get('violation_summary', ''))
+    if _uvc3:
+        lines.append(f"|Violations|{_uvc3} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings|")
+    else:
+        lines.append(f"|Violations|{violation['violations_count']} violations, {violation['warnings_count']} warnings|")
     lines.append(f"|PipelineRun|[{pr_name}|{konflux}]|")
     if violation.get('snapshot_name'):
         lines.append(f"|Snapshot|{violation['snapshot_name']}|")
@@ -1960,3 +2628,454 @@ def _format_conforma_jira(violation: Dict[str, Any], analysis: Optional[Dict[str
         lines.append(f"* [Analysis Trace|{ai.langfuse_trace_url}]")
 
     return "\n".join(lines)
+
+
+def _format_release_jira(release_name: str, analysis: Dict[str, Any]) -> str:
+    """Format a release AI analysis as Jira ticket markup."""
+    evidence, transparency, fix_action_type = _extract_from_analysis_json(
+        analysis.get('analysis_json'))
+
+    confidence = int(float(analysis.get('confidence_score', 0)) * 100)
+    root_cause = analysis.get('root_cause', '')
+    recommended_fix = analysis.get('recommended_fix', '')
+    category = analysis.get('failure_category', '')
+    can_auto_fix = analysis.get('can_auto_fix', False)
+    requires_review = analysis.get('requires_human_review', True)
+    files = analysis.get('recommended_files') or []
+    if isinstance(files, str):
+        files = [f.strip() for f in files.split(",") if f.strip()]
+
+    # Extract affected_images and owner_team from analysis_json
+    affected_images = []
+    owner_team = ''
+    aj = analysis.get('analysis_json')
+    if aj:
+        try:
+            data = aj if isinstance(aj, (list, dict)) else json.loads(aj)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                inp = item.get('input', item)
+                if inp.get('affected_images'):
+                    affected_images = inp['affected_images']
+                if inp.get('owner_team'):
+                    owner_team = inp['owner_team']
+                if affected_images or owner_team:
+                    break
+        except Exception:
+            pass
+
+    lines = [f"h2. Release Failure: {release_name}", ""]
+
+    lines.append("||Field||Value||")
+    lines.append(f"|Release|{release_name}|")
+    lines.append(f"|Category|{category}|")
+    if fix_action_type:
+        lines.append(f"|Fix Action|{fix_action_type}|")
+    if owner_team:
+        lines.append(f"|Owner Team|{owner_team}|")
+    lines.append(f"|AI Confidence|{confidence}%|")
+    lines.append(f"|Can Auto-Fix|{'Yes' if can_auto_fix else 'No'}|")
+    lines.append(f"|Requires Review|{'Yes' if requires_review else 'No'}|")
+    lines.append("")
+
+    lines.append("h3. Root Cause")
+    lines.append("")
+    lines.append(root_cause)
+    lines.append("")
+
+    lines.append("h3. Recommended Fix")
+    lines.append("")
+    lines.append(recommended_fix)
+    lines.append("")
+
+    if files:
+        lines.append(f"*Files to modify:* {', '.join(files)}")
+        lines.append("")
+
+    if affected_images:
+        lines.append("h3. Affected Images")
+        lines.append("")
+        lines.append("||Image Reference||")
+        for img in affected_images[:20]:
+            lines.append(f"|{img}|")
+        lines.append("")
+
+    if evidence:
+        lines.append("h3. Evidence")
+        lines.append("")
+        for ref in evidence:
+            ref_type = ref.get('type', '')
+            url = ref.get('url', '')
+            desc = ref.get('description', '')
+            if url:
+                lines.append(f"* \\[{ref_type}\\] [{desc}|{url}]")
+            else:
+                lines.append(f"* \\[{ref_type}\\] {desc}")
+        lines.append("")
+
+    if transparency:
+        consulted = transparency.get('sources_consulted', [])
+        unavailable = transparency.get('sources_unavailable', [])
+        limitations = transparency.get('limitations', [])
+        if consulted or unavailable or limitations:
+            lines.append("h3. Analysis Transparency")
+            lines.append("")
+            if consulted:
+                lines.append(f"*Sources used:* {', '.join(consulted)}")
+            if unavailable:
+                lines.append(f"*Sources unavailable:* {', '.join(unavailable)}")
+            if limitations:
+                lines.append(f"*Limitations:* {', '.join(limitations)}")
+            lines.append("")
+
+    lines.append("h3. Acceptance Criteria")
+    lines.append("")
+    if fix_action_type == 'rebuild':
+        lines.append("# Component is rebuilt successfully (new PipelineRun completes)")
+        lines.append("# Source container image exists for the new build")
+        lines.append("# SHA propagates through nudging chain (operator-nudging → bundle → FBC)")
+        lines.append("# New release passes verify-conforma")
+    elif fix_action_type == 'file_change':
+        lines.append("# Fix PR is merged to the correct branch")
+        lines.append("# New build completes successfully with the fix")
+        lines.append("# New release passes verify-conforma")
+    else:
+        lines.append("# Root cause is addressed")
+        lines.append("# New release passes verify-conforma")
+        lines.append("# Fix is verified to prevent recurrence")
+    lines.append("")
+
+    langfuse_id = analysis.get('langfuse_trace_id')
+    if langfuse_id:
+        lines.append(f"_AI analysis trace: {langfuse_id}_")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_ai_quality_metrics(
+    application: str = DEFAULT_APPLICATION,
+    days: int = 30,
+) -> Dict[str, Any]:
+    """AI analysis quality metrics: accuracy from human verdicts and auto-correlation.
+
+    Returns verdict counts (correct/partial/incorrect), accuracy rate,
+    average confidence for correct vs incorrect diagnoses, and breakdown
+    by failure category.
+
+    Args:
+        application: Application name
+        days: Number of days to look back (default 30)
+    """
+    from repositories.ai_analysis_repository import AIAnalysisRepository
+    repo = AIAnalysisRepository(_db_connection())
+    return repo.get_quality_metrics(application=application, days=days)
+
+
+@mcp.tool()
+@async_tool
+def get_ec_policy_summary(
+    application: str = DEFAULT_APPLICATION,
+    name_filter: str = "rhoai",
+) -> Dict[str, Any]:
+    """EC policy summary: active exceptions, expiring soon, and stage-vs-prod gap.
+
+    Cross-references all EnterpriseContractPolicy CRDs to surface:
+    - Active and expired exceptions
+    - Exceptions expiring within 30 days
+    - Policy gap (rules excepted in stage but not prod)
+
+    Args:
+        application: Application name (used for policy-gap filtering)
+        name_filter: Filter policies by name substring (default: rhoai)
+    """
+    import os
+
+    from clients.konflux_client import KonfluxClient
+
+    ns = NAMESPACE
+    releng_ns = os.environ.get('RELENG_NAMESPACE', '')
+
+    client = KonfluxClient(namespace=ns)
+
+    policies = client.get_ec_policies(name_filter=name_filter)
+    all_exceptions = []
+    for p in policies:
+        all_exceptions.extend(client.extract_exceptions(p))
+
+    active = [e for e in all_exceptions if e['days_left'] is None or e['days_left'] >= 0]
+    expired = [e for e in all_exceptions if e['days_left'] is not None and e['days_left'] < 0]
+    expiring = [e for e in all_exceptions
+                if e['days_left'] is not None and 0 <= e['days_left'] <= 30]
+    expiring.sort(key=lambda e: e['days_left'])
+
+    policy_gap = {}
+    if releng_ns:
+        try:
+            releng_client = KonfluxClient(namespace=releng_ns)
+            rpas = releng_client.get_release_plan_admissions(name_filter=application)
+            bindings = KonfluxClient.extract_rpa_bindings(rpas)
+            exception_map = {}
+            for p in policies:
+                pname = p['metadata']['name']
+                exception_map[pname] = client.extract_exceptions(p)
+
+            for b in bindings:
+                target = b.get('target', '')
+                policy = b.get('policy', '')
+                if target == 'stage':
+                    stage_excs = set(e['value'] for e in exception_map.get(policy, []))
+                elif target == 'prod':
+                    prod_excs = set(e['value'] for e in exception_map.get(policy, []))
+
+            if 'stage_excs' in dir() and 'prod_excs' in dir():
+                policy_gap = {
+                    'stage_only_count': len(stage_excs - prod_excs),
+                    'prod_only_count': len(prod_excs - stage_excs),
+                    'stage_only_rules': sorted(stage_excs - prod_excs),
+                }
+        except Exception:
+            pass
+
+    return {
+        'policies_count': len(policies),
+        'total_exceptions': len(all_exceptions),
+        'active_exceptions': len(active),
+        'expired_exceptions': len(expired),
+        'expiring_within_30d': len(expiring),
+        'expiring_details': expiring[:10],
+        'policy_gap': policy_gap,
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_scenario_coverage(
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """ITS scenario coverage analysis: gaps, disabled scenarios, missing conforma.
+
+    Queries IntegrationTestScenario CRDs and analyzes coverage for the application.
+    Detects disabled scenarios, missing conforma coverage, and configuration issues.
+
+    Args:
+        application: Application name to analyze
+    """
+    from clients.konflux_client import KonfluxClient
+
+    ns = NAMESPACE
+    client = KonfluxClient(namespace=ns)
+    scenarios = client.get_integration_test_scenarios(
+        namespace=ns, app_filter=application,
+    )
+    metadata = [KonfluxClient.extract_its_metadata(s) for s in scenarios]
+
+    active = [s for s in metadata if not s['is_disabled']]
+    disabled = [s for s in metadata if s['is_disabled']]
+    conforma = [s for s in metadata if s['is_conforma']]
+    future = [s for s in metadata if s['is_future']]
+
+    apps = sorted(set(s['application'] for s in metadata))
+
+    gaps = []
+    conforma_apps = set(s['application'] for s in conforma if not s['is_disabled'])
+    for app in apps:
+        if app not in conforma_apps:
+            gaps.append({'application': app, 'issue': 'no_active_conforma_scenario'})
+
+    disabled_conforma = [s for s in conforma if s['is_disabled']]
+
+    return {
+        'total_scenarios': len(metadata),
+        'active': len(active),
+        'disabled': len(disabled),
+        'conforma_scenarios': len(conforma),
+        'future_scenarios': len(future),
+        'applications': apps,
+        'gaps': gaps,
+        'disabled_conforma': [
+            {'name': s['name'], 'application': s['application'], 'policy_ref': s['policy_ref']}
+            for s in disabled_conforma
+        ],
+        'scenario_summary': [
+            {
+                'name': s['name'],
+                'application': s['application'],
+                'is_disabled': s['is_disabled'],
+                'is_conforma': s['is_conforma'],
+                'is_future': s['is_future'],
+                'policy_ref': s['policy_ref'],
+            }
+            for s in sorted(metadata, key=lambda x: (x['application'], x['name']))
+        ],
+    }
+
+
+@mcp.tool()
+def get_resolved_patterns(
+    application: str = DEFAULT_APPLICATION,
+    days: int = 90,
+) -> Dict[str, Any]:
+    """Resolution patterns from solved conforma violations.
+
+    Groups resolved violations by rule pattern and shows how they were resolved
+    (rebuild, config change, exception). Essential for identifying which violations
+    are transient (auto-fixable by rebuild) vs structural (require code/config changes).
+
+    Args:
+        application: Application name
+        days: Number of days to look back (default 90)
+    """
+    db = _db_connection()
+    with db.connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                CASE
+                    WHEN violation_summary LIKE '%%hermetic_task%%' THEN 'hermetic_task'
+                    WHEN violation_summary LIKE '%%trusted_task%%' THEN 'trusted_task'
+                    WHEN violation_summary LIKE '%%source_image%%' THEN 'source_image'
+                    WHEN violation_summary LIKE '%%labels%%' THEN 'labels'
+                    WHEN violation_summary LIKE '%%fips%%' THEN 'fips'
+                    WHEN violation_summary LIKE '%%slsa%%' THEN 'slsa'
+                    WHEN violation_summary LIKE '%%sbom%%' THEN 'sbom'
+                    WHEN violation_summary LIKE '%%rpm%%' THEN 'rpm'
+                    WHEN violation_summary LIKE '%%deprecated%%' THEN 'deprecated'
+                    WHEN violation_summary LIKE '%%signature%%' THEN 'signature'
+                    WHEN violation_summary LIKE '%%snyk%%' THEN 'snyk'
+                    ELSE 'other'
+                END as rule_group,
+                COUNT(*) as total_resolved,
+                COUNT(*) FILTER (WHERE ai_analyzed) as with_ai_analysis,
+                AVG(EXTRACT(EPOCH FROM (resolved_at - first_detected_at)) / 3600)::numeric(8,1)
+                    as avg_hours_to_resolve,
+                MIN(first_detected_at) as first_seen,
+                MAX(resolved_at) as last_resolved
+            FROM conforma_results
+            WHERE is_resolved = TRUE
+              AND resolved_at >= NOW() - INTERVAL '%s days'
+            GROUP BY rule_group
+            ORDER BY total_resolved DESC
+        """, (days,))
+        cols = ['rule_group', 'total_resolved', 'with_ai_analysis',
+                'avg_hours_to_resolve', 'first_seen', 'last_resolved']
+        patterns = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+        for p in patterns:
+            if p['first_seen']:
+                p['first_seen'] = p['first_seen'].isoformat()
+            if p['last_resolved']:
+                p['last_resolved'] = p['last_resolved'].isoformat()
+            if p['avg_hours_to_resolve']:
+                p['avg_hours_to_resolve'] = float(p['avg_hours_to_resolve'])
+
+        cursor.execute("""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE ai_analyzed) as with_ai
+            FROM conforma_results
+            WHERE is_resolved = TRUE
+              AND resolved_at >= NOW() - INTERVAL '%s days'
+        """, (days,))
+        row = cursor.fetchone()
+        total = row[0]
+        with_ai = row[1]
+
+    transient_rules = {'trusted_task', 'slsa', 'signature', 'snyk'}
+    for p in patterns:
+        p['likely_transient'] = p['rule_group'] in transient_rules
+
+    return {
+        'total_resolved': total,
+        'with_ai_analysis': with_ai,
+        'ai_coverage_pct': round(with_ai * 100 / max(total, 1), 1),
+        'days': days,
+        'patterns': patterns,
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_config_analysis(
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Run Konflux configuration analysis using AI.
+
+    Audits EC policies, ITS scenarios, and violation patterns to find
+    misconfigurations, coverage gaps, and auto-rebuild opportunities.
+    Requires LLM_PROVIDER to be configured.
+
+    Args:
+        application: Application name to analyze
+    """
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        return {'error': 'LLM not configured. Set LLM_PROVIDER env var.'}
+
+    from analyzers.config_analyzer import ConfigAnalyzer
+    db = _db_connection()
+    analyzer = ConfigAnalyzer(config, db=db)
+    result = analyzer.run(application=application)
+    if not result.get('analyzed'):
+        return {'error': 'Analysis could not complete'}
+    analysis = result['analysis']
+    return {
+        'findings_count': len(analysis.get('findings', [])),
+        'overall_severity': analysis.get('overall_severity'),
+        'confidence': analysis.get('confidence_score'),
+        'summary': analysis.get('summary'),
+        'findings': analysis.get('findings', []),
+        'auto_rebuild_candidates': analysis.get('auto_rebuild_candidates', []),
+        'cost_usd': result.get('cost_usd', 0),
+        'model': result.get('model', ''),
+    }
+
+
+@mcp.tool()
+@async_tool
+def trigger_rebuild(
+    component: str,
+    namespace: str = "",
+) -> Dict[str, Any]:
+    """Trigger a fresh Konflux build for a component.
+
+    Annotates the Component CR with build.appstudio.openshift.io/request=trigger-pac-build,
+    which starts a new PipelineRun (event_type=incoming). Use when a component needs
+    rebuilding (e.g., PipelineRunTimeout caused source_image.exists violation).
+
+    Args:
+        component: Component name (e.g., odh-workbench-jupyter-minimal-cpu-py312-v3-5-ea-2)
+        namespace: Kubernetes namespace (default: from config)
+    """
+    from clients.kubernetes import KubernetesClient
+    ns = namespace or NAMESPACE
+    kc = KubernetesClient(namespace=ns)
+
+    meta = kc.get_component_metadata(component, namespace=ns)
+    if meta is None:
+        return {'success': False, 'error': 'Component not found: {}'.format(component)}
+
+    try:
+        kc.trigger_rebuild(component, namespace=ns)
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'manual_command': (
+                'kubectl annotate components/{} -n {} '
+                'build.appstudio.openshift.io/request=trigger-pac-build --overwrite'
+            ).format(component, ns),
+        }
+
+    return {
+        'success': True,
+        'component': component,
+        'namespace': ns,
+        'repository_url': meta.get('repository_url', ''),
+        'branch': meta.get('branch', ''),
+        'message': 'Build triggered. Konflux will start a new PipelineRun.',
+        'monitor_command': 'ic get pipelineruns | head',
+    }

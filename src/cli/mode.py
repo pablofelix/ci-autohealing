@@ -18,18 +18,21 @@ def is_cluster():
 
 
 def has_api():
-    """Check if ANY API is available (local or remote)."""
-    url = ic_config.get_api_url()
-    if url:
-        return True
-    if ic_config.get_mode() == 'local':
-        import requests
-        try:
-            r = requests.get('http://localhost:8000/health', timeout=2)
-            return r.status_code == 200
-        except Exception:
-            return False
-    return False
+    """Check if ANY API is available (local or remote).
+
+    In local mode, only check localhost:8000 — a configured remote URL
+    doesn't count because the CLI should fall through to bash for the
+    richer display when the local API server isn't running.
+    """
+    mode = ic_config.get_mode()
+    if mode == 'cluster':
+        return bool(ic_config.get_api_url())
+    import requests
+    try:
+        r = requests.get('http://localhost:8000/health', timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 def ensure_cluster():
@@ -41,6 +44,4 @@ def ensure_cluster():
     if ic_config.get_mode() == 'cluster':
         from cli.data import require_data
         return require_data()
-    if has_api():
-        return True
-    return False
+    return bool(has_api())

@@ -25,13 +25,14 @@ def triage(ctx, output_json):
 def triage_show(ctx, show_all, output_json):
     """Show current triage items and untracked failures."""
     import json as json_mod
+
     from cli import ic_config
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
 
     is_json = output_json or ctx.obj.get('json')
 
     if ic_config.get_mode() == 'cluster':
-        from cli.data import require_data, get_triage_items
+        from cli.data import get_triage_items, require_data
         if not require_data():
             return
         data = get_triage_items()
@@ -311,13 +312,16 @@ def triage_update(ctx, item_id, slack_url, jira_key, notes,
 @click.argument('target')
 @click.option('--resolution', '-r', help='How it was fixed')
 @click.option('--pr', 'pr_url', help='Fix PR URL')
+@click.option('--verdict', type=click.Choice(['correct', 'partial', 'incorrect', 'skip']),
+              help='Was the AI diagnosis correct?')
 @click.option('--no-jira', is_flag=True, help='Skip Jira update prompt')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def triage_resolve(ctx, target, resolution, pr_url, no_jira, output_json):
+def triage_resolve(ctx, target, resolution, pr_url, verdict, no_jira, output_json):
     """Mark a triage item as resolved. TARGET is item ID, component name, or Jira key."""
     from cli.db import get_repo, require_db
     from cli.formatting import cyan, green
+    from repositories.ai_analysis_repository import AIAnalysisRepository
     from repositories.triage_repository import TriageRepository
 
     is_json = output_json or ctx.obj.get('json')
@@ -350,6 +354,14 @@ def triage_resolve(ctx, target, resolution, pr_url, no_jira, output_json):
             print('  Resolution: {}'.format(resolution))
         if pr_url:
             print('  PR: {}'.format(pr_url))
+
+    if verdict and verdict != 'skip':
+        ai_repo = get_repo(AIAnalysisRepository)
+        component = item.get('components', [None])[0]
+        if component:
+            ai_repo.record_verdict(component, cfg.APPLICATION_NAME, verdict, verdict_by='cli')
+            if not is_json:
+                print('  AI verdict: {}'.format(verdict))
 
     if not no_jira and not is_json and item.get('jira_key'):
         _prompt_jira_resolve(item, resolution)
@@ -643,6 +655,7 @@ def _find_resolution_build(component_name, fail_time):
 def _get_jira_client():
     """Create a JiraClient from environment config."""
     import os
+
     from clients.jira_client import JiraClient
 
     base_url = os.environ.get('JIRA_BASE_URL', 'https://issues.redhat.com')

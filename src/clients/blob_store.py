@@ -8,6 +8,7 @@ Backend selection via BLOB_STORE env var:
   - "local" → local filesystem (~/.ic/blobs/) — default
 """
 
+import json
 import os
 
 from logger import setup_logger
@@ -184,11 +185,15 @@ def should_offload(data):
     return size > BLOB_THRESHOLD
 
 
+_JSON_BLOB_FIELDS = frozenset(('commit_context', 'violation_details'))
+
+
 def resolve_blob_fields(row, fields=('build_logs', 'commit_context')):
     """Fetch blob data for any field that was offloaded to external storage.
 
     Checks blob_refs dict in row; if a field is NULL but has a blob ref,
     fetches the data from the blob store. Modifies row in-place.
+    JSON-typed fields are automatically parsed from string.
     """
     refs = row.get('blob_refs') or {}
     if not refs:
@@ -196,5 +201,11 @@ def resolve_blob_fields(row, fields=('build_logs', 'commit_context')):
     store = get_blob_store()
     for field in fields:
         if row.get(field) is None and field in refs:
-            row[field] = store.get(refs[field])
+            data = store.get(refs[field])
+            if data and field in _JSON_BLOB_FIELDS and isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            row[field] = data
     return row

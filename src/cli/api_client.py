@@ -87,8 +87,7 @@ _client = None
 def get_client():
     global _client
     if _client is None:
-        from cli.ic_config import get_api_url, get_api_key
-        from cli.ic_config import load
+        from cli.ic_config import get_api_key, get_api_url, load
         url = get_api_url()
         if not url:
             print("Error: no cluster API URL configured.", file=sys.stderr)

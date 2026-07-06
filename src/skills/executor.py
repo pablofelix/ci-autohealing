@@ -4,7 +4,7 @@ import logging
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from skills.models import ExecutionResult
 from skills.validator import SkillValidator, assess_risk, check_prerequisites, classify_risk
@@ -64,16 +64,21 @@ class SkillExecutor:
     """Execute skills with risk-based sandboxing."""
 
     def __init__(self, skill, params=None, dry_run=False, timeout=300,
-                 env_overrides=None, triggered_by='cli'):
+                 env_overrides=None, triggered_by='cli',
+                 component_name=None, application=None, triage_item_id=None):
         self.skill = skill
         self.params = params or {}
         self.dry_run = dry_run
         self.timeout = timeout
         self.env_overrides = env_overrides or {}
         self.triggered_by = triggered_by
+        self.component_name = component_name
+        self.application = application
+        self.triage_item_id = triage_item_id
 
     def _skill_dir(self):
-        return self.skill.path
+        from skills.models import resolve_working_dir
+        return resolve_working_dir(self.skill.path, self.skill.metadata.working_dir)
 
     def _skill_md_path(self):
         skill_md = os.path.join(self._skill_dir(), 'SKILL.md')
@@ -96,10 +101,13 @@ class SkillExecutor:
 
     def _result(self, **kwargs):
         kwargs.setdefault('triggered_by', self.triggered_by)
+        kwargs.setdefault('component_name', self.component_name)
+        kwargs.setdefault('application', self.application)
+        kwargs.setdefault('triage_item_id', self.triage_item_id)
         return ExecutionResult(**kwargs)
 
     def execute(self):
-        started = datetime.now(timezone.utc).isoformat()
+        started = datetime.now(UTC).isoformat()
         risk = self.classify()
 
         prereqs = self.check_prerequisites()

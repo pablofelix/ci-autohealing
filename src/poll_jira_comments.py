@@ -18,9 +18,9 @@ import subprocess
 import sys
 import time
 
-from config import CollectorConfig
 from clients.jira_client import JiraClient
 from clients.llm_provider import create_llm_provider
+from config import CollectorConfig
 from logger import setup_logger
 from prompt_loader import load_prompt
 from repositories import DatabaseConnection, JiraCommentDraftRepository
@@ -60,9 +60,8 @@ class JiraCommentPoller:
 
     def get_active_jira_keys(self):
         """Return distinct jira_keys from unresolved build and conforma failures."""
-        with self._db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
+        with self._db.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
                     SELECT DISTINCT jira_key FROM build_failures
                     WHERE is_resolved = FALSE AND jira_key IS NOT NULL
                     UNION
@@ -70,7 +69,7 @@ class JiraCommentPoller:
                     WHERE is_resolved = FALSE AND jira_key IS NOT NULL
                     ORDER BY jira_key
                 """)
-                return [row[0] for row in cur.fetchall()]
+            return [row[0] for row in cur.fetchall()]
 
     def get_failure_context(self, jira_key):
         """Fetch failure details and AI analysis for the given jira_key.
@@ -79,10 +78,9 @@ class JiraCommentPoller:
         Returns a dict with keys: failure_type, component_name, error_summary,
         ai_root_cause, ai_recommended_fix, ai_category.
         """
-        with self._db.connection() as conn:
-            with conn.cursor() as cur:
-                # Try build failure first
-                cur.execute("""
+        with self._db.connection() as conn, conn.cursor() as cur:
+            # Try build failure first
+            cur.execute("""
                     SELECT bf.component_name, bf.error_type, bf.error_message,
                            bf.failed_task_name, bf.failed_step_name,
                            bf.build_logs, bf.commit_sha, bf.commit_author,
@@ -93,28 +91,28 @@ class JiraCommentPoller:
                     ORDER BY a.analyzed_at DESC NULLS LAST
                     LIMIT 1
                 """, (jira_key,))
-                row = cur.fetchone()
-                if row:
-                    logs = row[5] or ''
-                    if len(logs) > MAX_LOG_CHARS:
-                        logs = logs[-MAX_LOG_CHARS:]
-                    return {
-                        'failure_type': 'build',
-                        'component_name': row[0],
-                        'error_type': row[1],
-                        'error_message': row[2],
-                        'failed_task': row[3],
-                        'failed_step': row[4],
-                        'build_logs': logs,
-                        'commit_sha': row[6],
-                        'commit_author': row[7],
-                        'ai_root_cause': row[8],
-                        'ai_recommended_fix': row[9],
-                        'ai_category': row[10],
-                    }
+            row = cur.fetchone()
+            if row:
+                logs = row[5] or ''
+                if len(logs) > MAX_LOG_CHARS:
+                    logs = logs[-MAX_LOG_CHARS:]
+                return {
+                    'failure_type': 'build',
+                    'component_name': row[0],
+                    'error_type': row[1],
+                    'error_message': row[2],
+                    'failed_task': row[3],
+                    'failed_step': row[4],
+                    'build_logs': logs,
+                    'commit_sha': row[6],
+                    'commit_author': row[7],
+                    'ai_root_cause': row[8],
+                    'ai_recommended_fix': row[9],
+                    'ai_category': row[10],
+                }
 
-                # Try conforma
-                cur.execute("""
+            # Try conforma
+            cur.execute("""
                     SELECT cr.component_name, cr.scenario,
                            cr.violations_count, cr.warnings_count,
                            cr.violation_summary, cr.commit_sha,
@@ -125,20 +123,20 @@ class JiraCommentPoller:
                     ORDER BY a.analyzed_at DESC NULLS LAST
                     LIMIT 1
                 """, (jira_key,))
-                row = cur.fetchone()
-                if row:
-                    return {
-                        'failure_type': 'conforma',
-                        'component_name': row[0],
-                        'scenario': row[1],
-                        'violations_count': row[2],
-                        'warnings_count': row[3],
-                        'violation_summary': row[4],
-                        'commit_sha': row[5],
-                        'ai_root_cause': row[6],
-                        'ai_recommended_fix': row[7],
-                        'ai_category': row[8],
-                    }
+            row = cur.fetchone()
+            if row:
+                return {
+                    'failure_type': 'conforma',
+                    'component_name': row[0],
+                    'scenario': row[1],
+                    'violations_count': row[2],
+                    'warnings_count': row[3],
+                    'violation_summary': row[4],
+                    'commit_sha': row[5],
+                    'ai_root_cause': row[6],
+                    'ai_recommended_fix': row[7],
+                    'ai_category': row[8],
+                }
 
         return None
 

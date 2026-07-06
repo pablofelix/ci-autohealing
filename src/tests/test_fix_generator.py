@@ -4,16 +4,15 @@ import json
 from unittest.mock import MagicMock, patch
 
 from fixers.fix_generator import (
+    _refresh_pinned_ref,
     apply_hermetic_fix,
-    apply_sbom_vendor_label_fix,
     apply_rpm_repo_id_fix,
+    apply_sbom_vendor_label_fix,
     find_floating_bundle_refs,
     parse_deprecated_task_fixes,
     parse_untrusted_image_refs,
-    _refresh_pinned_ref,
     resolve_quay_digest,
 )
-
 
 # ---------------------------------------------------------------------------
 # apply_hermetic_fix

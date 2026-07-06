@@ -10,9 +10,7 @@ shelling out to the oc CLI.
 import os
 
 import requests
-
 from kubernetes import client, config
-
 
 from shared_config import KUBEARCHIVE_URL as KUBEARCHIVE_FALLBACK_URL
 

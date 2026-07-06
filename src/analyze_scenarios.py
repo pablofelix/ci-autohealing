@@ -14,8 +14,9 @@ import argparse
 import json
 import logging
 import sys
-from config import CollectorConfig
+
 from analyzers.scenarios_analyzer import ScenariosAnalyzer
+from config import CollectorConfig
 from logger import setup_logger
 
 for name in list(logging.Logger.manager.loggerDict) + ['root']:

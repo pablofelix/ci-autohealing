@@ -6,8 +6,8 @@ returning the first successful result.
 
 from kubernetes import client
 
-from clients.kubernetes import KubernetesClient
 from clients.kubearchive import KubeArchiveClient
+from clients.kubernetes import KubernetesClient
 from clients.tekton_results import TektonResultsClient
 from openshift_auth import _ensure_k8s_config
 

@@ -16,6 +16,7 @@ def _query_live_cluster(namespace, label_selector):
     """Query live cluster for PipelineRuns via Kubernetes Python API."""
     try:
         from kubernetes import client
+
         from openshift_auth import _ensure_k8s_config
         _ensure_k8s_config()
         api = client.CustomObjectsApi()
@@ -65,9 +66,9 @@ def query_pipelineruns(namespace, label_selector,
 
     if not kubearchive_url or not session:
         from openshift_auth import (
-            get_openshift_token,
-            discover_kubearchive_api_url,
             create_authenticated_session,
+            discover_kubearchive_api_url,
+            get_openshift_token,
         )
         if not kubearchive_url:
             kubearchive_url = discover_kubearchive_api_url()

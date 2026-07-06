@@ -72,7 +72,7 @@ class TestGetSafeEnv:
         assert 'PATH' in env
 
     def test_excludes_undeclared_tokens(self):
-        os.environ['SECRET_TEST_TOKEN'] = 'should-not-appear'
+        os.environ['SECRET_TEST_TOKEN'] = 'should-not-appear'  # noqa: S105
         try:
             env = get_safe_env()
             assert 'SECRET_TEST_TOKEN' not in env

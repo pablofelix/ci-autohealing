@@ -379,6 +379,19 @@ class GitHubClient:
             return None
         return resp.json().get('object', {}).get('sha')
 
+    def is_commit_on_branch(self, owner, repo, sha, branch):
+        """Check if a commit SHA is reachable from a branch.
+
+        Uses the compare endpoint: if base..head returns status 'behind' or
+        'identical', the commit is on the branch. 'ahead' or 'diverged' means it isn't.
+        """
+        resp = self._get('/repos/{}/{}/compare/{}...{}'.format(
+            owner, repo, sha, branch))
+        if not resp:
+            return None
+        status = resp.json().get('status', '')
+        return status in ('behind', 'identical')
+
     def get_file_sha(self, owner, repo, path, ref):
         """Return the blob SHA of a file (needed to update an existing file)."""
         resp = self._get('/repos/{}/{}/contents/{}'.format(owner, repo, quote(path, safe='')),
@@ -490,6 +503,8 @@ class GitHubClient:
                 'author': pr.get('user', {}).get('login', ''),
                 'base_branch': pr.get('base', {}).get('ref', ''),
                 'updated_at': pr.get('updated_at', ''),
+                'merged_at': pr.get('merged_at'),
+                'merge_commit_sha': pr.get('merge_commit_sha'),
                 'merged': pr.get('merged_at') is not None,
             }
             for pr in resp.json()[:limit]

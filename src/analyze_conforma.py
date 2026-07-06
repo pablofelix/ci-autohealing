@@ -13,8 +13,9 @@ Examples:
 
 import argparse
 import sys
-from config import CollectorConfig
+
 from analyzers.conforma_analyzer import ConformaAnalyzer
+from config import CollectorConfig
 from logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -27,6 +28,10 @@ def main():
     parser.add_argument(
         '--component',
         help='Analyze only this component (e.g., acme-autorag-v3-4)'
+    )
+    parser.add_argument(
+        '--application', '--app',
+        help='Application filter (e.g., rhoai-v3-5-ea-1). Default from config.'
     )
     parser.add_argument(
         '--limit',
@@ -59,7 +64,8 @@ def main():
     result = analyzer.run(
         limit=limit,
         component_filter=args.component,
-        force=args.force
+        force=args.force,
+        application=args.application
     )
 
     logger.info("Analysis complete: %d violations analyzed", result['analyzed'])

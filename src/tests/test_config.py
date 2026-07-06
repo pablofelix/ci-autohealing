@@ -1,10 +1,11 @@
 """Unit tests for configuration management."""
 
-import unittest
 import os
 import tempfile
+import unittest
 from pathlib import Path
-from config import DatabaseConfig, KubernetesConfig, CollectorConfig
+
+from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 
 
 class TestDatabaseConfig(unittest.TestCase):

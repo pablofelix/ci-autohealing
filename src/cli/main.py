@@ -45,6 +45,7 @@ def get(ctx, output_json):
 def get_components(ctx, refresh, output_json):
     """List currently failing components."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -88,8 +89,8 @@ def get_component(ctx, name, output_json):
         else:
             from cli.formatting import cyan, red
             print(red('Error: Component not found: {}'.format(name)))
-            from cli.suggest import format_suggestion
             from cli.data import get_alerts
+            from cli.suggest import format_suggestion
             try:
                 alerts = get_alerts()
                 all_comps = [f.get('component', '') for f in
@@ -117,21 +118,44 @@ def get_component(ctx, name, output_json):
     print()
 
 
+def _format_since(raw):
+    """Format a timestamp as '30 Jun 08:04' for display."""
+    from datetime import datetime as dt
+    s = str(raw or '')
+    for fmt in ('%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+        try:
+            d = dt.strptime(s[:26], fmt)
+            return d.strftime('%d %b %H:%M')
+        except (ValueError, IndexError):
+            continue
+    if len(s) >= 10:
+        try:
+            d = dt.strptime(s[:10], '%Y-%m-%d')
+            return d.strftime('%d %b')
+        except ValueError:
+            pass
+    return s[:12] if s else ''
+
+
 @get.command('alerts')
 @click.option('--group', is_flag=True, help='Group by root cause')
 @click.option('--all', 'show_all', is_flag=True, help='All applications')
 @click.option('--date', help='Alerts on specific date')
 @click.option('--from', 'from_date', help='Start date for range')
 @click.option('--to', 'to_date', help='End date for range')
+@click.option('--stage', is_flag=True, help='Show only stage-policy violations')
+@click.option('--prod', is_flag=True, help='Show only prod-policy violations')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
+def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, output_json):
     """Unified view: build failures + Conforma violations."""
     import json as json_mod
+
+    from cli.db import check_db
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
 
-    if ensure_cluster():
+    if ensure_cluster() or check_db():
         from cli.data import get_alerts as _get_alerts
         from cli.formatting import bold, dim, green, red, section_header, yellow
         data = _get_alerts()
@@ -142,8 +166,27 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         builds = data.get('build_failures', [])
         conforma = data.get('conforma_violations', [])
         nightlies = data.get('nightly_warnings', [])
+
+        if stage or prod:
+            from utils.conforma_utils import extract_policy_from_scenario as _extract_policy
+            from utils.conforma_utils import policy_env as _policy_env
+            filtered = []
+            for v in conforma:
+                env = _policy_env(_extract_policy(v.get('scenario', '')))
+                if stage and env == 'stage' or prod and env == 'prod' or stage and prod:
+                    filtered.append(v)
+            conforma = filtered
         schedule = data.get('release_schedule')
         last_sync = data.get('last_sync', '')
+
+        from cli.data import _triage_info_map_safe
+        triage_info = _triage_info_map_safe(cfg.APPLICATION_NAME)
+        if triage_info:
+            for v in conforma:
+                comp = v.get('component', '')
+                info = triage_info.get(comp)
+                if info and not v.get('jira_key') and info.get('jira_key'):
+                    v['jira_key'] = info['jira_key']
 
         section_header('Alerts — {}'.format(cfg.APPLICATION_NAME))
         print()
@@ -173,37 +216,89 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 
         print(bold('Build Failures ({})'.format(len(builds))) + ':')
         if builds:
-            for f in builds:
+            print('  {:<4} {:<45} {:<20} {:>12}  {}'.format(
+                '#', 'Component', 'Error/Cause', 'Since', 'JIRA'))
+            print('  {}  {} {} {}  {}'.format(
+                '---', '-' * 45, '-' * 20, '-' * 12, '--------'))
+            for i, f in enumerate(builds, 1):
                 comp = f.get('component', '?')
+                if len(comp) > 45:
+                    comp = comp[:42] + '...'
                 err = f.get('error_type') or f.get('possible_cause') or ''
+                info = triage_info.get(f.get('component', ''))
+                if not err and info:
+                    err = info.get('group_label') or ''
+                if len(err) > 20:
+                    err = err[:17] + '...'
+                first = _format_since(f.get('first_seen', ''))
+                jira = ''
+                if f.get('jira_key'):
+                    jira = f['jira_key']
+                elif info and info.get('jira_key'):
+                    jira = info['jira_key']
+                jira = jira or '-'
                 analyzed = green(' [AI]') if f.get('has_analysis') else ''
-                print('  {} — {}{}'.format(bold(comp), err, analyzed))
+                print('  {:<4} {:<45} {:<20} {:>12}  {}{}'.format(
+                    i, comp, err, first, jira, analyzed))
         else:
             print('  {} No build failures'.format(green('✓')))
         print()
 
-        print(bold('Conforma Failures ({})'.format(len(conforma))) + ':')
+        from utils.conforma_utils import extract_policy_from_scenario
+        policies_seen = set()
+        for v in conforma:
+            p = extract_policy_from_scenario(v.get('scenario', ''))
+            if p:
+                policies_seen.add(p)
+        policy_note = ''
+        if len(policies_seen) > 1:
+            policy_note = '  ({} policies)'.format(len(policies_seen))
+        print(bold('Conforma Failures ({})'.format(len(conforma))) + policy_note + ':')
         if conforma:
-            print('  {:<4} {:<45} {:>6} {:>6} {:>6}  {}'.format(
+            print('  {:<4} {:<45} {:>6} {:>6} {:>12}  {}'.format(
                 '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
             print('  {}  {} {} {} {}  {}'.format(
-                '---', '-' * 45, '------', '------', '------', '--------'))
+                '---', '-' * 45, '------', '------', '-' * 12, '--------'))
             for i, v in enumerate(conforma, 1):
                 comp = v.get('component', '?')
                 if len(comp) > 45:
                     comp = comp[:42] + '...'
                 viol = v.get('violations_count', 0) or 0
                 warn = v.get('warnings_count', 0) or 0
-                first = str(v.get('first_seen', ''))[:10]
-                if first and len(first) == 10:
-                    first = first[5:]
+                first = _format_since(v.get('first_seen', ''))
                 jira = v.get('jira_key') or '-'
                 viol_color = red if viol > 0 else green
-                print('  {:<4} {:<45} {} {:>6} {:>6}  {}'.format(
-                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira))
-                policy_url = v.get('policy_url')
-                if policy_url:
-                    print('       {} {}'.format(dim('↳'), dim(policy_url)))
+                policy = extract_policy_from_scenario(v.get('scenario', ''))
+                policy_tag = ' [{}]'.format(dim(policy)) if policy and len(policies_seen) > 1 else ''
+                env_tag = v.get('exception_env_tag')
+                stage_cov = v.get('exception_coverage_stage')
+                prod_cov = v.get('exception_coverage_prod')
+                cov_tag = ''
+                if env_tag:
+                    is_partial = (stage_cov == 'partially_covered' or prod_cov == 'partially_covered')
+                    label = 'PARTIAL' if is_partial else 'EXC'
+                    color_fn = yellow if is_partial else green
+                    cov_tag = ' {}'.format(color_fn('[{}:{}]'.format(label, env_tag)))
+                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}'.format(
+                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira, policy_tag, cov_tag))
+                p_url_s = v.get('policy_url_stage')
+                p_url_p = v.get('policy_url_prod')
+                if p_url_s:
+                    print('       {} {}'.format(dim('↳ stage'), dim(p_url_s)))
+                if p_url_p:
+                    print('       {} {}'.format(dim('↳ prod '), dim(p_url_p)))
+                if env_tag and (stage_cov == 'partially_covered' or prod_cov == 'partially_covered'):
+                    us = v.get('uncovered_rules_stage', [])
+                    up = v.get('uncovered_rules_prod', [])
+                    both = sorted(set(us) & set(up))
+                    only_s = sorted(set(us) - set(up))
+                    only_p = sorted(set(up) - set(us))
+                    if both:
+                        print('       {} {}'.format(red('↳ missing(S+P):'), ', '.join(both)))
+                    if only_s:
+                        print('       {} {}'.format(red('↳ missing(S):'), ', '.join(only_s)))
+                    if only_p:
+                        print('       {} {}'.format(red('↳ missing(P):'), ', '.join(only_p)))
         else:
             print('  {} No conforma violations'.format(green('✓')))
         print()
@@ -227,6 +322,10 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
         args.extend(['--from', from_date])
     if to_date:
         args.extend(['--to', to_date])
+    if stage:
+        args.append('--stage')
+    if prod:
+        args.append('--prod')
     if is_json:
         args.append('--json')
     _bash_fallback(args)
@@ -235,37 +334,82 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, output_json):
 @get.command('conforma')
 @click.argument('filter', required=False, default='')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.option('--app', 'app_name', default=None, help='Query a specific application')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
+@click.option('--current', 'policy_filter', flag_value='current', default=True,
+              help='Current policy only (blocking, default)')
+@click.option('--future', 'policy_filter', flag_value='future',
+              help='Future policy only (informational)')
+@click.option('--all', 'policy_filter', flag_value='all',
+              help='Both current and future policies')
 @click.pass_context
-def get_conforma(ctx, filter, output_json):
+def get_conforma(ctx, filter, output_json, app_name, stage, nightly, policy_filter):
     """Conforma test failures."""
     import json as json_mod
+
+    from cli.db import check_db
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    has_db = check_db()
+    use_python = use_reporter or has_db or ensure_cluster()
+    if use_python:
         from cli.data import get_conforma_violations
-        from cli.formatting import bold, dim, green, red, section_header
-        data = get_conforma_violations()
+        from cli.formatting import bold, dim, green, section_header
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        include_future = _policy_filter_to_include_future(policy_filter)
+        effective_app = app_name or cfg.APPLICATION_NAME
+        data = get_conforma_violations(
+            application=app_name,
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type,
+            include_future=include_future)
+        if isinstance(data, list):
+            from cli.data import _triage_jira_map_safe
+            jira_map = _triage_jira_map_safe(effective_app)
+            if jira_map:
+                for v in data:
+                    if isinstance(v, dict):
+                        comp = v.get('component', v.get('component_name', ''))
+                        if not v.get('jira_key') and comp in jira_map:
+                            v['jira_key'] = jira_map[comp]
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
             return
-        section_header('Conforma Violations: {}'.format(cfg.APPLICATION_NAME))
+        source_parts = []
+        if stage:
+            source_parts.append('stage')
+        if nightly:
+            source_parts.append('nightly')
+        policy_label = ''
+        if policy_filter == 'future':
+            policy_label = 'Future Policy'
+        elif policy_filter == 'all':
+            policy_label = 'All: Current + Future'
+        else:
+            policy_label = 'Blocking - Current Policy'
+        source_label = ' ({})'.format('+'.join(source_parts)) if source_parts else ''
+        section_header('Conforma Test Failures {}{}'.format(
+            source_label, ''))
+        from cli.formatting import cyan
+        print(dim(policy_label))
+        print('{}Application: {}{}'.format(
+            bold(''), cyan(effective_app), ''))
         print()
         if not data:
             print(green('  No conforma violations'))
+            if policy_filter == 'current':
+                print()
+                print(dim("  Tip: Use 'ic get conforma --future' for future policy violations"))
+                print(dim("  Tip: Use 'ic get conforma --all' for both current and future"))
             print()
             return
         if isinstance(data, list) and data and isinstance(data[0], str):
             for comp in data:
                 print('  {}'.format(comp))
         elif isinstance(data, list):
-            for v in data:
-                comp = v.get('component', v.get('component_name', '?'))
-                viol = v.get('violations_count', 0) or 0
-                warn = v.get('warnings_count', 0) or 0
-                scenario = v.get('scenario', v.get('error_type', ''))
-                viol_color = red if viol > 0 else green
-                print('  {} — {} viol, {} warn — {}'.format(
-                    bold(comp), viol_color(str(viol)), warn, dim(scenario)))
+            _print_conforma_table(data, effective_app, policy_filter)
         print()
         return
     args = ['get', 'conforma']
@@ -273,7 +417,113 @@ def get_conforma(ctx, filter, output_json):
         args.append(filter)
     if is_json:
         args.append('--json')
+    if policy_filter == 'future':
+        args.append('--future')
+    elif policy_filter == 'all':
+        args.append('--all')
     _bash_fallback(args)
+
+
+def _policy_filter_to_include_future(policy_filter):
+    """Map Click policy_filter flag value to include_future parameter."""
+    if policy_filter == 'future':
+        return True
+    if policy_filter == 'all':
+        return 'all'
+    return None
+
+
+def _print_conforma_table(data, app_name, policy_filter):
+    """Print conforma violations as a table with unique counts."""
+    from cli.formatting import bold, dim, green, red, yellow
+    from utils.conforma_utils import extract_policy_from_scenario, strip_version_suffix
+
+    cov_counts = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
+
+    total_violations = 0
+    total_unique = 0
+    rows = []
+    for v in data:
+        comp = v.get('component', v.get('component_name', '?'))
+        display_comp = strip_version_suffix(comp)
+        viol = v.get('violations_count', 0) or 0
+        unique = v.get('unique_violations', 0) or 0
+        warn = v.get('warnings_count', 0) or 0
+        ok = v.get('successes_count', 0) or 0
+        scenario = v.get('scenario', v.get('error_type', ''))
+        jira = v.get('jira_key', '')
+        policy = extract_policy_from_scenario(scenario)
+        is_future = v.get('is_future', False)
+        first_seen = v.get('first_detected_at', v.get('first_seen', ''))
+        since = _format_since(first_seen)
+
+        exc_cov = v.get('exception_coverage')
+        env_tag = v.get('exception_env_tag')
+        stage_cov = v.get('exception_coverage_stage')
+        prod_cov = v.get('exception_coverage_prod')
+
+        exc_label = '-'
+        if env_tag:
+            is_partial = (stage_cov == 'partially_covered' or prod_cov == 'partially_covered')
+            if is_partial:
+                exc_label = yellow('PARTIAL:{}'.format(env_tag))
+                cov_counts['partially_covered'] += 1
+            else:
+                exc_label = green('EXC:{}'.format(env_tag))
+                cov_counts['fully_covered'] += 1
+        elif exc_cov == 'fully_covered':
+            exc_label = green('YES')
+            cov_counts['fully_covered'] += 1
+        elif exc_cov == 'partially_covered':
+            exc_label = yellow('PARTIAL')
+            cov_counts['partially_covered'] += 1
+        elif exc_cov == 'not_covered':
+            exc_label = red('NO')
+            cov_counts['not_covered'] += 1
+
+        policy_type = 'future' if is_future else 'current'
+
+        total_violations += viol
+        total_unique += unique
+        rows.append({
+            'comp': display_comp, 'viol': viol, 'unique': unique,
+            'warn': warn, 'ok': ok, 'policy': policy, 'type': policy_type,
+            'exc': exc_label, 'since': since, 'jira': jira or '-',
+        })
+
+    rows.sort(key=lambda r: -r['viol'])
+
+    print(bold('Summary:') + ' {} components failing, {} unique violations ({} per-image)'.format(
+        red(str(len(rows))), bold(str(total_unique)), total_violations))
+    print()
+
+    hdr = ' {:<4} {:<50} {:>6} {:>8} {:>4} {:>4} {:<12} {:>7} {:>6}'.format(
+        '#', 'Component', 'Unique', 'PerImage', 'Warn', 'OK', 'Exception', 'Since', 'JIRA')
+    sep = ' {} {} {} {} {} {} {} {} {}'.format(
+        '-' * 4, '-' * 50, '-' * 6, '-' * 8, '-' * 4, '-' * 4, '-' * 12, '-' * 7, '-' * 6)
+    print(bold(hdr))
+    print(dim(sep))
+    for i, r in enumerate(rows, 1):
+        comp_display = r['comp']
+        if len(comp_display) > 50:
+            comp_display = comp_display[:47] + '...'
+        viol_color = red if r['viol'] > 0 else green
+        print(' {:<4} {:<50} {:>6} {:>8} {:>4} {:>4} {:<12} {:>7} {:>6}'.format(
+            i, comp_display,
+            viol_color(str(r['unique'])), r['viol'],
+            r['warn'], r['ok'], r['exc'], r['since'],
+            bold(r['jira']) if r['jira'] != '-' else '-'))
+
+    if any(cov_counts.values()):
+        parts = []
+        if cov_counts['fully_covered']:
+            parts.append(green('{} covered'.format(cov_counts['fully_covered'])))
+        if cov_counts['partially_covered']:
+            parts.append(yellow('{} partial'.format(cov_counts['partially_covered'])))
+        if cov_counts['not_covered']:
+            parts.append(red('{} uncovered'.format(cov_counts['not_covered'])))
+        print()
+        print('  Exception coverage: {}'.format(', '.join(parts)))
 
 
 @get.command('exceptions')
@@ -282,11 +532,12 @@ def get_conforma(ctx, filter, output_json):
 def get_exceptions(ctx, output_json):
     """Policy exceptions expiring/expired."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
         from cli.data import get_policy_exceptions
-        from cli.formatting import bold, dim, section_header, yellow
+        from cli.formatting import dim, green, red, section_header, yellow
         data = get_policy_exceptions()
         if is_json:
             print(json_mod.dumps(data, indent=2, default=str))
@@ -296,13 +547,28 @@ def get_exceptions(ctx, output_json):
         exceptions = data.get('exceptions', []) if data else []
         if not exceptions:
             print('  No exceptions found')
-        for exc in exceptions:
-            val = exc.get('value', '')
-            ref = exc.get('reference', '')
-            until = exc.get('effectiveUntil')
-            print('  {} — {}'.format(bold(val[:60]), dim(ref[:40])))
-            if until:
-                print('    Expires: {}'.format(yellow(until)))
+            print()
+            return
+        from utils.conforma_utils import policy_env as _policy_env
+        print('  {:<40} {:<6} {:<12} {}'.format('Rule', 'Env', 'Expires', 'Policy'))
+        print('  {}  {} {} {}'.format('-' * 40, '-' * 6, '-' * 12, '-' * 30))
+        for exc in sorted(exceptions, key=lambda e: (e.get('source_policy', ''), e.get('value', ''))):
+            value = exc.get('value', '?')
+            if len(value) > 40:
+                value = value[:37] + '...'
+            pname = exc.get('source_policy', '')
+            env = _policy_env(pname)
+            env_display = green('stage') if env == 'stage' else yellow('prod') if env == 'prod' else dim('-')
+            days = exc.get('days_left')
+            if exc.get('permanent'):
+                expires = dim('permanent')
+            elif days is not None:
+                expires = red('{}d'.format(days)) if days <= 7 else yellow('{}d'.format(days))
+            else:
+                expires = dim('-')
+            print('  {:<40} {:<6} {:<12} {}'.format(value, env_display, expires, dim(pname)))
+        print()
+        print('  Total: {} exceptions'.format(len(exceptions)))
         print()
         return
     args = ['get', 'exceptions']
@@ -317,6 +583,7 @@ def get_exceptions(ctx, output_json):
 def get_bindings(ctx, output_json):
     """RPA -> EC policy mappings."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -359,6 +626,7 @@ def get_policy_gap(ctx, output_json):
 def get_pipelineruns(ctx, limit, output_json):
     """List PipelineRun failures."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -393,6 +661,7 @@ def get_pipelineruns(ctx, limit, output_json):
 def get_pipelinerun(ctx, name, output_json):
     """Get PipelineRun details."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -427,8 +696,9 @@ def get_apps(ctx, output_json):
         build_repo = get_repo(BuildFailureRepository)
         apps = []
         try:
-            from openshift_auth import _ensure_k8s_config
             from kubernetes import client as k8s
+
+            from openshift_auth import _ensure_k8s_config
             _ensure_k8s_config()
             api = k8s.CustomObjectsApi()
             result = api.list_namespaced_custom_object(
@@ -491,6 +761,7 @@ def get_apps(ctx, output_json):
 def get_releases(ctx, stage, prod, limit, output_json, name):
     """List Release CRs."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -539,6 +810,7 @@ def get_releases(ctx, stage, prod, limit, output_json, name):
 def get_jira(ctx, component, output_json):
     """Show Jira ticket links."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -575,6 +847,7 @@ def get_jira(ctx, component, output_json):
 def get_fixes(ctx, show_all, output_json, component):
     """List fix attempts."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -633,7 +906,7 @@ def get_vulnerabilities(ctx, component, severity, output_json):
         snap_name = snap.get('metadata', {}).get('name', 'unknown')
         components = snap.get('spec', {}).get('components', [])
         if not is_json:
-            from cli.formatting import section_header, cyan
+            from cli.formatting import cyan, section_header
             section_header('Vulnerability Summary — {}'.format(cfg.APPLICATION_NAME))
             print()
             print('Snapshot: {}'.format(cyan(snap_name)))
@@ -689,7 +962,7 @@ def get_vulnerabilities(ctx, component, severity, output_json):
             print(json_mod.dumps(result, default=str))
             return
 
-        from cli.formatting import bold, red, yellow, dim
+        from cli.formatting import bold, dim, red, yellow
         if not rows:
             print(yellow('No vulnerabilities found.'))
             return
@@ -765,6 +1038,7 @@ def describe(ctx, output_json):
 def describe_component(ctx, name, log, output_json):
     """Full component details + logs."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -895,6 +1169,7 @@ def describe_component(ctx, name, log, output_json):
 def describe_conforma(ctx, name, output_json):
     """Conforma violation details."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -936,6 +1211,7 @@ def describe_conforma(ctx, name, output_json):
 def describe_pipelinerun(ctx, name, output_json):
     """Full PipelineRun details + logs."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -965,6 +1241,7 @@ def describe_pipelinerun(ctx, name, output_json):
 def describe_jira(ctx, key, output_json):
     """Show Jira ticket details."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     is_json = output_json or ctx.obj.get('json')
     if ensure_cluster():
@@ -1002,15 +1279,148 @@ def describe_jira(ctx, key, output_json):
 
 @describe.command('release')
 @click.argument('name')
-@click.option('--logs', is_flag=True)
+@click.option('--artifacts/--no-artifacts', default=False, help='Check OCI artifact health')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def describe_release(ctx, name, logs, output_json):
+def describe_release(ctx, name, artifacts, output_json):
     """Release CR details."""
+    import json as json_mod
+
+    from cli.mode import ensure_cluster
+    is_json = output_json or ctx.obj.get('json')
+    if ensure_cluster():
+        from cli.data import get_release_details
+        from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+        data = get_release_details(name, include_artifacts=artifacts)
+        if not data:
+            print(red('Release not found: ') + name)
+            raise SystemExit(1)
+        if is_json:
+            print(json_mod.dumps(data, indent=2, default=str))
+            return
+        section_header('Release: {}'.format(name))
+        print()
+        print('{}     {}'.format(bold('Snapshot:'), cyan(data.get('snapshot', ''))))
+        comp_count = data.get('component_count', 0)
+        if comp_count:
+            print('{}   {}'.format(bold('Components:'), comp_count))
+        print('{}  {}'.format(bold('ReleasePlan:'), data.get('release_plan', '')))
+        target = data.get('target', 'unknown')
+        target_label = target.capitalize()
+        print('{}         {} → {}'.format(
+            bold('Type:'), data.get('type_label', ''), target_label))
+        print('{}      {}'.format(bold('Created:'), data.get('created_at', '')))
+        if data.get('advisory_type'):
+            print('{}     {}'.format(bold('Advisory:'), data['advisory_type']))
+            fixed = data.get('fixed_issues', [])
+            if fixed:
+                display = ', '.join(fixed)
+                if len(display) > 80:
+                    display = display[:77] + '...'
+                print('{}       {} fixed ({})'.format(bold('Issues:'), len(fixed), display))
+            cves = data.get('cves', [])
+            if cves:
+                cve_strs = ['{} ({})'.format(c.get('key', ''), c.get('component', '?')) for c in cves]
+                display = ', '.join(cve_strs)
+                if len(display) > 80:
+                    display = display[:77] + '...'
+                print('{}         {} ({})'.format(bold('CVEs:'), len(cves), display))
+        print()
+
+        conditions = data.get('conditions', [])
+        if conditions:
+            print(bold('Conditions:'))
+            print('  {:<36} {:<8} {:<12} {}'.format('Type', 'Status', 'Reason', 'Message'))
+            print('  {:<36} {:<8} {:<12} {}'.format('-' * 36, '-' * 8, '-' * 12, '-' * 7))
+            for cond in conditions:
+                cstatus = cond.get('status', '')
+                creason = cond.get('reason', '-')
+                cmsg = cond.get('message', '-') or '-'
+                if cstatus == 'True' and creason != 'Skipped':
+                    status_str = green('{:<8}'.format(cstatus))
+                elif cstatus == 'False':
+                    status_str = red('{:<8}'.format(cstatus))
+                else:
+                    status_str = '{:<8}'.format(cstatus)
+                indicator = ''
+                if cstatus == 'False' and creason == 'Failed':
+                    indicator = red(' ←')
+                msg_display = cmsg[:60] if cstatus != 'False' else cmsg
+                print('  {:<36} {} {:<12} {}{}'.format(
+                    cond.get('type', ''), status_str, creason, msg_display, indicator))
+            print()
+
+        pipeline_ref = data.get('pipeline_ref')
+        if pipeline_ref:
+            print(bold('Pipeline:'))
+            print('  Run:      {}'.format(cyan(pipeline_ref)))
+            if data.get('start_time'):
+                print('  Started:  {}'.format(data['start_time']))
+            if data.get('end_time'):
+                print('  Ended:    {}'.format(data['end_time']))
+            dur = data.get('duration_seconds')
+            if dur is not None:
+                print('  Duration: {}s ({}m {}s)'.format(dur, dur // 60, dur % 60))
+            if data.get('pipeline_ui_url'):
+                print('  UI:       {}'.format(cyan(data['pipeline_ui_url'])))
+            print()
+        elif data.get('is_progressing'):
+            print(yellow('  ◌ Release is in progress — pipeline not yet started'))
+            print()
+
+        if data.get('is_failed'):
+            print(bold(red('Error Details:')))
+            for err in data.get('error_details', []):
+                print('  {}'.format(err))
+            if data.get('ec_policy'):
+                print()
+                print('{} {}'.format(bold('EC Policy:'), cyan(data['ec_policy'])))
+                if data.get('ec_policy_url'):
+                    print('  {}'.format(cyan('↳ ' + data['ec_policy_url'])))
+            if data.get('ai_analysis'):
+                print()
+                ai = data['ai_analysis']
+                print(bold('AI Analysis:'))
+                if isinstance(ai, dict):
+                    for key in ('root_cause', 'failure_category', 'recommended_fix',
+                                'confidence_score'):
+                        val = ai.get(key)
+                        if val is not None:
+                            print('  {:<22} {}'.format(key + ':', str(val)[:120]))
+                else:
+                    print('  {}'.format(dim('[available — use --json for full data]')))
+            print()
+
+        artifact_health = data.get('artifact_health', {})
+        if artifact_health:
+            print(bold('Artifact Health:'))
+            print('  {:<40} {:<8} {:<8} {:<8} {:<8} {}'.format(
+                'Component', '.sig', '.src', '.att', '.sbom', 'Status'))
+            print('  {}'.format('-' * 90))
+            for comp_name, health in sorted(artifact_health.items()):
+                if isinstance(health, dict):
+                    healthy = health.get('healthy', False)
+                    missing = health.get('missing', [])
+                    parts = []
+                    for art in ('sig', 'src', 'att', 'sbom'):
+                        art_data = health.get(art, {})
+                        exists = art_data.get('exists') if isinstance(art_data, dict) else None
+                        if exists is True:
+                            parts.append(green('{:<8}'.format('✓')))
+                        elif exists is False:
+                            parts.append(red('{:<8}'.format('✗')))
+                        else:
+                            parts.append(dim('{:<8}'.format('?')))
+                    status_str = green('OK') if healthy else red('INCOMPLETE ({})'.format(
+                        ', '.join(missing)))
+                    short_name = comp_name[:40]
+                    print('  {:<40} {} {}'.format(short_name, ' '.join(parts), status_str))
+            print()
+
+        print()
+        return
     args = ['describe', 'release', name]
-    if logs:
-        args.append('--logs')
-    if output_json or ctx.obj.get('json'):
+    if output_json:
         args.append('--json')
     _bash_fallback(args)
 
@@ -1023,7 +1433,7 @@ def config(ctx):
     """Show or modify configuration."""
     if ctx.invoked_subcommand is None:
         from cli import ic_config
-        from cli.formatting import bold, cyan, green, yellow, section_header
+        from cli.formatting import bold, cyan, green, section_header, yellow
         mode = ic_config.get_mode()
         section_header('Current Configuration')
         print()
@@ -1235,8 +1645,8 @@ def config_watch(ctx):
 @config_watch.command('list')
 def config_watch_list():
     """Show watched applications and watcher status."""
-    from cli.mode import ensure_cluster
     from cli.formatting import bold, cyan, dim, green, red
+    from cli.mode import ensure_cluster
 
     if ensure_cluster():
         from cli.data import get_watched_applications
@@ -1293,8 +1703,8 @@ def config_watch_list():
 @click.option('--force', '-f', is_flag=True, help='Add even if not in DB')
 def config_watch_add(app_name, force):
     """Add application to watch list."""
-    from cli.mode import ensure_cluster
     from cli.formatting import cyan, green, yellow
+    from cli.mode import ensure_cluster
 
     if ensure_cluster():
         from cli.data import add_watched_application
@@ -1429,8 +1839,8 @@ def _update_env_var(var_name, value):
 def stats(ctx):
     """Statistics."""
     if ctx.invoked_subcommand is None:
-        from cli.mode import ensure_cluster
         from cli.formatting import section_header
+        from cli.mode import ensure_cluster
         if ensure_cluster():
             from cli.data import get_overview_stats
             s = get_overview_stats()
@@ -1520,19 +1930,22 @@ def ai_analyze(args):
     - Saves result (to local DB or cluster API)
     """
     from cli.mode import is_cluster
+    if len(args) >= 2 and args[0] == 'onboarding':
+        _ai_analyze_onboarding(args[1])
+        return
     if len(args) >= 2 and args[0] == 'component':
         component = args[1]
         from cli.formatting import bold, cyan, green, red, yellow
 
         if is_cluster():
-            from cli.data import require_data, get_failure_details, submit_analysis
+            from cli.data import get_failure_details, require_data, submit_analysis
             if not require_data():
                 return
             failure = get_failure_details(component)
             if not failure:
                 print(red('No failure found for: {}'.format(component)))
-                from cli.suggest import format_suggestion
                 from cli.data import get_alerts
+                from cli.suggest import format_suggestion
                 try:
                     alerts = get_alerts()
                     comps = [f.get('component', '') for f in alerts.get('build_failures', [])]
@@ -1546,8 +1959,8 @@ def ai_analyze(args):
             from cli.db import require_db
             if not require_db():
                 return
-            from repositories.build_failure_repository import BuildFailureRepository
             from cli.db import get_repo
+            from repositories.build_failure_repository import BuildFailureRepository
             repo = get_repo(BuildFailureRepository)
             failure = repo.get_failure_details(component, cfg.APPLICATION_NAME)
             if not failure:
@@ -1563,8 +1976,8 @@ def ai_analyze(args):
 
         print(bold('Analyzing: ') + cyan(component))
         try:
-            from config import CollectorConfig
             from analyzers.build_failure_analyzer import ANALYSIS_TOOL, BuildFailureAnalyzer
+            from config import CollectorConfig
             config = CollectorConfig.from_env()
             if not config.llm:
                 print(red('No LLM provider configured'))
@@ -1582,8 +1995,8 @@ def ai_analyze(args):
                 failure.setdefault('commit_sha', failure.get('commit_sha', ''))
                 failure.setdefault('commit_context', failure.get('commit_context'))
 
-                from clients.llm_provider import create_llm_provider
                 from cli.progress import Spinner
+                from clients.llm_provider import create_llm_provider
                 llm = create_llm_provider(config.llm)
                 analyzer = BuildFailureAnalyzer(config=config, llm=llm)
                 with Spinner('Fetching context...'):
@@ -1640,13 +2053,126 @@ def ai_analyze(args):
     _bash_fallback(['ai', 'analyze'] + list(args))
 
 
+def _ai_analyze_onboarding(component):
+    """Run AI analysis on onboarding blockers for a component."""
+    from cli.formatting import bold, cyan, dim, green, red
+    from cli.mode import is_cluster
+
+    if not is_cluster():
+        print(red('Onboarding analysis requires cluster mode'))
+        return
+
+    from cli.data import require_data
+    if not require_data():
+        return
+
+    print(bold('Analyzing onboarding: ') + cyan(component))
+
+    from cli.data import get_onboarding_describe
+    from cli.progress import Spinner
+
+    with Spinner('Fetching onboarding data...'):
+        data = get_onboarding_describe(component)
+
+    if not data or data.get('error'):
+        print(red('  {}'.format(data.get('error', 'No data'))))
+        return
+
+    phase = data.get('phase', '?')
+    progress = data.get('progress', 0)
+
+    if phase == 'complete' and not data.get('bot_error_analysis'):
+        print(green('  Onboarding complete — no blockers to analyze'))
+        return
+
+    print('  Phase: {}  Progress: {}%'.format(phase, progress))
+
+    try:
+        from analyzers.onboarding_analyzer import (
+            OnboardingAnalyzer,
+        )
+        from clients.llm_provider import create_llm_provider
+        from config import CollectorConfig
+
+        config = CollectorConfig.from_env()
+        if not config.llm:
+            print(red('No LLM provider configured'))
+            print(cyan('  Set LLM_PROVIDER + ANTHROPIC_API_KEY'))
+            return
+
+        llm = create_llm_provider(config.llm)
+        analyzer = OnboardingAnalyzer(llm)
+
+        with Spinner('Running AI analysis ({})...'.format(config.llm.model)):
+            result = analyzer.analyze(data)
+
+        print(green('  ✓ Analysis complete'))
+        print()
+
+        # Display results
+        print(bold('Blocker:     ') + result.get('root_cause', '?'))
+        print()
+        print(bold('Category:    ') + result.get('failure_category', '?'))
+        step = result.get('blocked_step', '')
+        if step:
+            print(bold('Step:        ') + step)
+        print(bold('Confidence:  ') + '{}%'.format(
+            int(result.get('confidence_score', 0) * 100)))
+        print(bold('Auto-fix:    ') + (
+            green('yes') if result.get('can_auto_fix') else red('no')))
+        print()
+        print(bold('Fix:'))
+        fix_text = result.get('recommended_fix', '')
+        for line in fix_text.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                if stripped.startswith('- '):
+                    print('  {}'.format(stripped))
+                else:
+                    print('  {}'.format(stripped))
+
+        # Evidence
+        refs = result.get('evidence_references', [])
+        if refs:
+            print()
+            print(bold('Evidence:'))
+            for ref in refs:
+                url = ref.get('url', '')
+                desc = ref.get('description', '')
+                if url:
+                    print('  - {} {}'.format(desc, cyan(url)))
+                else:
+                    print('  - {}'.format(desc))
+
+        # Source transparency
+        transparency = result.get('source_transparency')
+        if transparency:
+            unavailable = transparency.get('sources_unavailable', [])
+            if unavailable:
+                print()
+                print(dim('Missing data: {}'.format(
+                    ', '.join(unavailable))))
+
+        print()
+        duration = result.get('duration', 0)
+        tokens = result.get('tokens_used', 0)
+        cost = result.get('cost_usd', 0)
+        print(dim('Duration: {:.1f}s  Tokens: {}  Cost: ${:.4f}'.format(
+            duration, tokens, cost)))
+
+    except Exception as e:
+        print(red('Analysis failed: {}'.format(e)))
+        import traceback
+        traceback.print_exc()
+
+
 @ai.command('batch')
 @click.argument('args', nargs=-1)
 def ai_batch(args):
     """Batch AI analysis — analyze all pending failures."""
     from cli.mode import is_cluster
     if is_cluster():
-        from cli.data import require_data, get_alerts, get_failure_details, submit_analysis
+        from cli.data import get_alerts, get_failure_details, require_data, submit_analysis
         from cli.formatting import bold, cyan, green, red, yellow
         if not require_data():
             return
@@ -1659,9 +2185,9 @@ def ai_batch(args):
         print(bold('Batch analyzing {} failure(s)...'.format(len(pending))))
         print()
         try:
-            from config import CollectorConfig
             from analyzers.build_failure_analyzer import ANALYSIS_TOOL, BuildFailureAnalyzer
             from clients.llm_provider import create_llm_provider
+            from config import CollectorConfig
             config = CollectorConfig.from_env()
             if not config.llm:
                 print(red('No LLM provider configured'))
@@ -1819,6 +2345,197 @@ def ai_status():
     print()
 
 
+@ai.command('regression')
+@click.argument('domain', default='conforma')
+@click.option('--app', help='Filter by application')
+@click.option('--limit', type=int, default=50, help='Max items to evaluate')
+@click.option('--verbose', '-v', is_flag=True, help='Show per-item details')
+@click.option('--use-llm', is_flag=True, help='Re-run LLM on completed data (slow)')
+def ai_regression(domain, app, limit, verbose, use_llm):
+    """Regression test AI analyzer against resolved data.
+
+    DOMAIN is 'conforma' (default) or 'onboarding'.
+    """
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+
+    if domain == 'onboarding':
+        _ai_regression_onboarding(app, limit, verbose, use_llm)
+        return
+
+    from cli.db import require_db
+    if not require_db():
+        return
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    from analyzers.conforma_regression import ConformaRegressionTester
+    tester = ConformaRegressionTester(config)
+    application = app or cfg.APPLICATION_NAME
+    result = tester.run(application=application, limit=limit, verbose=verbose)
+    if not result.get('analyzed'):
+        print(yellow('No resolved violations with AI analysis found'))
+        print(cyan("Run 'ic ai analyze' on more components to build history"))
+        return
+    section_header('Conforma AI Regression Report')
+    print()
+    m = result['metrics']
+    print(bold('Coverage:'))
+    print('  Resolved violations:   {}'.format(m['total_resolved']))
+    print('  With AI analysis:      {} ({}%)'.format(
+        m['with_ai_analysis'], m['ai_coverage_pct']))
+    print('  Evaluated this run:    {}'.format(result['evaluations_count']))
+    print()
+    print(bold('Accuracy:'))
+    print('  Category accuracy:     {}%'.format(int(m['accuracy'] * 100)))
+    print('  Calibration score:     {}'.format(m['calibration_score']))
+    print('  Auto-fix accuracy:     {}%'.format(int(m['auto_fix_accuracy'] * 100)))
+    print()
+    if m.get('by_category'):
+        print(bold('By Category:'))
+        for cat, cm in sorted(m['by_category'].items(),
+                              key=lambda x: x[1].get('total', 0), reverse=True):
+            total = cm.get('total', 0)
+            correct = cm.get('correct', 0)
+            pct = correct * 100 // max(total, 1)
+            conf = cm.get('avg_confidence', 0)
+            status = green('{}%'.format(pct)) if pct >= 80 else red('{}%'.format(pct))
+            print('  {:<30} {:>3} evals  {} acc  {:.0f}% conf'.format(
+                cat, total, status, conf * 100))
+        print()
+    if m.get('coverage_gaps'):
+        print(bold('Coverage Gaps (< 5% AI coverage):'))
+        for g in m['coverage_gaps']:
+            print(red('  {} — no AI analysis'.format(g)))
+        print()
+    if m.get('improvements'):
+        print(bold('Suggested Improvements:'))
+        for i, imp in enumerate(m['improvements'], 1):
+            print('  {}. {}'.format(i, imp))
+        print()
+
+
+def _ai_regression_onboarding(app, limit, verbose, use_llm):
+    """Regression test the onboarding analyzer against completed onboardings."""
+    from cli.formatting import bold, cyan, section_header, yellow
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    from analyzers.onboarding_regression import OnboardingRegressionTester
+    tester = OnboardingRegressionTester(config)
+    application = app or cfg.APPLICATION_NAME
+    result = tester.run(
+        application=application, limit=limit,
+        verbose=verbose, use_llm=use_llm,
+    )
+    if not result.get('analyzed'):
+        print(yellow('No completed onboardings found'))
+        print(cyan("Check 'ic onboard status' — need components at 90%+ progress"))
+        return
+    section_header('Onboarding AI Regression Report')
+    print()
+    m = result['metrics']
+    print(bold('Coverage:'))
+    print('  Completed onboardings:  {}'.format(m['total_completed']))
+    print('  Had bot errors:         {}'.format(m['with_errors']))
+    print('  With AI analysis:       {} ({}%)'.format(
+        m['with_analysis'], m['coverage_pct']))
+    print('  Evaluated this run:     {}'.format(m.get('evaluated', 0)))
+    print()
+    if m.get('evaluated', 0) > 0:
+        print(bold('Accuracy:'))
+        print('  Category accuracy:      {}%'.format(int(m['accuracy'] * 100)))
+        print('  Calibration score:      {}'.format(m['calibration_score']))
+        print()
+    if m.get('error_categories'):
+        print(bold('Error Patterns Observed:'))
+        for cat, count in sorted(m['error_categories'].items(),
+                                 key=lambda x: -x[1]):
+            print('  {:<30} {:>3} occurrences'.format(cat, count))
+        print()
+    if m.get('stuck_steps'):
+        print(bold('Frequently Stuck Steps:'))
+        for step, count in sorted(m['stuck_steps'].items(),
+                                  key=lambda x: -x[1]):
+            print('  {:<30} {:>3} times'.format(step, count))
+        print()
+    improvements = result.get('improvements', [])
+    if improvements:
+        print(bold('Suggested Improvements:'))
+        for i, imp in enumerate(improvements, 1):
+            print('  {}. {}'.format(i, imp))
+        print()
+
+
+@ai.command('analyze-config')
+@click.option('--app', help='Application name')
+def ai_analyze_config(app):
+    """Analyze Konflux configuration for issues and auto-rebuild candidates."""
+    from cli.db import require_db
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    if not require_db():
+        return
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        print(red('No LLM provider configured'))
+        print(cyan('  Set LLM_PROVIDER + ANTHROPIC_VERTEX_PROJECT_ID'))
+        return
+    from analyzers.config_analyzer import ConfigAnalyzer
+    application = app or cfg.APPLICATION_NAME
+    try:
+        analyzer = ConfigAnalyzer(config)
+        result = analyzer.run(application=application)
+    except Exception as e:
+        print(red('Analysis failed: {}'.format(e)))
+        return
+    if not result.get('analyzed'):
+        print(yellow('Analysis could not run'))
+        return
+    analysis = result['analysis']
+    section_header('Konflux Configuration Analysis — {}'.format(application))
+    print()
+    print(bold('Overall severity: ') + (
+        red(analysis['overall_severity'].upper())
+        if analysis['overall_severity'] == 'critical'
+        else yellow(analysis['overall_severity'].upper())
+        if analysis['overall_severity'] == 'warning'
+        else analysis['overall_severity'].upper()
+    ))
+    print(bold('Confidence: ') + '{}%'.format(
+        int(analysis['confidence_score'] * 100)))
+    print()
+    print(analysis.get('summary', ''))
+    print()
+    findings = analysis.get('findings', [])
+    if findings:
+        print(bold('Findings ({})'.format(len(findings))))
+        print()
+        for i, f in enumerate(findings, 1):
+            sev = f.get('severity', 'info')
+            sev_fmt = (
+                red('[CRITICAL]') if sev == 'critical'
+                else yellow('[WARNING]') if sev == 'warning'
+                else '[INFO]'
+            )
+            print('  {}. {} {}'.format(i, sev_fmt, bold(f.get('title', ''))))
+            print('     Category: {}  |  Fix: {}'.format(
+                f.get('category', ''), f.get('fix_action', '')))
+            print('     {}'.format(f.get('description', '')))
+            if f.get('recommendation'):
+                print(cyan('     → {}'.format(f['recommendation'])))
+            if f.get('affected_components'):
+                print('     Components: {}'.format(
+                    ', '.join(f['affected_components'])))
+            print()
+    candidates = analysis.get('auto_rebuild_candidates', [])
+    if candidates:
+        print(bold('Auto-rebuild Candidates:'))
+        for comp in candidates:
+            print(green('  ic rebuild {}'.format(comp)))
+        print()
+    print('Cost: ${:.4f} ({})'.format(
+        result.get('cost_usd', 0), result.get('model', '')))
+    print()
+
+
 @ai.command('stats')
 @click.option('--fixes', is_flag=True)
 def ai_stats(fixes):
@@ -1872,9 +2589,423 @@ def ai_stats(fixes):
     print()
 
 
+@ai.command('quality')
+@click.option('--calibration', is_flag=True, help='Show calibration analysis')
+def ai_quality(calibration):
+    """AI analysis quality metrics — accuracy from verdicts."""
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    from cli.mode import is_cluster
+
+    if is_cluster():
+        from cli.api_client import get_client
+        data = get_client().get('/api/v1/metrics/ai-quality',
+                                params={'application': cfg.APPLICATION_NAME})
+    else:
+        from cli.db import get_repo, require_db
+        from repositories.ai_analysis_repository import AIAnalysisRepository
+        if not require_db():
+            return
+        ai_repo = get_repo(AIAnalysisRepository)
+        data = ai_repo.get_quality_metrics(cfg.APPLICATION_NAME)
+
+    if not data or not data.get('total_with_verdict'):
+        print('  No verdicts recorded yet.')
+        print('  Verdicts are recorded automatically when builds pass after AI analysis,')
+        print('  or manually via: ic triage resolve <id> --verdict correct|partial|incorrect')
+        return
+
+    section_header('AI Quality Metrics')
+    print()
+    total = data['total_with_verdict']
+    acc = data.get('accuracy')
+    acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
+    color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
+
+    print('  Accuracy:     {}'.format(color(acc_str)))
+    print('  Verdicts:     {} total'.format(bold(str(total))))
+    print('    Correct:    {}'.format(green(str(data['correct']))))
+    print('    Partial:    {}'.format(yellow(str(data['partial']))))
+    print('    Incorrect:  {}'.format(red(str(data['incorrect']))))
+    if data.get('avg_confidence_correct') is not None:
+        print('  Avg conf (correct):   {}%'.format(
+            int(data['avg_confidence_correct'] * 100)))
+    if data.get('avg_confidence_incorrect') is not None:
+        print('  Avg conf (incorrect): {}%'.format(
+            int(data['avg_confidence_incorrect'] * 100)))
+
+    if data.get('by_category'):
+        print()
+        print('  {}'.format(bold('By Category:')))
+        for cat, stats in data['by_category'].items():
+            cat_acc = (stats['correct'] + stats['partial'] * 0.5) / stats['total'] if stats['total'] else 0
+            print('    {:<30} {}/{} ({}%)'.format(
+                cyan(cat), stats['correct'], stats['total'], int(cat_acc * 100)))
+
+    if calibration and not is_cluster():
+        _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow, section_header)
+    print()
+
+
+def _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow, section_header):
+    """Display calibration analysis: predicted vs actual accuracy."""
+    from analyzers.bayesian_priors import BayesianPriorService
+    from analyzers.calibration import CalibrationService
+    from analyzers.feature_weights import FeatureWeightService
+    from cli.db import get_db
+
+    print()
+    section_header('Calibration Analysis')
+
+    cal_service = CalibrationService(ai_repo)
+    curve = cal_service.compute_calibration_curve()
+
+    if not curve:
+        print('  No calibration data yet (need verdicts with confidence scores).')
+        return
+
+    print()
+    print('  {:<12} {:<10} {:<10} {}'.format(
+        bold('Predicted'), bold('Actual'), bold('Samples'), bold('Status')))
+    for bucket in curve:
+        lo = int(bucket.bucket_min * 100)
+        hi = int(bucket.bucket_max * 100)
+        actual_pct = int(bucket.actual_accuracy * 100)
+        diff = bucket.actual_accuracy - bucket.predicted_confidence
+        if abs(diff) < 0.1:
+            status = green('well-calibrated')
+        elif diff > 0:
+            status = cyan('underconfident')
+        else:
+            status = yellow('overconfident')
+        print('  {:<12} {:<10} {:<10} {}'.format(
+            '{}-{}%'.format(lo, hi), '{}%'.format(actual_pct),
+            str(bucket.sample_size), status))
+
+    score = cal_service.compute_calibration_score()
+    if score is not None:
+        color = green if score >= 0.85 else yellow if score >= 0.7 else red
+        print()
+        print('  Calibration Score: {} ({})'.format(
+            color(str(score)),
+            'excellent' if score >= 0.9 else 'good' if score >= 0.8 else
+            'fair' if score >= 0.7 else 'poor'))
+
+    try:
+        db = get_db()
+        weight_service = FeatureWeightService(db)
+        importance = weight_service.get_feature_importance()
+        if importance:
+            print()
+            print('  {}'.format(bold('Feature Importance (learned):')))
+            for fi in importance:
+                bar = int(fi['weight'] * 5)
+                indicator = green('*' * bar) if fi['weight'] >= 1.0 else yellow('*' * max(1, bar))
+                print('    {:<30} {:<6} {} ({} samples)'.format(
+                    cyan(fi['name']), str(fi['weight']), indicator, fi['sample_size']))
+    except Exception:
+        pass
+
+    try:
+        prior_service = BayesianPriorService(ai_repo)
+        stats = ai_repo.get_verdict_stats_by_category('build')
+        if stats:
+            print()
+            print('  {}'.format(bold('Bayesian Priors (by category):')))
+            for row in stats[:10]:
+                prior = prior_service.get_prior(row['category'])
+                flag = '*' if prior.is_bootstrapped else ''
+                print('    {:<30} P(correct)={:<6} ({} verdicts{})'.format(
+                    cyan(row['category']),
+                    '{:.2f}'.format(prior.prior_correct),
+                    prior.sample_size,
+                    ' bootstrapped' if flag else ''))
+    except Exception:
+        pass
+
+
+REVIEW_TOOL = {
+    'name': 'review_result',
+    'description': 'Record the structured AI analysis review result.',
+    'input_schema': {
+        'type': 'object',
+        'properties': {
+            'verdict': {
+                'type': 'string',
+                'enum': ['correct', 'partial', 'incorrect'],
+                'description': 'Overall verdict on the AI analysis accuracy.',
+            },
+            'gaps': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'what_ai_said': {'type': 'string'},
+                        'what_actually_happened': {'type': 'string'},
+                        'why_ai_missed': {'type': 'string'},
+                        'severity': {
+                            'type': 'string',
+                            'enum': ['critical', 'moderate', 'minor'],
+                        },
+                    },
+                    'required': ['what_ai_said', 'what_actually_happened',
+                                 'why_ai_missed', 'severity'],
+                },
+                'description': 'List of gaps between AI analysis and ground truth.',
+            },
+            'prompt_improvements': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': 'Concrete suggestions to improve the analyzer prompt.',
+            },
+            'data_improvements': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': 'Data sources that were missing but would have helped.',
+            },
+            'summary': {
+                'type': 'string',
+                'description': 'One-paragraph summary of the review findings.',
+            },
+        },
+        'required': ['verdict', 'gaps', 'prompt_improvements',
+                     'data_improvements', 'summary'],
+    },
+}
+
+
+@ai.command('review')
+@click.argument('component')
+@click.option('--jira', 'jira_key', default=None,
+              help='Jira issue key for ground truth (e.g. RHOAIENG-12345)')
+@click.option('--resolution', default=None,
+              help='Manual resolution text if no Jira available')
+def ai_review(component, jira_key, resolution):
+    """Review AI analysis accuracy against ground truth.
+
+    Compares a stored AI analysis against the actual resolution (from Jira
+    or manual input) to find gaps and suggest prompt improvements.
+
+    Examples:
+        ic ai review odh-dashboard-v3-5 --jira RHOAIENG-12345
+        ic ai review rhoai-v3-5-ea-2-stage-12345 --resolution "Fixed by rebuilding"
+    """
+    from cli.db import get_repo, require_db
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+    if not require_db():
+        return
+
+    from repositories.ai_analysis_repository import AIAnalysisRepository
+    ai_repo = get_repo(AIAnalysisRepository)
+    analysis = ai_repo.get_full_analysis(component, cfg.APPLICATION_NAME)
+
+    if not analysis:
+        print(red('No AI analysis found for: {}'.format(component)))
+        print(dim('  Run "ic ai analyze {}" first, or check the component name.'.format(
+            component)))
+        return
+
+    if not jira_key and not resolution:
+        print(red('Provide ground truth: --jira <key> or --resolution "<text>"'))
+        return
+
+    ground_truth_parts = []
+    if jira_key:
+        jira_client = _get_review_jira_client()
+        if not jira_client:
+            print(red('Jira not configured. Set JIRA_EMAIL and JIRA_TOKEN.'))
+            return
+        print(dim('Fetching Jira issue {}...'.format(jira_key)))
+        issue = jira_client.get_issue(jira_key)
+        if not issue:
+            print(red('Could not fetch Jira issue: {}'.format(jira_key)))
+            return
+        ground_truth_parts.append('Jira: {} — {}'.format(
+            issue['key'], issue['summary']))
+        ground_truth_parts.append('Status: {}'.format(issue['status']))
+        if issue.get('description'):
+            desc = issue['description']
+            if len(desc) > 2000:
+                desc = desc[:2000] + '...'
+            ground_truth_parts.append('Description:\n{}'.format(desc))
+        if issue.get('comments'):
+            ground_truth_parts.append('Comments (latest 5):')
+            for c in issue['comments'][-5:]:
+                author = c.get('author', {}).get('displayName', '?')
+                body = c.get('body', '')
+                if len(body) > 500:
+                    body = body[:500] + '...'
+                ground_truth_parts.append('  {} — {}: {}'.format(
+                    c.get('created', '')[:10], author, body))
+
+    if resolution:
+        ground_truth_parts.append('Manual resolution: {}'.format(resolution))
+
+    ground_truth = '\n'.join(ground_truth_parts)
+
+    prompt_template_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        'prompts', 'ai_review.md')
+    try:
+        with open(prompt_template_path) as f:
+            prompt_template = f.read()
+    except FileNotFoundError:
+        print(red('Review prompt template not found: {}'.format(prompt_template_path)))
+        return
+
+    analysis_json = analysis.get('analysis_json')
+    if isinstance(analysis_json, str):
+        try:
+            analysis_json = json_mod.loads(analysis_json)
+        except (json_mod.JSONDecodeError, TypeError):
+            pass
+    analysis_summary = ''
+    if isinstance(analysis_json, dict):
+        for key in ('differential_diagnosis', 'evidence_references',
+                     'source_transparency', 'fix_action_type'):
+            val = analysis_json.get(key)
+            if val:
+                analysis_summary += '{}: {}\n'.format(key, json_mod.dumps(val, default=str)[:500])
+    elif isinstance(analysis_json, list):
+        for item in analysis_json:
+            if isinstance(item, dict) and item.get('type') == 'tool_use':
+                inp = item.get('input', {})
+                for key in ('differential_diagnosis', 'evidence_references',
+                             'source_transparency', 'fix_action_type'):
+                    val = inp.get(key)
+                    if val:
+                        analysis_summary += '{}: {}\n'.format(
+                            key, json_mod.dumps(val, default=str)[:500])
+
+    user_prompt = prompt_template.format(
+        analysis_type=analysis.get('analysis_type', 'unknown'),
+        component=component,
+        model_used=analysis.get('model_used', 'unknown'),
+        analyzed_at=str(analysis.get('analyzed_at', '?')),
+        confidence_score=int((analysis.get('confidence_score') or 0) * 100),
+        root_cause=analysis.get('root_cause', 'N/A'),
+        failure_category=analysis.get('failure_category', 'N/A'),
+        recommended_fix=analysis.get('recommended_fix', 'N/A'),
+        analysis_json_summary=analysis_summary or 'No additional analysis details.',
+        ground_truth=ground_truth,
+    )
+
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        print(red('No LLM provider configured'))
+        print(cyan('  Set LLM_PROVIDER + ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID'))
+        return
+
+    from cli.progress import Spinner
+    from clients.llm_provider import create_llm_provider
+    llm = create_llm_provider(config.llm)
+
+    print(bold('Reviewing: ') + cyan(component))
+    print(dim('  Analysis type: {} | Confidence: {}% | Model: {}'.format(
+        analysis.get('analysis_type', '?'),
+        int((analysis.get('confidence_score') or 0) * 100),
+        analysis.get('model_used', '?'))))
+    print()
+
+    import time as _time
+    t0 = _time.time()
+    try:
+        with Spinner('Running review ({})...'.format(config.llm.model)):
+            response = llm.create_message(
+                system='You are a CI/CD analysis quality reviewer.',
+                user_content=user_prompt,
+                tools=[REVIEW_TOOL],
+            )
+        duration = _time.time() - t0
+    except Exception as e:
+        print(red('Review failed: {}'.format(e)))
+        return
+
+    result = None
+    for tc in response.tool_calls:
+        if tc.get('name') == 'review_result':
+            result = tc.get('input', {})
+            break
+
+    if not result:
+        print(yellow('LLM did not return structured review output.'))
+        if response.content:
+            print(response.content[:1000])
+        return
+
+    verdict = result.get('verdict', '?')
+    verdict_color = green if verdict == 'correct' else yellow if verdict == 'partial' else red
+    section_header('AI Review: {}'.format(component))
+    print()
+    print('  {} {}'.format(bold('Verdict:'), verdict_color(verdict.upper())))
+    print('  {} {:.1f}s'.format(bold('Duration:'), duration))
+    print()
+
+    gaps = result.get('gaps', [])
+    if gaps:
+        print(bold('  Gaps Found: {}'.format(len(gaps))))
+        for i, gap in enumerate(gaps, 1):
+            sev = gap.get('severity', '?')
+            sev_color = red if sev == 'critical' else yellow if sev == 'moderate' else dim
+            print()
+            print('  {}. {} {}'.format(i, sev_color('[{}]'.format(sev.upper())), ''))
+            print('     {} {}'.format(bold('AI said:'), gap.get('what_ai_said', '?')[:120]))
+            print('     {} {}'.format(bold('Actual:'), gap.get('what_actually_happened', '?')[:120]))
+            print('     {} {}'.format(bold('Why missed:'), gap.get('why_ai_missed', '?')[:120]))
+        print()
+
+    improvements = result.get('prompt_improvements', [])
+    if improvements:
+        print(bold('  Prompt Improvements:'))
+        for imp in improvements:
+            print('    - {}'.format(imp[:150]))
+        print()
+
+    data_imps = result.get('data_improvements', [])
+    if data_imps:
+        print(bold('  Data Improvements:'))
+        for imp in data_imps:
+            print('    - {}'.format(imp[:150]))
+        print()
+
+    summary = result.get('summary', '')
+    if summary:
+        print(bold('  Summary:'))
+        print('    {}'.format(summary[:500]))
+        print()
+
+    if verdict in ('correct', 'partial', 'incorrect'):
+        try:
+            ai_repo.record_verdict(
+                component, cfg.APPLICATION_NAME, verdict,
+                actual_root_cause=summary[:500] if verdict != 'correct' else None,
+                verdict_by='ai-review',
+            )
+            print(green('  ✓ Verdict recorded: {}'.format(verdict)))
+        except Exception as e:
+            print(yellow('  Could not record verdict: {}'.format(e)))
+
+    print()
+
+
+def _get_review_jira_client():
+    """Create a JiraClient for review from environment config."""
+    from clients.jira_client import JiraClient
+    base_url = os.environ.get('JIRA_BASE_URL', 'https://issues.redhat.com')
+    email = os.environ.get('JIRA_EMAIL', '')
+    token = os.environ.get('JIRA_TOKEN', '')
+    project = os.environ.get('JIRA_PROJECT', 'RHOAIENG')
+    if not email or not token:
+        return None
+    return JiraClient(base_url, email, token, project)
+
+
 # --- Top-level commands ---
 
+from datetime import UTC
+
 from cli.commands.triage import triage  # noqa: E402
+
 cli.add_command(triage)
 
 
@@ -1885,6 +3016,7 @@ cli.add_command(triage)
 def source(ctx, name, prs):
     """Show component source info: repo, branch, image, and optionally open PRs."""
     import os
+
     from cli.formatting import bold, cyan, dim, red, section_header, yellow
     from clients.kubernetes import KubernetesClient
     from openshift_auth import _ensure_k8s_config
@@ -1966,6 +3098,7 @@ def source(ctx, name, prs):
 def resolved(ctx, days, since, to):
     """Resolved components."""
     import re
+
     from cli.db import get_repo, print_table, require_db
     from cli.formatting import cyan, dim, red, section_header
     from repositories.build_failure_repository import BuildFailureRepository
@@ -2057,6 +3190,7 @@ def working():
 def stale(ctx, application, output_json, no_cache, no_diagnose):
     """Detect components with untriggered commits."""
     import json as json_mod
+
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
     from proactive.health_monitor import HealthMonitor
 
@@ -2151,6 +3285,7 @@ def _print_stale_footer(result, dim, yellow, cyan, bold):
 def nightly(ctx, application, output_json):
     """Nightly build status: FBC fragment health + blockers."""
     import json as json_mod
+
     from cli.db import require_db
     from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
     from config import CollectorConfig
@@ -2226,6 +3361,33 @@ def nightly(ctx, application, output_json):
             gha_color(conclusion), gha.get('created_at', '')[:10]))
         if gha.get('url'):
             print('  {}'.format(dim(gha['url'])))
+
+    pcc = status.get('pcc_freshness')
+    if pcc:
+        pcc_status = pcc.get('status', 'unknown')
+        if pcc_status == 'stale':
+            missing = pcc.get('missing_versions', [])
+            print(bold(red('PCC Cache: STALE')) +
+                  ' — {} version(s) in registry not in cache'.format(len(missing)))
+            if missing:
+                print('  Missing: {}'.format(', '.join(missing[:10])))
+            print('  ' + yellow('FBC fragment builds will produce catalogs missing these versions'))
+            print('  ' + dim('Fix: run regen-pcc-cache workflow in RHOAI-Build-Config'))
+        elif pcc_status == 'fresh':
+            print(bold('PCC Cache:') + ' ' + green('fresh') +
+                  ' ({} versions cached)'.format(pcc.get('cached_versions', 0)))
+        else:
+            print(bold('PCC Cache:') + ' ' + dim('unknown (check skipped)'))
+
+        last_regen = pcc.get('last_regen')
+        if last_regen:
+            regen_date = last_regen.get('date', '')[:10]
+            regen_conclusion = last_regen.get('conclusion', 'unknown')
+            regen_color = green if regen_conclusion == 'success' else red
+            print('  Last regen: {} ({})'.format(regen_color(regen_conclusion), regen_date))
+            if last_regen.get('url'):
+                print('  {}'.format(dim(last_regen['url'])))
+
     print()
     print(cyan('Tip:') + ' Use {} for details on a blocker'.format(bold('ic describe <component>')))
     print()
@@ -2239,6 +3401,7 @@ def nightly(ctx, application, output_json):
 def nightly_history(ctx, application, days, output_json):
     """Nightly build history: operator builds + FBC fragment freshness."""
     import json as json_mod
+
     from cli.formatting import bold, dim, green, red, section_header, yellow
 
     output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
@@ -2297,10 +3460,10 @@ def nightly_history(ctx, application, days, output_json):
             last = fbc.get('last_successful_build')
             st = fbc.get('current_status', 'unknown')
             if last:
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
+                from datetime import datetime
+                now = datetime.now(UTC)
                 if hasattr(last, 'tzinfo') and last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
+                    last = last.replace(tzinfo=UTC)
                 elif isinstance(last, str):
                     last = datetime.fromisoformat(last.replace('Z', '+00:00'))
                 hours_ago = (now - last).total_seconds() / 3600
@@ -2319,8 +3482,9 @@ def nightly_history(ctx, application, days, output_json):
 def lookup(ctx, image_ref):
     """Find which component produced a given image or digest."""
     import json as json_mod
+
     from cli.db import get_repo, print_table, require_db
-    from cli.formatting import bold, cyan, section_header
+    from cli.formatting import bold, cyan, green, section_header
     from repositories.build_failure_repository import BuildFailureRepository
     output_json = ctx.obj.get('json') if ctx.obj else False
 
@@ -2332,21 +3496,44 @@ def lookup(ctx, image_ref):
         pass
 
     cluster_matches = []
+    all_comps = []
+    url_component = None
     try:
         from clients.kubernetes import KubernetesClient
         kc = KubernetesClient(namespace=cfg.NAMESPACE)
         all_comps = kc.list_components()
         term = image_ref.lower()
         cluster_matches = [c for c in all_comps if term in (c.get('container_image') or '').lower()]
+
+        if not cluster_matches and '/' in image_ref:
+            path = image_ref.split('/')[-1].split('@')[0].split(':')[0]
+            if path:
+                url_component = path
+                cluster_matches = [c for c in all_comps if c.get('name', '') == path]
+                if not cluster_matches:
+                    import re
+                    core = re.sub(r'-(rhel[0-9]+|v[0-9]+-[0-9]+-.*|ea-[0-9]+.*)$', '', path)
+                    if core and core != path:
+                        cluster_matches = [c for c in all_comps
+                                           if c.get('name', '').startswith(core)]
     except Exception:
         pass
 
+    quay_match = None
+    if not db_matches and not cluster_matches:
+        quay_match = _resolve_via_quay(image_ref, all_comps)
+
     if output_json:
-        print(json_mod.dumps({
+        result = {
             'query': image_ref,
             'db_matches': db_matches,
             'cluster_matches': cluster_matches,
-        }, indent=2, default=str))
+        }
+        if url_component:
+            result['url_component'] = url_component
+        if quay_match:
+            result['quay_match'] = quay_match
+        print(json_mod.dumps(result, indent=2, default=str))
         return
 
     section_header('Image Lookup: {}'.format(image_ref[:60]))
@@ -2370,7 +3557,10 @@ def lookup(ctx, image_ref):
 
     print()
     if cluster_matches:
-        print(bold('Found in cluster components:'))
+        if url_component:
+            print(bold('Found via URL path (component: {}):'.format(url_component)))
+        else:
+            print(bold('Found in cluster components:'))
         print_table(
             ['Component', 'Application', 'Image'],
             [(c['name'], c['application'], c['container_image'][:70]) for c in cluster_matches],
@@ -2379,8 +3569,117 @@ def lookup(ctx, image_ref):
         print('  No matches in cluster components.')
     print()
 
-    if not db_matches and not cluster_matches:
+    if quay_match:
+        print(bold('Resolved via Quay manifest (per-arch image):'))
+        print('  {} {}'.format(green('Component:'), quay_match.get('component', '')))
+        print('  {} {}/{}'.format(
+            green('Platform:'),
+            quay_match.get('os', ''), quay_match.get('architecture', '')))
+        print('  {} {}'.format(green('Manifest list tag:'), quay_match.get('manifest_list_tag', '')))
+        print()
+
+    if not db_matches and not cluster_matches and not quay_match:
         print(cyan('No matches found. Try a longer digest or full image URL.'))
+        print()
+
+
+def _resolve_via_quay(image_ref, all_comps):
+    """Try to resolve a per-arch digest via Quay manifest list API."""
+    from clients.registry_client import RegistryClient
+
+    target_digest = image_ref.strip()
+    if not target_digest.startswith('sha256:'):
+        if '@sha256:' in image_ref:
+            target_digest = image_ref.split('@')[-1]
+        else:
+            return None
+
+    if len(target_digest) < 20:
+        return None
+
+    rc = RegistryClient()
+
+    if '/' in image_ref and '@' in image_ref:
+        registry, repository, _ = rc.parse_image_ref(image_ref)
+        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+        if result:
+            comp_name = repository.rsplit('/', 1)[-1] if '/' in repository else repository
+            result['component'] = comp_name
+            return result
+
+    for comp in all_comps[:20]:
+        ci = comp.get('container_image', '')
+        if not ci:
+            continue
+        registry, repository, _ = rc.parse_image_ref(ci)
+        result = rc.resolve_per_arch_digest(registry, repository, target_digest)
+        if result:
+            result['component'] = comp.get('name', '')
+            return result
+
+    return None
+
+
+@cli.command('snapshot-check')
+@click.pass_context
+def snapshot_check(ctx):
+    """Check snapshot freshness — detect stale or failed build images."""
+    import json as json_mod
+
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    from proactive.health_monitor import HealthMonitor
+
+    output_json = ctx.obj.get('json') if ctx.obj else False
+    monitor = HealthMonitor(db=None)
+    result = monitor.check_snapshot_freshness()
+
+    if output_json:
+        print(json_mod.dumps(result, indent=2, default=str))
+        return
+
+    if result.get('error'):
+        print(red('Error: {}'.format(result['error'])))
+        raise SystemExit(1)
+
+    section_header('Snapshot Freshness — {}'.format(result.get('application', '')))
+    print()
+    print('{}  {}'.format(bold('Snapshot:'), cyan(result.get('snapshot', ''))))
+    print('{}  {}'.format(bold('Created:'), result.get('snapshot_created', '')))
+    print('{}  {}'.format(bold('Components:'), result.get('total_components', 0)))
+    print()
+
+    stale = result.get('stale', [])
+    no_builds = result.get('no_builds', [])
+    fresh_count = result.get('fresh_count', 0)
+
+    if not stale and not no_builds:
+        print(green('All {} components are fresh — snapshot matches latest builds.'.format(fresh_count)))
+        print()
+        return
+
+    print('{} fresh, {} stale, {} no builds'.format(
+        green(str(fresh_count)), red(str(len(stale))), yellow(str(len(no_builds)))))
+    print()
+
+    if stale:
+        print(bold('Stale components:'))
+        print()
+        for s in stale:
+            reason = s.get('reason', '')
+            if reason == 'latest_build_failed':
+                print('  {} {}'.format(red('FAILED'), bold(s['component'])))
+                print('    Latest build failed: {} ({})'.format(
+                    s.get('latest_build_pr', ''), s.get('latest_build_date', '')[:10]))
+                print('    Snapshot has pre-failure image')
+            elif reason == 'newer_build_available':
+                print('  {} {}'.format(yellow('STALE'), bold(s['component'])))
+                print('    Newer build available: {}'.format(s.get('latest_build_date', '')[:10]))
+            print()
+
+    if no_builds:
+        print(bold('No builds found ({}):'.format(len(no_builds))))
+        for nb in no_builds:
+            print('  {} {}'.format(yellow('?'), nb['component']))
         print()
 
 
@@ -2432,6 +3731,7 @@ def history(component):
 def dashboard():
     """Full dashboard view."""
     from datetime import datetime
+
     from cli.db import get_repo, require_db
     from cli.formatting import bold, cyan, green, red, section_header, yellow
     from repositories.ai_analysis_repository import AIAnalysisRepository
@@ -2508,6 +3808,7 @@ def fix(args):
 def export_cmd(args):
     """Export analysis to ticket format (e.g. ic export component-name slack)."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
     if ensure_cluster() and len(args) >= 1:
         from cli.data import get_export
@@ -2525,6 +3826,102 @@ def export_cmd(args):
     _bash_fallback(['export'] + list(args))
 
 
+@cli.command()
+@click.argument('component')
+@click.option('-n', '--namespace', default=None,
+              help='Kubernetes namespace (default: from config)')
+@click.option('--dry-run', is_flag=True, help='Show what would be done without executing')
+@click.option('--wait', is_flag=True, help='Wait for the new PipelineRun to appear')
+def rebuild(component, namespace, dry_run, wait):
+    """Trigger a fresh Konflux build for a component.
+
+    Annotates the Component CR with build.appstudio.openshift.io/request=trigger-pac-build,
+    which starts a new PipelineRun (event_type=incoming). This is the preferred way to
+    retrigger builds when source_image.exists fails due to PipelineRunTimeout.
+
+    Examples:
+      ic rebuild odh-workbench-jupyter-minimal-cpu-py312-v3-5-ea-2
+      ic rebuild my-component --dry-run
+      ic rebuild my-component --wait
+    """
+    import time
+
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+
+    ns = namespace or cfg.NAMESPACE
+    if not ns:
+        click.echo(red('Error: no namespace configured.'), err=True)
+        click.echo('  Set NAMESPACE env var or use: ic config set-app <app>', err=True)
+        sys.exit(1)
+
+    annotation = 'build.appstudio.openshift.io/request=trigger-pac-build'
+
+    if dry_run:
+        section_header('Rebuild (dry run)')
+        print()
+        print('  Would annotate component {} in namespace {}:'.format(
+            bold(component), cyan(ns)))
+        print('    kubectl annotate components/{} -n {} {} --overwrite'.format(
+            component, ns, annotation))
+        print()
+        return
+
+    section_header('Rebuilding {}'.format(component))
+    print()
+
+    try:
+        from clients.kubernetes import KubernetesClient
+        kc = KubernetesClient(namespace=ns)
+
+        meta = kc.get_component_metadata(component, namespace=ns)
+        if meta is None:
+            click.echo(red('  Component not found: {}'.format(component)), err=True)
+            click.echo('  Check the name with: kubectl get components -n {}'.format(ns), err=True)
+            sys.exit(1)
+
+        print('  Component: {}'.format(bold(component)))
+        print('  Namespace: {}'.format(ns))
+        if meta.get('repository_url'):
+            print('  Repository: {}'.format(meta['repository_url']))
+        if meta.get('branch'):
+            print('  Branch: {}'.format(meta['branch']))
+        print()
+
+        kc.trigger_rebuild(component, namespace=ns)
+        print(green('  Build triggered successfully'))
+        print()
+        print('  The annotation {} was set.'.format(cyan(annotation)))
+        print('  Konflux will start a new PipelineRun (event_type=incoming).')
+        print()
+
+        if wait:
+            print('  Waiting for new PipelineRun to appear...')
+            for _ in range(30):
+                time.sleep(2)
+                runs = kc.list_recent_pipelineruns(component, namespace=ns, limit=1)
+                if runs and runs[0].get('status') == 'running':
+                    run = runs[0]
+                    print(green('  PipelineRun started: {}'.format(run['name'])))
+                    print('  Status: {}'.format(yellow('running')))
+                    print()
+                    return
+            print(yellow('  No running PipelineRun found after 60s — check Konflux UI'))
+            print()
+            return
+
+        print('  Monitor with:')
+        print('    {}'.format(cyan('ic get pipelineruns | head')))
+        print()
+
+    except Exception as e:
+        click.echo(red('  Error triggering rebuild: {}'.format(e)), err=True)
+        click.echo('', err=True)
+        click.echo('  Manual alternative:', err=True)
+        click.echo('    kubectl annotate components/{} -n {} {} --overwrite'.format(
+            component, ns, annotation), err=True)
+        sys.exit(1)
+
+
 # --- conforma group ---
 
 @cli.group(invoke_without_command=True)
@@ -2540,15 +3937,26 @@ def conforma(ctx):
 
 
 @conforma.command('report')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.argument('args', nargs=-1)
-def conforma_report(args):
+def conforma_report(stage, nightly, args):
     """Daily Conforma violations report."""
     import json as json_mod
+
     from cli.mode import ensure_cluster
-    if ensure_cluster():
-        from cli.data import get_conforma_report
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.formatting import dim, red, section_header, yellow
-        data = get_conforma_report()
+        if stage or nightly:
+            from cli.data import get_conforma_violations
+            reporter_env = 'stage' if stage else None
+            reporter_build_type = 'nightly' if nightly else None
+            data = get_conforma_violations(
+                reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        else:
+            from cli.data import get_conforma_report
+            data = get_conforma_report()
         if isinstance(data, str):
             print(data)
         elif isinstance(data, dict):
@@ -2572,43 +3980,136 @@ def conforma_report(args):
 
 
 @conforma.command('categories')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
 @click.argument('args', nargs=-1)
-def conforma_categories(args):
+def conforma_categories(stage, nightly, args):
     """Violation categories across components."""
     from cli.mode import ensure_cluster
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    if use_reporter or ensure_cluster():
         from cli.data import get_conforma_violations
         from cli.formatting import bold, section_header
-        data = get_conforma_violations()
-        categories = {}
+        from utils.conforma_utils import categorize_policy, count_unique_violations
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        data = get_conforma_violations(
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        groups = {}
+        scenarios = {}
         if isinstance(data, list):
             for v in data:
-                cat = v.get('scenario', v.get('error_type', 'unknown'))
-                categories[cat] = categories.get(cat, 0) + 1
+                scenario = v.get('scenario', v.get('error_type', 'unknown'))
+                cat = categorize_policy(scenario)
+                uv = v.get('unique_violations') or 0
+                if not uv:
+                    uv, _ = count_unique_violations(v.get('violation_summary', ''))
+                if cat not in groups:
+                    groups[cat] = {'components': 0, 'violations': 0}
+                groups[cat]['components'] += 1
+                groups[cat]['violations'] += uv
+                scenarios[scenario] = scenarios.get(scenario, 0) + 1
         section_header('Conforma Categories')
         print()
-        for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
-            print('  {:<50} {}'.format(cat[:50], bold(str(count))))
+        for cat in ('FBC', 'Components', 'Charts'):
+            g = groups.get(cat, {'components': 0, 'violations': 0})
+            print('  {:<15} {} components, {} unique violations'.format(
+                bold(cat + ':'), g['components'], g['violations']))
+        print()
+        section_header('By Scenario')
+        print()
+        for sc, count in sorted(scenarios.items(), key=lambda x: -x[1]):
+            print('  {:<60} {}'.format(sc[:60], bold(str(count))))
         print()
         return
     _bash_fallback(['conforma', 'categories'] + list(args))
 
 
-@conforma.command('csv')
-@click.argument('args', nargs=-1)
-def conforma_csv(args):
-    """Export Conforma data as CSV."""
+@conforma.command('rules')
+@click.option('--app', 'app_name', default=None, help='Query a specific application')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
+@click.option('--current', 'policy_filter', flag_value='current', default=True)
+@click.option('--future', 'policy_filter', flag_value='future')
+@click.option('--all', 'policy_filter', flag_value='all')
+def conforma_rules(app_name, stage, nightly, policy_filter):
+    """Violations grouped by rule with affected components."""
+    from cli.db import check_db
     from cli.mode import ensure_cluster
-    if ensure_cluster():
+    use_reporter = stage or nightly
+    use_local_db = app_name and not use_reporter and check_db()
+    if use_reporter or use_local_db or ensure_cluster():
+        from cli.data import get_conforma_rules
+        from cli.formatting import bold, dim, section_header
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        include_future = _policy_filter_to_include_future(policy_filter)
+        effective_app = app_name or cfg.APPLICATION_NAME
+        rules = get_conforma_rules(
+            application=app_name,
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type,
+            include_future=include_future)
+        source_label = ''
+        if stage:
+            source_label = ' (stage)'
+        if nightly:
+            source_label += ' (nightly)' if source_label else ' (nightly)'
+        section_header('Conforma Rules — {}{}'.format(effective_app, source_label))
+        if not rules:
+            print('\n  No violations found.\n')
+            return
+        from utils.conforma_utils import strip_version_suffix
+        all_comps = set()
+        for r in rules:
+            all_comps.update(r.get('components', []))
+        print('\n{} rules failing across {} components\n'.format(
+            bold(str(len(rules))), bold(str(len(all_comps)))))
+        for r in rules:
+            rule_name = r['rule']
+            count = r['count']
+            print('{:<55} {} components'.format(bold(rule_name), count))
+            solution = r.get('solution', '')
+            if solution:
+                sol_text = solution[:120] + '...' if len(solution) > 120 else solution
+                print('  Solution: {}'.format(dim(sol_text)))
+            comps = r.get('components', [])
+            if comps:
+                display_comps = [strip_version_suffix(c) for c in comps]
+                comp_line = ', '.join(display_comps[:8])
+                if len(comps) > 8:
+                    comp_line += ', ... (+{})'.format(len(comps) - 8)
+                print('  Components: {}'.format(comp_line))
+            print()
+        return
+    _bash_fallback(['conforma', 'rules'])
+
+
+@conforma.command('csv')
+@click.option('--app', 'app_name', default=None, help='Query a specific application')
+@click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
+@click.option('--nightly', is_flag=True, help='Show nightly build violations (from reporter)')
+@click.argument('args', nargs=-1)
+def conforma_csv(app_name, stage, nightly, args):
+    """Export Conforma data as CSV."""
+    from cli.db import check_db
+    from cli.mode import ensure_cluster
+    use_reporter = stage or nightly
+    use_local_db = app_name and not use_reporter and check_db()
+    if use_reporter or use_local_db or ensure_cluster():
         from cli.data import get_conforma_violations
-        data = get_conforma_violations()
-        print('component,violations,warnings,scenario,first_seen')
+        reporter_env = 'stage' if stage else None
+        reporter_build_type = 'nightly' if nightly else None
+        data = get_conforma_violations(
+            application=app_name,
+            reporter_env=reporter_env, reporter_build_type=reporter_build_type)
+        print('component,violations,unique_violations,warnings,scenario,first_seen')
         if isinstance(data, list):
             for v in data:
                 comp = v.get('component', v.get('component_name', ''))
-                print('{},{},{},{},{}'.format(
+                print('{},{},{},{},{},{}'.format(
                     comp,
                     v.get('violations_count', 0),
+                    v.get('unique_violations', ''),
                     v.get('warnings_count', 0),
                     v.get('scenario', v.get('error_type', '')),
                     str(v.get('first_seen', ''))[:10],
@@ -2631,6 +4132,118 @@ def conforma_scenarios(args):
     _bash_fallback(['conforma', 'scenarios'] + list(args))
 
 
+@conforma.command('evaluate')
+@click.option('--policy', 'policy_tier', default='future',
+              type=click.Choice(['future', 'stage', 'prod']),
+              help='Policy tier to evaluate against (default: future)')
+@click.option('--workers', default=5, type=int,
+              help='Parallel workers for ec validate (default: 5)')
+@click.option('--component', 'component_filter', default=None,
+              help='Evaluate only components matching this substring')
+@click.option('--app', 'app_name', default=None,
+              help='Application to evaluate (default: current)')
+def conforma_evaluate(policy_tier, workers, component_filter, app_name):
+    """Evaluate snapshot images against EC policy locally.
+
+    Runs `ec validate` against the latest snapshot using the specified policy
+    tier (future/stage/prod). Results are saved to the DB with is_future=True
+    and can be viewed with `ic get conforma --all`.
+
+    This replicates the conforma-reporter view but from cluster data directly.
+
+    Examples:
+        ic conforma evaluate                      # future policy (default)
+        ic conforma evaluate --policy stage        # stage policy
+        ic conforma evaluate --component fbc       # filter components
+        ic conforma evaluate --workers 10          # more parallelism
+    """
+    from cli.db import require_db
+    if not require_db():
+        sys.exit(1)
+
+    from collectors.conforma_evaluator import ConformaEvaluator
+    from config import CollectorConfig
+
+    try:
+        config = CollectorConfig.from_env()
+    except Exception as e:
+        click.echo('Error loading config: {}'.format(e), err=True)
+        sys.exit(1)
+
+    evaluator = ConformaEvaluator(config)
+    effective_app = app_name or cfg.APPLICATION_NAME
+    result = evaluator.run(
+        app_name=effective_app,
+        policy_tier=policy_tier,
+        workers=workers,
+        component_filter=component_filter,
+    )
+
+    if result['evaluated'] == 0:
+        sys.exit(1)
+
+
+@conforma.command('catalog')
+@click.option('--search', default=None, help='Search rules by name or description')
+@click.option('--package', default=None, help='Filter by rule package')
+@click.option('--stats', is_flag=True, help='Show catalog statistics')
+def conforma_catalog(search, package, stats):
+    """Browse the Conforma rule catalog (189 rules from conforma.dev).
+
+    Examples:
+        ic conforma catalog --stats               # catalog overview
+        ic conforma catalog --search hermetic      # find rules
+        ic conforma catalog --package labels       # rules in a package
+    """
+    from cli.db import require_db
+    if not require_db():
+        sys.exit(1)
+
+    from cli.db import get_repo
+    from cli.formatting import bold, dim, section_header
+    from repositories.conforma_rule_catalog_repository import ConformaRuleCatalogRepository
+
+    repo = get_repo(ConformaRuleCatalogRepository)
+
+    if stats:
+        catalog_stats = repo.get_catalog_stats()
+        section_header('Conforma Rule Catalog')
+        print()
+        print('  Total rules:              {}'.format(bold(str(catalog_stats['total']))))
+        print('  With reporter solution:   {}'.format(catalog_stats['with_reporter_solution']))
+        print('  With typical fix:         {}'.format(catalog_stats['with_typical_fix']))
+        print('  Packages:                 {}'.format(catalog_stats['packages']))
+        print('  Policy types:             {}'.format(catalog_stats['policy_types']))
+        print()
+        return
+
+    if search:
+        rules = repo.search(search)
+    elif package:
+        rules = repo.get_by_package(package)
+    else:
+        rules = repo.get_all()
+
+    if not rules:
+        print('No rules found.')
+        return
+
+    section_header('Conforma Rule Catalog ({} rules)'.format(len(rules)))
+    print()
+    for r in rules:
+        rule_id = r.get('rule_id', '')
+        desc = r.get('description', '') or ''
+        desc_short = desc[:100] + '...' if len(desc) > 100 else desc
+        print('  {}'.format(bold(rule_id)))
+        if desc_short:
+            print('    {}'.format(dim(desc_short)))
+        solution = r.get('reporter_solution', '')
+        if solution:
+            sol_short = solution[:100] + '...' if len(solution) > 100 else solution
+            print('    Solution: {}'.format(sol_short))
+        print()
+
+
 # --- release group ---
 
 @cli.group(invoke_without_command=True)
@@ -2646,35 +4259,133 @@ def release(ctx):
 
 
 @release.command('status')
+@click.option('--full', is_flag=True, help='Include slow checks (artifact health for all components)')
 @click.argument('args', nargs=-1)
-def release_status(args):
-    """Release process checklist."""
+def release_status(full, args):
+    """Release readiness checklist with pre-release health checks."""
     from cli.mode import ensure_cluster
     if ensure_cluster():
         from cli.api_client import get_client
-        from cli.formatting import green, red, section_header
+        from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+
         app = cfg.APPLICATION_NAME
-        data = get_client().get('/api/v1/applications/{}/readiness'.format(app))
+        params = {}
+        if full:
+            params['full'] = 'true'
+        data = get_client().get('/api/v1/applications/{}/readiness'.format(app),
+                                params=params)
         if not data:
             print('No readiness data available')
             return
+
         section_header('Release Readiness: {}'.format(app))
         print()
-        for k, v in data.items():
-            if k == 'application':
-                continue
-            if isinstance(v, bool):
-                color = green if v else red
-                print('  {:<30} {}'.format(k + ':', color('✓' if v else '✗')))
-            elif isinstance(v, (int, float)):
-                print('  {:<30} {}'.format(k + ':', v))
-            elif isinstance(v, str):
-                print('  {:<30} {}'.format(k + ':', v[:60]))
-            elif isinstance(v, list):
-                print('  {:<30} {} items'.format(k + ':', len(v)))
+
+        sched = data.get('schedule')
+        if sched:
+            parts = []
+            for field, label in [('release_date', 'Release'),
+                                 ('release_window_start', 'Rel Window'),
+                                 ('code_freeze', 'Code Freeze')]:
+                val = sched.get(field)
+                days = sched.get('{}_days'.format(field))
+                if val:
+                    if days is not None and days <= 0:
+                        parts.append('{}: {} (passed)'.format(label, val))
+                    elif days is not None:
+                        parts.append('{}: {} ({}d)'.format(label, val, days))
+                    else:
+                        parts.append('{}: {}'.format(label, val))
+            if parts:
+                print(bold('Schedule:') + ' ' + '  |  '.join(parts))
+                print()
+
+        fail_count = data.get('build_failures', 0)
+        conforma_count = data.get('conforma_violations', 0)
+
+        print(bold('── Core Checks ──'))
+        print()
+        _print_check_line('Build failures',
+                          'PASS' if fail_count == 0 else 'WARN',
+                          '{} components failing'.format(fail_count) if fail_count else '0 components failing',
+                          'Fix failing builds: ic get failures' if fail_count else None)
+        conforma_detail = ('{} components with unexcepted violations'.format(conforma_count)
+                           if conforma_count else 'All components compliant')
+        conforma_fix = ('Fix violations or file exceptions: ic get conforma'
+                        if conforma_count else None)
+        _print_check_line('Conforma violations',
+                          'PASS' if conforma_count == 0 else 'FAIL',
+                          conforma_detail, conforma_fix)
+
+        freeze = data.get('freeze')
+        freeze_detail = ('Frozen until {} ({})'.format(freeze['end_date'], freeze['reason'])
+                         if freeze else 'No active freeze')
+        _print_check_line('Release freeze',
+                          'PASS' if freeze is None else 'FAIL',
+                          freeze_detail,
+                          'Wait for freeze to end' if freeze else None)
+        print()
+
+        checks = data.get('checks', [])
+        if checks:
+            print(bold('── Infrastructure Checks ──'))
+            print()
+            for check in checks:
+                _print_check_line(
+                    check['name'],
+                    check.get('status', 'SKIP'),
+                    check.get('detail', ''),
+                    check.get('fix'),
+                )
+            if not full:
+                print()
+                print(dim('  Use --full for complete artifact health check (~60s)'))
+            print()
+
+        verdict = data.get('verdict', 'UNKNOWN')
+        blockers = data.get('blockers', [])
+        risks = data.get('risks', [])
+
+        print(bold('── Verdict ──'))
+        print()
+        if verdict == 'NOT_READY':
+            print('  ' + red(bold('NOT READY')))
+            print()
+            for i, b in enumerate(blockers, 1):
+                print('  {}. {}'.format(i, b))
+        elif verdict == 'AT_RISK':
+            print('  ' + yellow(bold('AT RISK')))
+            print()
+            for r in risks:
+                print('  - {}'.format(r))
+        else:
+            print('  ' + green(bold('READY')))
+
+        print()
+        print(cyan('Tip:') + ' Use {} for violation details'.format(
+            bold('ic describe conforma <name>')))
+        print(cyan('Tip:') + ' Use {} for stage vs prod policy gap'.format(
+            bold('ic get policy-gap')))
         print()
         return
     _bash_fallback(['release', 'status'] + list(args))
+
+
+def _print_check_line(name, status, detail, fix=None):
+    """Print a single checklist line with PASS/FAIL/WARN/SKIP indicator."""
+    from cli.formatting import bold, dim, green, red, yellow
+
+    icons = {
+        'PASS': green('[PASS]'),
+        'FAIL': red('[FAIL]'),
+        'WARN': yellow('[WARN]'),
+        'SKIP': dim('[SKIP]'),
+    }
+    icon = icons.get(status, dim('[????]'))
+
+    print('  {} {} — {}'.format(icon, bold(name), dim(detail) if status == 'SKIP' else detail))
+    if fix and status != 'PASS':
+        print('         {}'.format(dim('Fix: ' + fix)))
 
 
 @release.command('diff')
@@ -3134,8 +4845,8 @@ def skills(ctx, output_json):
 @click.pass_context
 def skills_list(ctx, filter_tag, filter_source, output_json):
     """List registered skills."""
-    from skills.db_registry import get_registry
     from cli.formatting import dim, section_header
+    from skills.db_registry import get_registry
     registry = get_registry()
     result = registry.list_skills(source=filter_source)
     if filter_tag:
@@ -3165,12 +4876,17 @@ def skills_list(ctx, filter_tag, filter_source, output_json):
 
 @skills.command('add')
 @click.argument('source_name_or_url')
-def skills_add(source_name_or_url):
-    """Add skills from a git repo or known source."""
+@click.option('--branch', 'branch_flag', default=None, help='Git branch to clone (overrides @branch syntax)')
+def skills_add(source_name_or_url, branch_flag):
+    """Add skills from a git repo or known source.
+
+    Supports branch syntax: ic skills add <url>@<branch>
+    Or explicit flag:       ic skills add <url> --branch <branch>
+    """
+    from cli.formatting import bold, green
+    from skills.db_registry import get_registry
     from skills.known_sources import resolve_source
     from skills.loader import clone_source, discover_skills, use_local_source
-    from skills.db_registry import get_registry
-    from cli.formatting import bold, green
 
     registry = get_registry()
     expanded = os.path.expanduser(source_name_or_url)
@@ -3179,12 +4895,14 @@ def skills_add(source_name_or_url):
         local_path, commit = use_local_source(expanded)
         name = os.path.basename(os.path.abspath(expanded))
         url = 'file://{}'.format(os.path.abspath(expanded))
+        branch = None
     else:
-        name, url = resolve_source(source_name_or_url)
-        print('Cloning {}...'.format(url))
-        local_path, commit = clone_source(url, name)
+        name, url, branch = resolve_source(source_name_or_url, branch_override=branch_flag)
+        branch_msg = ' (branch: {})'.format(branch) if branch else ''
+        print('Cloning {}{}...'.format(url, branch_msg))
+        local_path, commit = clone_source(url, name, branch)
 
-    registry.add_source(name, url, commit, local_path)
+    registry.add_source(name, url, commit, local_path, branch)
 
     found = discover_skills(local_path)
     if not found:
@@ -3192,8 +4910,8 @@ def skills_add(source_name_or_url):
         registry.save()
         return
 
-    from skills.validator import SkillValidator
     from cli.formatting import red, yellow
+    from skills.validator import SkillValidator
     validator = SkillValidator()
     added = []
     blocked = []
@@ -3232,8 +4950,8 @@ def skills_add(source_name_or_url):
 @click.option('--source', is_flag=True, help='Remove an entire source and all its skills')
 def skills_remove(name, source):
     """Remove a skill or source."""
-    from skills.db_registry import get_registry
     from cli.formatting import green
+    from skills.db_registry import get_registry
     registry = get_registry()
 
     if source:
@@ -3258,9 +4976,9 @@ def skills_remove(name, source):
 @click.argument('source_name', required=False)
 def skills_update(source_name):
     """Update skills from source (git pull + re-scan)."""
-    from skills.loader import clone_source, discover_skills
-    from skills.db_registry import get_registry
     from cli.formatting import bold, green
+    from skills.db_registry import get_registry
+    from skills.loader import clone_source, discover_skills
     registry = get_registry()
     if source_name:
         if source_name not in registry.sources:
@@ -3274,7 +4992,7 @@ def skills_update(source_name):
         return
     for src in sources:
         print('Updating {}...'.format(bold(src.name)))
-        local_path, commit = clone_source(src.url, src.name)
+        local_path, commit = clone_source(src.url, src.name, src.branch)
         found = discover_skills(local_path)
         found_names = set()
         for skill_dir, meta in found:
@@ -3298,8 +5016,8 @@ def skills_update(source_name):
 @click.argument('name')
 def skills_info(name):
     """Show full details for a skill."""
-    from skills.db_registry import get_registry
     from cli.formatting import bold, section_header
+    from skills.db_registry import get_registry
     registry = get_registry()
     try:
         skill = registry.get_skill(name)
@@ -3332,6 +5050,8 @@ def skills_info(name):
     if source:
         print(bold('Source:'))
         print('  URL:    {}'.format(source.url))
+        if source.branch:
+            print('  Branch: {}'.format(source.branch))
         print('  Commit: {}'.format(source.commit))
         print('  Added:  {}'.format(source.added_at[:10]))
         print()
@@ -3340,9 +5060,9 @@ def skills_info(name):
 @skills.command('sources')
 def skills_sources():
     """List known and registered sources."""
-    from skills.known_sources import KNOWN_SOURCES
-    from skills.db_registry import get_registry
     from cli.formatting import bold, dim, green, section_header
+    from skills.db_registry import get_registry
+    from skills.known_sources import KNOWN_SOURCES
     registry = get_registry()
 
     section_header('Registered Sources')
@@ -3350,8 +5070,9 @@ def skills_sources():
     if registry.sources:
         for src in registry.list_sources():
             skill_count = len([s for s in registry.skills.values() if s.source == src.name])
-            print('  {:<20}  {} skill(s)  commit {}  {}'.format(
-                bold(src.name), skill_count, src.commit[:8], dim(src.url)))
+            branch_info = '  branch {}'.format(src.branch) if src.branch else ''
+            print('  {:<30}  {} skill(s)  commit {}{}'.format(
+                bold(src.name), skill_count, src.commit[:8], branch_info))
     else:
         print('  None registered yet.')
     print()
@@ -3360,9 +5081,11 @@ def skills_sources():
     print()
     for name, info in sorted(KNOWN_SOURCES.items()):
         registered = green('✓') if name in registry.sources else dim('—')
-        print('  {} {:<20}  {}'.format(registered, name, info['description']))
+        branch_note = ' [{}]'.format(info['branch']) if info.get('branch') else ''
+        print('  {} {:<30}  {}{}'.format(registered, name, info['description'], branch_note))
     print()
     print("  Add with: ic skills add <name>   (e.g., ic skills add aiops-infra)")
+    print("  With branch: ic skills add <url>@<branch>  or  --branch <branch>")
     print()
 
 
@@ -3376,8 +5099,8 @@ def skills_tag():
 @click.argument('tag')
 def skills_tag_add(skill_name, tag):
     """Add a tag to a skill."""
-    from skills.db_registry import get_registry
     from cli.formatting import green
+    from skills.db_registry import get_registry
     registry = get_registry()
     try:
         if registry.add_tag(skill_name, tag):
@@ -3396,8 +5119,8 @@ def skills_tag_add(skill_name, tag):
 @click.argument('tag')
 def skills_tag_remove(skill_name, tag):
     """Remove a tag from a skill."""
-    from skills.db_registry import get_registry
     from cli.formatting import green
+    from skills.db_registry import get_registry
     registry = get_registry()
     try:
         if registry.remove_tag(skill_name, tag):
@@ -3414,8 +5137,8 @@ def skills_tag_remove(skill_name, tag):
 @skills.command('tags')
 def skills_tags_list():
     """List all tags with usage counts."""
-    from skills.db_registry import get_registry
     from cli.formatting import section_header
+    from skills.db_registry import get_registry
     registry = get_registry()
     tags = registry.list_tags()
     section_header('Skill Tags')
@@ -3432,8 +5155,8 @@ def skills_tags_list():
 @click.argument('name_or_path')
 def skills_validate(name_or_path):
     """Run static security analysis on a skill (registered name or local path)."""
-    from skills.validator import SkillValidator
     from cli.formatting import bold, green, red, yellow
+    from skills.validator import SkillValidator
 
     validator = SkillValidator()
     expanded = os.path.expanduser(name_or_path)
@@ -3483,8 +5206,8 @@ def skills_validate(name_or_path):
 @click.argument('path', required=False)
 def skills_doctor(path):
     """Check prerequisites for registered skills or a local skill directory."""
-    from skills.validator import check_prerequisites
     from cli.formatting import bold, green, red, yellow
+    from skills.validator import check_prerequisites
 
     skills_to_check = []
 
@@ -3493,7 +5216,7 @@ def skills_doctor(path):
         if not os.path.isdir(expanded):
             print('Not a directory: {}'.format(path))
             raise SystemExit(1)
-        from skills.loader import parse_skill_md, discover_skills
+        from skills.loader import discover_skills, parse_skill_md
         found = discover_skills(expanded)
         if not found:
             skill_file = os.path.join(expanded, 'SKILL.md')
@@ -3546,16 +5269,19 @@ def skills_doctor(path):
 @click.argument('name')
 @click.option('--dry-run', is_flag=True, help='Show steps without executing')
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation for medium-risk skills')
-@click.option('--timeout', type=int, default=300, help='Timeout in seconds per step')
+@click.option('--timeout', type=int, default=900, help='Total timeout in seconds (default: 900)')
 @click.option('--param', '-p', multiple=True, help='Parameters as key=value')
+@click.option('--agent', is_flag=True, help='Use AI agent to execute workflow-type skills')
+@click.option('--interactive', is_flag=True, help='Agent pauses for user confirmation before tool calls')
+@click.option('--max-turns', type=int, default=30, help='Max agent turns (default: 30)')
+@click.option('--max-cost', type=float, default=2.0, help='Max agent cost in USD (default: 2.0)')
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.pass_context
-def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
+def skills_run(ctx, name, dry_run, yes, timeout, param, agent, interactive,
+               max_turns, max_cost, output_json):
     """Run a skill."""
-    import json as json_mod
-    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from cli.formatting import cyan, red
     from skills.db_registry import get_registry
-    from skills.executor import SkillExecutor
 
     registry = get_registry()
     skill = registry.get_skill(name)
@@ -3573,6 +5299,304 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         if '=' in p:
             k, v = p.split('=', 1)
             params[k] = v
+
+    use_agent = agent
+    if not use_agent:
+        from skills.type_detector import should_use_agent
+        use_agent = should_use_agent(
+            skill.path,
+            execution_mode=skill.metadata.execution_mode,
+        )
+
+    if use_agent:
+        result = _run_agent_skill(
+            skill, params, dry_run, timeout, max_turns, max_cost,
+            interactive, output_json, ctx,
+        )
+    else:
+        result = _run_script_skill(
+            skill, params, dry_run, yes, timeout, output_json, ctx,
+        )
+
+    try:
+        registry.record_run(result)
+    except Exception:
+        pass
+
+    _print_output_tip(skill)
+
+    if result.status == 'failed':
+        raise SystemExit(1)
+
+
+def _find_skill_outputs(skill):
+    """Find .work/ runs for a skill, newest first.
+
+    Returns list of (dir_path, date_str, all_files) where all_files
+    includes every file in the run directory.
+    """
+    from skills.models import resolve_working_dir
+    work_dir = resolve_working_dir(skill.path, skill.metadata.working_dir)
+    work_path = os.path.join(work_dir, '.work')
+    if not os.path.isdir(work_path):
+        return []
+    runs = []
+    for entry in sorted(os.listdir(work_path), reverse=True):
+        run_dir = os.path.join(work_path, entry)
+        if not os.path.isdir(run_dir) or len(entry) < 8 or not entry[:8].isdigit():
+            continue
+        files = []
+        for f in os.listdir(run_dir):
+            fp = os.path.join(run_dir, f)
+            if os.path.isfile(fp):
+                files.append(f)
+        if files:
+            runs.append((run_dir, entry, sorted(files)))
+    return runs
+
+
+def _render_file(filepath):
+    """Render a file to the terminal. Markdown uses rich, others use plain text."""
+    if filepath.endswith('.md'):
+        try:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            with open(filepath) as f:
+                content = f.read()
+            Console().print(Markdown(content))
+            return
+        except ImportError:
+            pass
+    elif filepath.endswith('.json'):
+        try:
+            from rich.console import Console
+            from rich.json import JSON
+            with open(filepath) as f:
+                content = f.read()
+            Console().print(JSON(content))
+            return
+        except ImportError:
+            pass
+    with open(filepath) as f:
+        print(f.read())
+
+
+def _print_output_tip(skill):
+    """Print tip about viewing output if .work/ has files."""
+    from cli.formatting import cyan, dim
+    runs = _find_skill_outputs(skill)
+    if runs:
+        md_count = sum(1 for f in runs[0][2] if f.endswith('.md'))
+        if md_count:
+            print()
+            print(dim('Tip: ') + cyan('ic skills output {}'.format(skill.name)))
+
+
+@skills.command('output')
+@click.argument('name')
+@click.option('--list', 'list_runs', is_flag=True, help='List all available runs')
+@click.option('--run', 'run_index', type=int, default=1, help='Which run to view (1=latest)')
+@click.option('--file', 'file_name', type=str, default=None, help='View a specific file by name')
+@click.pass_context
+def skills_output(ctx, name, list_runs, run_index, file_name):
+    """View output files from a skill run."""
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.db_registry import get_registry
+
+    registry = get_registry()
+    try:
+        skill = registry.get_skill(name)
+    except KeyError as e:
+        print(red(str(e)))
+        raise SystemExit(1)
+    if not skill:
+        for s in registry.list_skills():
+            if s.name == name:
+                skill = s
+                break
+    if not skill:
+        print(red('Skill not found: ') + cyan(name))
+        raise SystemExit(1)
+
+    runs = _find_skill_outputs(skill)
+    if not runs:
+        print(yellow('No output found for ') + cyan(name))
+        print(dim('Run the skill first: ic skills run {}'.format(name)))
+        raise SystemExit(1)
+
+    if list_runs:
+        print(bold('Runs for ') + cyan(name))
+        print()
+        for i, (run_dir, date_str, files) in enumerate(runs, 1):
+            md_files = [f for f in files if f.endswith('.md')]
+            data_files = [f for f in files if not f.endswith('.md')]
+            total_size = sum(
+                os.path.getsize(os.path.join(run_dir, f)) for f in files
+            )
+            date_display = '{}-{}-{} {}:{}'.format(
+                date_str[:4], date_str[4:6], date_str[6:8],
+                date_str[9:11], date_str[11:13],
+            )
+            marker = green(' (latest)') if i == 1 else ''
+            print('  {} {}  {} md, {} data, {:.1f} KB{}'.format(
+                bold('#{}'.format(i)),
+                dim(date_display),
+                len(md_files), len(data_files),
+                total_size / 1024,
+                marker,
+            ))
+        print()
+        print(dim('View a run: ic skills output {} --run N'.format(name)))
+        return
+
+    if run_index < 1 or run_index > len(runs):
+        print(red('Run #{} not found.'.format(run_index))
+              + ' Available: 1-{}'.format(len(runs)))
+        raise SystemExit(1)
+
+    run_dir, date_str, files = runs[run_index - 1]
+
+    if file_name:
+        filepath = os.path.join(run_dir, file_name)
+        if not os.path.isfile(filepath):
+            print(red('File not found: ') + cyan(file_name))
+            print(dim('Available: ') + ', '.join(files))
+            raise SystemExit(1)
+        _render_file(filepath)
+        return
+
+    md_files = sorted(
+        [f for f in files if f.endswith('.md')],
+        key=lambda f: os.path.getsize(os.path.join(run_dir, f)),
+        reverse=True,
+    )
+    data_files = sorted(f for f in files if not f.endswith('.md'))
+
+    date_display = '{}-{}-{} {}:{}'.format(
+        date_str[:4], date_str[4:6], date_str[6:8],
+        date_str[9:11], date_str[11:13],
+    )
+    print(bold('Run ') + dim(date_display) + bold(' — {} files'.format(len(files))))
+    print()
+
+    if md_files:
+        print(bold('  Markdown:'))
+        for i, f in enumerate(md_files, 1):
+            size = os.path.getsize(os.path.join(run_dir, f))
+            print('    {}. {}  ({:.1f} KB)'.format(i, cyan(f), size / 1024))
+
+    if data_files:
+        if len(data_files) <= 5:
+            print(bold('  Data: ') + dim(', '.join(data_files)))
+        else:
+            shown = ', '.join(data_files[:3])
+            print(bold('  Data: ') + dim('{} (+{} more)'.format(shown, len(data_files) - 3)))
+
+    print()
+
+    if len(md_files) == 1:
+        _render_file(os.path.join(run_dir, md_files[0]))
+    elif md_files:
+        try:
+            choice = input('View [1-{}, all, q]: '.format(len(md_files))).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice == 'q':
+            return
+        if choice == 'all':
+            for f in md_files:
+                print()
+                print(bold('━━━ {} ━━━'.format(f)))
+                print()
+                _render_file(os.path.join(run_dir, f))
+        elif choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(md_files):
+                _render_file(os.path.join(run_dir, md_files[idx - 1]))
+            else:
+                print(red('Invalid choice'))
+    else:
+        print(yellow('No markdown files in this run.'))
+        print(dim('View a specific file: ic skills output {} --file <name>'.format(name)))
+
+
+def _run_agent_skill(skill, params, dry_run, timeout, max_turns, max_cost,
+                     interactive, output_json, ctx):
+    """Execute a skill via the AI agent loop."""
+    import json as json_mod
+
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.agent_config import AgentConfig
+    from skills.agent_executor import AgentExecutor
+
+    config = AgentConfig(
+        max_turns=max_turns,
+        cost_limit_usd=max_cost,
+        total_timeout_seconds=timeout,
+    )
+
+    try:
+        from clients.llm_provider import create_llm_provider
+        from config import CollectorConfig
+        app_config = CollectorConfig.from_env()
+        if not app_config.llm:
+            print(red('LLM provider not configured'))
+            print(dim('Set ANTHROPIC_API_KEY or Vertex AI credentials'))
+            raise SystemExit(1)
+        llm = create_llm_provider(app_config.llm)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(red('LLM provider error: {}'.format(e)))
+        print(dim('Set up Vertex AI or Anthropic API credentials'))
+        raise SystemExit(1)
+
+    print(bold('Skill:    ') + cyan(skill.qualified_name))
+    print(bold('Mode:     ') + cyan('agent'))
+    print(bold('Model:    ') + dim(llm.model_name()))
+    print(bold('Limits:   ') + dim('{} turns, ${:.2f} max'.format(
+        config.max_turns, config.cost_limit_usd)))
+    if interactive:
+        print(bold('Input:    ') + yellow('interactive'))
+    print()
+
+    executor = AgentExecutor(
+        skill=skill,
+        llm_provider=llm,
+        config=config,
+        params=params,
+        interactive=interactive,
+        dry_run=dry_run,
+    )
+
+    result = executor.execute()
+
+    if output_json or (ctx.obj and ctx.obj.get('json')):
+        print(json_mod.dumps(result.to_dict(), indent=2, default=str))
+        return result
+
+    print()
+    status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
+    print(bold('Status:   ') + status_color(result.status))
+    if result.duration_seconds:
+        print(bold('Duration: ') + '{:.1f}s'.format(result.duration_seconds))
+    if result.steps_executed:
+        print(bold('Turns:    ') + '{}'.format(result.steps_executed))
+
+    if result.status == 'dry_run' and result.dry_run_steps:
+        print()
+        for step in result.dry_run_steps:
+            print(dim('  ' + step))
+
+    return result
+
+
+def _run_script_skill(skill, params, dry_run, yes, timeout, output_json, ctx):
+    """Execute a skill via the traditional code-block executor."""
+    import json as json_mod
+
+    from cli.formatting import bold, cyan, dim, green, red, yellow
+    from skills.executor import SkillExecutor
 
     executor = SkillExecutor(skill, params=params, dry_run=dry_run, timeout=timeout)
     assessment = executor.assess()
@@ -3595,18 +5619,17 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         confirm = input('Execute? [y/N] ').strip().lower()
         if confirm != 'y':
             print(dim('Cancelled'))
-            return
+            from skills.models import ExecutionResult
+            return ExecutionResult(
+                skill_name=skill.qualified_name,
+                status='cancelled',
+            )
 
     result = executor.execute()
 
-    try:
-        registry.record_run(result)
-    except Exception:
-        pass
-
     if output_json or (ctx.obj and ctx.obj.get('json')):
         print(json_mod.dumps(result.to_dict(), indent=2, default=str))
-        return
+        return result
 
     status_color = green if result.status == 'success' else yellow if result.status == 'dry_run' else red
     risk_color = green if risk == 'low' else yellow if risk == 'medium' else red
@@ -3643,8 +5666,7 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
         print()
         print(red(result.stderr))
 
-    if result.status == 'failed':
-        raise SystemExit(1)
+    return result
 
 
 @skills.command('runs')
@@ -3655,6 +5677,7 @@ def skills_run(ctx, name, dry_run, yes, timeout, param, output_json):
 def skills_runs(ctx, skill_name, limit, output_json):
     """Show skill execution history."""
     import json as json_mod
+
     from cli.db import print_table
     from cli.formatting import green, red, section_header, yellow
     from skills.db_registry import get_registry
@@ -3718,6 +5741,460 @@ def components_health():
         FROM component_health
         ORDER BY health_score ASC NULLS FIRST;
     """)
+    print()
+
+
+# --- onboard group ---
+
+
+def _compute_next_action(data):
+    """Derive the single most important next step from onboarding data."""
+    from cli.formatting import cyan, red, yellow
+
+    phase = data.get('phase', '')
+    if phase == 'complete':
+        report = data.get('report', {})
+        items = report.get('action_items', [])
+        if items:
+            return yellow(items[0]['action'])
+        return None
+
+    analysis = data.get('analysis', {})
+    if analysis.get('fix_component'):
+        return red(analysis['fix_component'])
+
+    bot = data.get('bot_error_analysis', {})
+    stuck = bot.get('stuck_steps', {})
+    if stuck:
+        worst = max(stuck.items(), key=lambda x: x[1])
+        return red(f'Fix stuck step "{worst[0]}" ({worst[1]} failures) — '
+                   f'check Jira bot comments')
+
+    automation = data.get('automation_steps', [])
+    for step in automation:
+        if step['status'] == 'in_progress':
+            prs = step.get('pr_links', [])
+            if prs:
+                return yellow(f'Review/merge PR for {step["label"]}: '
+                              f'{prs[0]}')
+            return yellow(f'Step "{step["label"]}" in progress — '
+                          f'check Jira for updates')
+        if step['status'] == 'pending':
+            return cyan(f'Waiting for "{step["label"]}" — '
+                        f'{step.get("verification", "check automation")}')
+
+    for step in data.get('steps', []):
+        if step.get('status') in ('blocked', 'failed'):
+            fix = step.get('fix', 'check step details')
+            return red(f'{step.get("label", "?")}: {fix}')
+        if step.get('status') == 'pending':
+            fix = step.get('fix', 'complete this step')
+            return yellow(f'{step.get("label", "?")}: {fix}')
+
+    return None
+
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def onboard(ctx):
+    """Component onboarding commands."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(onboard_status)
+
+
+@onboard.command('status')
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.option('-a', '--all', 'show_all', is_flag=True, help='Show all components')
+@click.pass_context
+def onboard_status(ctx, output_json=False, show_all=False):
+    """Show onboarding status for all components (incomplete/partial by default)."""
+    from cli.data import get_onboarding_status
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+
+    is_json = output_json or ctx.obj.get('json')
+    data = get_onboarding_status()
+
+    if not data:
+        print(red('  Could not fetch onboarding status'))
+        return
+
+    if data.get('error'):
+        print(red(f'  {data["error"]}'))
+        return
+
+    if is_json:
+        print(json_mod.dumps(data, indent=2, default=str))
+        return
+
+    section_header(f'Onboarding Status: {data["application"]}')
+    print()
+    total = data.get('total', 0)
+    complete = data.get('complete', 0)
+    partial = data.get('partial', 0)
+    incomplete = data.get('incomplete', 0)
+    print(f'  Total: {bold(str(total))}  '
+          f'{green("Complete")}: {complete}  '
+          f'{yellow("Partial")}: {partial}  '
+          f'{red("Incomplete")}: {incomplete}')
+    print()
+
+    shown = 0
+    for comp in data.get('components', []):
+        name = comp.get('component', '?')
+        score = comp.get('score', 0)
+        overall = comp.get('overall', '?')
+        if not show_all and overall == 'complete':
+            continue
+        if overall == 'complete':
+            icon = green('✓')
+            score_str = green(f'{score}%')
+        elif overall == 'partial':
+            icon = yellow('◐')
+            score_str = yellow(f'{score}%')
+        else:
+            icon = red('✗')
+            score_str = red(f'{score}%')
+
+        jira_str = ''
+        jira_key = comp.get('jira_key', '')
+        jira_status = comp.get('jira_status', '')
+        if jira_key:
+            jira_str = f'  {cyan(jira_key)}'
+            if jira_status:
+                jira_str += f' ({jira_status})'
+
+        print(f'  {icon} {bold(name):45s} {score_str}{jira_str}')
+        shown += 1
+
+        failing = comp.get('failing', [])
+        warnings = comp.get('warnings', [])
+        checks = comp.get('checks', {})
+        for f in failing:
+            detail = checks.get(f, {}).get('detail', '')
+            fix = checks.get(f, {}).get('fix', '')
+            print(f'      {red("✗")} {f}: {detail}')
+            if fix:
+                print(f'        {cyan("fix")}: {fix}')
+        for w in warnings:
+            detail = checks.get(w, {}).get('detail', '')
+            fix = checks.get(w, {}).get('fix', '')
+            print(f'      {yellow("!")} {w}: {detail}')
+            if fix:
+                print(f'        {cyan("fix")}: {fix}')
+    if not show_all and complete > 0:
+        print(f'  ({complete} complete components hidden, use --all to show)')
+    print()
+
+
+@onboard.command('describe')
+@click.argument('component')
+@click.option('--json', 'output_json', is_flag=True, help='Output as JSON')
+@click.option('--diff', 'show_diff', is_flag=True,
+              help='Show expected vs actual for all steps')
+@click.pass_context
+def onboard_describe(ctx, component, output_json=False, show_diff=False):
+    """Show step-by-step onboarding progress for a component."""
+    from cli.data import get_onboarding_describe
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+
+    is_json = output_json or ctx.obj.get('json')
+    data = get_onboarding_describe(component, diff=show_diff)
+
+    if not data:
+        print(red('  Could not fetch onboarding details'))
+        return
+
+    if data.get('error'):
+        print(red(f'  {data["error"]}'))
+        return
+
+    if is_json:
+        print(json_mod.dumps(data, indent=2, default=str))
+        return
+
+    section_header(f'Onboarding: {data["component"]}')
+    print()
+
+    comp_type = data.get('type', 'unknown')
+    phase = data.get('phase', '?')
+    data.get('progress', 0)
+    done = data.get('steps_done', 0)
+    total = data.get('steps_total', 0)
+
+    type_label = {'odh': 'ODH (upstream)', 'rhoai': 'RHOAI (downstream)'}.get(
+        comp_type, comp_type)
+    phase_colors = {
+        'complete': green, 'in_progress': yellow,
+        'blocked': red, 'not_started': red,
+    }
+    color_fn = phase_colors.get(phase, str)
+
+    created = data.get('created_at', '')
+    auto_progress = data.get('automation_progress', '')
+
+    # Progress bar
+    auto_parts = auto_progress.split('/') if auto_progress else []
+    auto_done = int(auto_parts[0]) if len(auto_parts) == 2 else 0
+    auto_total = int(auto_parts[1]) if len(auto_parts) == 2 else 0
+
+    def _progress_bar(done_n, total_n, width=20):
+        if total_n == 0:
+            return ''
+        filled = int(done_n / total_n * width)
+        bar = '█' * filled + '░' * (width - filled)
+        return f'{bar} {done_n}/{total_n}'
+
+    print(f'  Type:     {bold(type_label)}')
+    print(f'  Phase:    {color_fn(phase)}')
+    print(f'  Konflux:  {color_fn(_progress_bar(done, total))}')
+    if auto_total:
+        auto_bar_color = green if auto_done == auto_total else color_fn
+        print(f'  Automtn:  {auto_bar_color(_progress_bar(auto_done, auto_total))}')
+    if created:
+        print(f'  Created:  {created[:10]}')
+    if data.get('blocked_at'):
+        print(f'  Blocked:  {red(data["blocked_at"])}')
+
+    # Next action summary — the most important line
+    next_action = _compute_next_action(data)
+    if next_action:
+        print()
+        print(f'  {bold("→ Next:")}  {next_action}')
+
+    # Jira tickets
+    tickets = data.get('jira_tickets', [])
+    if tickets:
+        for t in tickets:
+            type_prefix = 'Jira' if t['type'] == 'rhoai' else 'ODH Jira'
+            print(f'  {type_prefix}:  {cyan(t["key"])} — {t["summary"][:60]} '
+                  f'({t["status"]})')
+            print(f'           {dim(t["url"])}')
+    elif not data.get('jira_available', True):
+        print(f'  Jira:     {dim(data.get("jira_notice", "not configured"))}')
+    print()
+
+    # Konflux steps
+    print(f'  {bold("Konflux")}:')
+    diff_map = {}
+    if show_diff and data.get('diff'):
+        for d in data['diff']:
+            if d.get('section') == 'konflux':
+                diff_map[d['step']] = d
+
+    for step in data.get('steps', []):
+        status = step.get('status', '?')
+        label = step.get('label', step.get('step', '?'))
+        detail = step.get('detail', '')
+        fix = step.get('fix', '')
+        completed_at = step.get('completed_at', '')
+        started_at = step.get('started_at', '')
+        failed_at = step.get('failed_at', '')
+
+        if status == 'done':
+            icon = green('✓')
+        elif status == 'in_progress':
+            icon = yellow('⟳')
+        elif status == 'pending':
+            icon = '○'
+        elif status in ('blocked', 'failed'):
+            icon = red('✗')
+        else:
+            icon = '?'
+
+        ts = ''
+        if completed_at:
+            ts = f' ({completed_at[:10]})'
+        elif started_at:
+            ts = f' (started {started_at[:10]})'
+        elif failed_at:
+            ts = f' (failed {failed_at[:10]})'
+
+        print(f'    {icon} {label}{ts}')
+        if detail and status != 'done':
+            print(f'        {detail}')
+        elif status == 'done' and detail:
+            print(f'        {cyan(detail)}')
+        if fix:
+            print(f'        {cyan("fix")}: {fix}')
+
+        if step.get('total_runs'):
+            runs_info = (f'        builds: {step["total_runs"]} total, '
+                         f'{step.get("succeeded", 0)} ok, '
+                         f'{step.get("failed", 0)} failed')
+            print(runs_info)
+            if step.get('latest_run'):
+                print(f'        latest: {step["latest_run"]} '
+                      f'({step.get("latest_status", "?")}) '
+                      f'{step.get("latest_at", "")[:10]}')
+
+        if show_diff:
+            step_key = step.get('step', '')
+            d = diff_map.get(step_key)
+            if d:
+                print(f'        {dim("expected")}: {d["expected"]}')
+                if status == 'done':
+                    print(f'        {dim("actual")}:   {green(d["actual"])}')
+                else:
+                    print(f'        {dim("actual")}:   {red(d["actual"])}')
+
+    # Automation steps (from Jira labels)
+    automation = data.get('automation_steps', [])
+    if automation:
+        print()
+        rhoai_ticket = next(
+            (t for t in tickets if t['type'] == 'rhoai'), None)
+        ticket_ref = f' ({rhoai_ticket["key"]})' if rhoai_ticket else ''
+        print(f'  {bold("Automation")}{ticket_ref}:')
+
+        auto_diff_map = {}
+        if show_diff and data.get('diff'):
+            for d in data['diff']:
+                if d.get('section') == 'automation':
+                    auto_diff_map[d['step']] = d
+
+        for i, step in enumerate(automation, 1):
+            status = step.get('status', 'pending')
+            label = step.get('label', '?')
+            matched = step.get('matched_label', '')
+            pr_links = step.get('pr_links', [])
+
+            if status == 'done':
+                icon = green('✓')
+            elif status == 'in_progress':
+                icon = yellow('⟳')
+            else:
+                icon = '○'
+
+            detail_parts = []
+            if matched:
+                detail_parts.append(matched)
+            if status == 'pending' and i > 1:
+                prev = automation[i - 2]
+                if prev['status'] != 'done':
+                    detail_parts.append(
+                        f'waiting on step {i - 1}')
+
+            detail_str = ''
+            if detail_parts:
+                detail_str = f'  {dim(" · ".join(detail_parts))}'
+
+            print(f'    {icon} {i:2d}. {label}{detail_str}')
+
+            for link in pr_links:
+                print(f'            {cyan(link)}')
+
+            if show_diff:
+                d = auto_diff_map.get(step['key'])
+                if d:
+                    print(f'            {dim("expected")}: {d["expected"]}')
+                    if status == 'done':
+                        print(f'            {dim("actual")}:   '
+                              f'{green(d["actual"])}')
+                    elif status == 'in_progress':
+                        print(f'            {dim("actual")}:   '
+                              f'{yellow(d["actual"])}')
+                    else:
+                        print(f'            {dim("actual")}:   '
+                              f'{d["actual"]}')
+
+    # Analysis
+    analysis = data.get('analysis', {})
+    if analysis and analysis.get('status') == 'blocked':
+        print()
+        print(f'  {bold("Analysis")}:')
+        if analysis.get('blocked_at'):
+            print(f'    Blocked: {red(analysis["blocked_at"])}')
+        if analysis.get('blocked_reason'):
+            print(f'    Reason:  {analysis["blocked_reason"]}')
+        if analysis.get('impact'):
+            print(f'    Impact:  {analysis["impact"]}')
+        if analysis.get('konflux_blocked_at'):
+            print(f'    Konflux: {red(analysis["konflux_blocked_at"])} — '
+                  f'{analysis.get("konflux_blocked_detail", "")}')
+        if analysis.get('fix_component'):
+            print()
+            print(f'    {bold("Fix (this component)")}:')
+            print(f'      {analysis["fix_component"]}')
+        if analysis.get('fix_automation'):
+            print(f'    {bold("Fix (automation — aiops-infra)")}:')
+            print(f'      {analysis["fix_automation"]}')
+        if analysis.get('konflux_fix'):
+            print(f'    {bold("Fix (Konflux)")}:')
+            print(f'      {cyan(analysis["konflux_fix"])}')
+
+    # Bot error analysis (from real bot comment history)
+    for label, key in [('RHOAI', 'bot_error_analysis'),
+                       ('ODH', 'odh_bot_error_analysis')]:
+        bot_analysis = data.get(key, {})
+        if not bot_analysis:
+            continue
+        cats = bot_analysis.get('error_categories', [])
+        stuck = bot_analysis.get('stuck_steps', {})
+        print()
+        print(f'  {bold(f"Bot Error History ({label})")}:')
+        print(f'    Total errors: {bot_analysis.get("retry_count", 0)}')
+        if cats:
+            for cat in cats:
+                count = cat['count']
+                icon = red('✗') if count >= 5 else yellow('!')
+                print(f'    {icon} {cat["category"]} ({count}x): '
+                      f'{cat["description"]}')
+                if cat.get('automation_fix'):
+                    print(f'        {dim("fix:")} {cat["automation_fix"]}')
+        if stuck:
+            print(f'    {bold("Stuck steps")} (3+ consecutive failures):')
+            for step, count in sorted(stuck.items(), key=lambda x: -x[1]):
+                print(f'      {red("▸")} {step}: {count} failures')
+
+    # Action items from report
+    report = data.get('report', {})
+    action_items = report.get('action_items', [])
+    if action_items:
+        print()
+        print(f'  {bold("Action Items")}:')
+        for item in action_items:
+            prio = item.get('priority', 'MED')
+            if prio == 'HIGH':
+                icon = red('▸')
+                prio_fmt = red(prio)
+            else:
+                icon = yellow('▸')
+                prio_fmt = yellow(prio)
+            print(f'    {icon} [{prio_fmt}] {item["action"]}')
+
+    # PRs from report (with step context)
+    steps_prs = report.get('steps_with_prs', [])
+    if steps_prs:
+        print()
+        print(f'  {bold("Open PRs")}:')
+        for sp in steps_prs:
+            print(f'    {sp["label"]}:')
+            for url in sp.get('pr_links', []):
+                print(f'      {cyan(url)}')
+
+    # Nudge PRs
+    nudge_prs = data.get('nudge_prs', [])
+    if nudge_prs:
+        print()
+        print(f'  {bold("Nudge PRs")}:')
+        for pr in nudge_prs:
+            merged_icon = green('✓') if pr.get('merged') else yellow('○')
+            merged_label = 'merged' if pr.get('merged') else 'open'
+            pkg = pr.get('package', '?')
+            ver = ''
+            if pr.get('from_version') and pr.get('to_version'):
+                ver = f' ({pr["from_version"]} → {pr["to_version"]})'
+            created = pr.get('created', '')[:10]
+            print(f'    {merged_icon} {pkg}{ver} [{merged_label}] {created}')
+            if pr.get('pr_url'):
+                print(f'        {cyan(pr["pr_url"])}')
+
+    timeline = data.get('timeline', [])
+    if timeline:
+        print()
+        print(f'  {bold("Timeline")}:')
+        for t in timeline:
+            print(f'    {t["date"][:10]}  {t["step"]} → {t["status"]}')
     print()
 
 

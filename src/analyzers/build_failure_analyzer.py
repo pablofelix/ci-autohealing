@@ -12,12 +12,12 @@ import os
 import re
 import time
 
-from logger import setup_logger
-from repositories import DatabaseConnection, BuildFailureRepository, AIAnalysisRepository, ErrorPatternRepository
 from clients.blob_store import get_blob_store, make_blob_key, should_offload
-from clients.llm_provider import create_llm_provider
 from clients.langfuse_tracker import LangfuseTracker
+from clients.llm_provider import create_llm_provider
+from logger import setup_logger
 from prompt_loader import load_prompt
+from repositories import AIAnalysisRepository, BuildFailureRepository, DatabaseConnection, ErrorPatternRepository
 
 logger = setup_logger(__name__)
 
@@ -68,6 +68,55 @@ ANALYSIS_TOOL = {
             'requires_human_review': {
                 'type': 'boolean',
                 'description': 'Whether human review is needed before fixing'
+            },
+            'evidence_references': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'type': {'type': 'string', 'enum': ['doc', 'config', 'log', 'policy']},
+                        'url': {'type': 'string', 'description': 'URL to the resource'},
+                        'description': {'type': 'string', 'description': 'What this reference shows'},
+                    },
+                    'required': ['type', 'description']
+                },
+                'description': 'Links to docs, config files, policy YAML, or log evidence supporting the diagnosis'
+            },
+            'source_transparency': {
+                'type': 'object',
+                'properties': {
+                    'sources_consulted': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Data sources actually used (e.g., "build logs", "commit diff", "Dockerfile")'
+                    },
+                    'sources_unavailable': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Sources attempted but not available (e.g., "Tekton config not provided", "pre-build logs truncated")'
+                    },
+                    'limitations': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'Factors that could change the diagnosis (e.g., "log was truncated, earlier errors may exist")'
+                    },
+                },
+                'description': 'Academic-style transparency: what was used, what was missing, and analysis limitations'
+            },
+            'differential_diagnosis': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'hypothesis': {'type': 'string', 'description': 'One-sentence explanation'},
+                        'category': {'type': 'string', 'description': 'failure_category enum value'},
+                        'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1},
+                        'supporting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                        'contradicting_evidence': {'type': 'array', 'items': {'type': 'string'}},
+                    },
+                    'required': ['hypothesis', 'category', 'confidence']
+                },
+                'description': '2-3 competing hypotheses ranked by evidence strength. First = primary diagnosis.'
             },
         },
         'required': [
@@ -197,10 +246,10 @@ class BuildFailureAnalyzer:
 
         try:
             from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
-            from enrichment.sources.dependency_context import DependencyContextSource
-            from enrichment.sources.related_failures import RelatedFailuresSource
             from enrichment.sources.build_history import BuildHistorySource
+            from enrichment.sources.dependency_context import DependencyContextSource
             from enrichment.sources.open_prs import OpenPRsSource
+            from enrichment.sources.related_failures import RelatedFailuresSource
 
             orchestrator = EnrichmentOrchestrator(self.config, self.db)
             orchestrator.register_source(DependencyContextSource(self.config))
@@ -659,8 +708,17 @@ class BuildFailureAnalyzer:
 
         dep_updates_section = self._get_dependency_updates(failure)
 
-        user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
+        # Targeted knowledge graph context (fails silently if Neo4j unavailable)
+        try:
+            from utils.graph_context import build_context
+            graph_section = build_context(failure)
+        except Exception:
+            graph_section = ""
 
+        release_context = self._get_release_context(failure)
+
+        user_prompt = """Analyse this CI build failure. Focus on identifying what changed and why it broke — don't just restate the error message.
+{release_context}
 ## Component
 - Component: {component}
 - Repository: {repository}
@@ -675,7 +733,7 @@ class BuildFailureAnalyzer:
 - Failed Step: {failed_step}
 - Error Type: {error_type}
 - Error Message: {error_message}
-{commit_context}{pattern_section}{dep_updates}
+{commit_context}{pattern_section}{dep_updates}{graph_context}
 ## Build Logs
 ```
 {logs}
@@ -710,6 +768,18 @@ CRITICAL FORMATTING RULES:
    - File changes: "Commit diff `.tekton/file.yaml` line 42: removed `old` added `new`"
    - Log errors: "Build log line 156: `ERROR: module not found`"
    - Config values: "File `Dockerfile` line 10: `FROM registry/image:tag`"
+
+4. Include evidence_references with links to docs, config files, or log evidence.
+5. Include source_transparency: list what data you actually used, what was missing, and what limitations affect your diagnosis.
+
+## Reference Documentation
+Use these URLs in evidence_references when relevant:
+- Build troubleshooting: https://konflux-ci.dev/docs/troubleshooting/builds/
+- Hermetic builds: https://konflux-ci.dev/docs/building/hermetic-builds/
+- Prefetching dependencies: https://konflux-ci.dev/docs/building/prefetching-dependencies/
+- Customizing the build pipeline: https://konflux-ci.dev/docs/building/customizing-the-build/
+- Build pipeline tasks: https://konflux-ci.dev/docs/testing/build/
+{dynamic_urls}
 """.format(
             component=failure.get('component_name', 'unknown'),
             repository=failure.get('repository', 'unknown'),
@@ -725,10 +795,122 @@ CRITICAL FORMATTING RULES:
             commit_context=commit_context_section,
             pattern_section=pattern_section,
             dep_updates=dep_updates_section,
-            logs=logs
+            graph_context=graph_section,
+            release_context=release_context,
+            logs=logs,
+            dynamic_urls=self._build_dynamic_urls(failure),
         )
 
         return (SYSTEM_PROMPT, user_prompt)
+
+    def _get_release_context(self, failure):
+        """Build release timeline + blocker + systemic pattern context for AI prompt."""
+        lines = []
+        application = failure.get('application', '')
+
+        # Release timeline
+        try:
+            if application:
+                from api.routes.failures import _compute_freeze_countdown
+                from api.routes.releases import get_schedule
+                schedule = get_schedule(application)
+                countdown = _compute_freeze_countdown(schedule)
+                if countdown:
+                    lines.append('\n## Release Context')
+                    lines.append('- Phase: {}'.format(countdown.phase))
+                    lines.append('- Urgency: {}'.format(countdown.urgency))
+                    lines.append('- Timeline: {}'.format(countdown.message))
+                    if countdown.urgency in ('critical', 'high'):
+                        lines.append('- **NOTE: This failure is blocking a release with imminent deadline. Prioritize actionable fix recommendations.**')
+        except Exception:
+            pass
+
+        # Active blocker signals
+        try:
+            if application:
+                from api.routes.failures import list_blockers
+                blockers_result = list_blockers(application)
+                if blockers_result.critical_signals:
+                    lines.append('\n## Active Blocker Signals')
+                    for sig in blockers_result.critical_signals[:5]:
+                        lines.append('- {}'.format(sig))
+        except Exception:
+            pass
+
+        # Systemic pattern context — check if this component's error
+        # is part of a broader pattern affecting multiple components
+        try:
+            if application:
+                triage = self.build_repo.get_triage_summary(application)
+                from api.routes.failures import SYSTEMIC_PATTERNS
+                comp_name = failure.get('component_name', '')
+                error_text = ((failure.get('error_type', '') or '') + ' ' + comp_name).lower()
+                for pname, keywords in SYSTEMIC_PATTERNS:
+                    if any(kw in error_text for kw in keywords):
+                        affected = []
+                        for comp in triage.get('failing_components', []):
+                            other_error = ((comp.get('error_type', '') or '') + ' ' + comp.get('component', '')).lower()
+                            if any(kw in other_error for kw in keywords):
+                                affected.append(comp.get('component', ''))
+                        if len(affected) >= 2:
+                            lines.append('\n## Systemic Pattern Detected')
+                            lines.append('- Pattern: {} (affects {} components)'.format(
+                                pname.replace('_', ' '), len(affected)))
+                            lines.append('- Affected components: {}'.format(', '.join(affected[:10])))
+                            lines.append('- **Consider a coordinated fix across all affected components rather than individual fixes.**')
+                        break
+        except Exception:
+            pass
+
+        if lines:
+            lines.append('')
+            return '\n'.join(lines)
+        return ''
+
+    def _build_dynamic_urls(self, failure):
+        """Construct component-specific URLs for the AI to use in evidence_references."""
+        urls = []
+        repo_url = failure.get('repository_url', '') or failure.get('repository', '')
+        sha = failure.get('commit_sha', '')
+        if repo_url and sha and len(sha) >= 7:
+            repo_url = repo_url.rstrip('/')
+            if repo_url.endswith('.git'):
+                repo_url = repo_url[:-4]
+            urls.append('- Component .tekton config: {}/blob/{}/.tekton/'.format(repo_url, sha[:12]))
+            urls.append('- Component Containerfile: {}/blob/{}/Containerfile'.format(repo_url, sha[:12]))
+            urls.append('- Commit diff: {}/commit/{}'.format(repo_url, sha))
+        elif repo_url:
+            urls.append('- Component repo: {}'.format(repo_url))
+        return '\n'.join(urls)
+
+    def _annotate_fix_status(self, analysis, failure):
+        """Append fix-status notes when commit context shows a fix may already exist."""
+        notes = []
+        commit_context = failure.get('commit_context')
+        if commit_context and isinstance(commit_context, str):
+            try:
+                commit_context = json.loads(commit_context)
+            except (json.JSONDecodeError, TypeError):
+                commit_context = None
+
+        if commit_context:
+            commit = commit_context.get('commit', {})
+            msg = (commit.get('message') or '').lower()
+            if any(kw in msg for kw in ['fix', 'revert', 'hotfix', 'patch']):
+                notes.append('- A recent commit ({}) mentions a fix — this failure may already be addressed'.format(
+                    commit.get('sha', '?')[:8]))
+
+        triage = failure.get('triage_items') or []
+        active = [t for t in triage if t.get('status') == 'active']
+        if active:
+            notes.append('- Triage item #{} is actively tracking this failure'.format(
+                active[0].get('id', '?')))
+
+        if notes:
+            fix_status = '\n\nFix Status (auto-detected):\n' + '\n\n'.join(notes)
+            analysis['recommended_fix'] = analysis.get('recommended_fix', '') + fix_status
+
+        return analysis
 
     def _format_commit_context(self, commit_context, enriched_context=None):
         """Format commit context and enriched context into prompt text."""
@@ -906,6 +1088,7 @@ CRITICAL FORMATTING RULES:
             ValueError: If tool_calls is empty, malformed, or validation fails
         """
         from pydantic import ValidationError
+
         from analyzers.models import AnalysisResult
 
         if not llm_response.tool_calls:
@@ -996,6 +1179,7 @@ CRITICAL FORMATTING RULES:
 
         # Parse response
         analysis = self.parse_analysis_response(response)
+        analysis = self._annotate_fix_status(analysis, failure)
 
         # Apply pattern confidence boost if applicable
         enhancement = self.pattern_service.enhance_analysis(
@@ -1033,6 +1217,9 @@ CRITICAL FORMATTING RULES:
             if enhancement.boost_applied and enhancement.matched_patterns
             else None
         )
+        # These fields live in analysis_json, not DB columns
+        analysis.pop('evidence_references', None)
+        analysis.pop('source_transparency', None)
         analysis_id = self.ai_repo.insert_analysis(
             build_failure_id=failure['id'],
             model_used=self.llm.model_name(),

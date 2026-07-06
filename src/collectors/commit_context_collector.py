@@ -10,8 +10,8 @@ No disk usage: all data fetched via GitHub REST API and stored in DB.
 import json
 import time
 
-from logger import setup_logger
 from clients.github_client import GitHubClient
+from logger import setup_logger
 from repositories import DatabaseConnection
 
 logger = setup_logger(__name__)

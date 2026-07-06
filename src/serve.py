@@ -36,6 +36,7 @@ def main() -> None:
 
     if args.api and not args.mcp_sse:
         import uvicorn
+
         from api import create_app
         app = create_app()
         uvicorn.run(app, host=args.host, port=args.port)
@@ -43,6 +44,7 @@ def main() -> None:
 
     if args.api and args.mcp_sse:
         import uvicorn
+
         from api import create_app
         from mcp_server import mcp
 

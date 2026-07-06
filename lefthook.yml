@@ -1,0 +1,42 @@
+# Lefthook pre-commit configuration
+# Enforces STYLE.md, security, performance, code smells, and anti-patterns
+# Install: lefthook install
+# Run manually: lefthook run pre-commit
+
+pre-commit:
+  parallel: true
+  commands:
+    secrets:
+      glob: "*.{py,sh,yml,yaml,json,env,toml}"
+      run: |
+        RH_PYTHON="${RH_PRE_COMMIT_PYTHON:-${HOME}/.local/share/rh-pre-commit/venv/bin/python3}"
+        if [ -x "$RH_PYTHON" ]; then
+          "$RH_PYTHON" -m rh_pre_commit.multi
+        elif command -v rh-multi-pre-commit > /dev/null; then
+          rh-multi-pre-commit
+        else
+          echo "rh-multi-pre-commit not found, skipping secrets check" >&2
+        fi
+
+    ruff-lint:
+      glob: "*.py"
+      run: python3.11 -m ruff check src/ --exclude='__pycache__'
+
+    style-checks:
+      glob: "*.py"
+      run: bash scripts/check-style.sh
+
+    bandit-security:
+      glob: "*.py"
+      run: |
+        if command -v bandit > /dev/null 2>&1; then
+          bandit -r src/ -q --skip B101,B404 -x src/tests
+        elif python3.11 -m bandit --version > /dev/null 2>&1; then
+          python3.11 -m bandit -r src/ -q --skip B101,B404 -x src/tests
+        else
+          echo "bandit not installed, skipping security scan" >&2
+        fi
+
+    pytest:
+      glob: "*.py"
+      run: python3.11 -m pytest -q --tb=short 2>&1

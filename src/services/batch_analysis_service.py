@@ -5,11 +5,11 @@ Supports single-app (default) and multi-app (--all) modes.
 """
 
 import time
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from config import CollectorConfig
 from analyzers.build_failure_analyzer import BuildFailureAnalyzer
+from config import CollectorConfig
 from logger import setup_logger
 
 logger = setup_logger(__name__)

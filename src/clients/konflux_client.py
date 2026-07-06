@@ -6,7 +6,7 @@ as the primary source for EC policy exception data.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import requests
 
@@ -79,7 +79,7 @@ class KonfluxClient:
     def extract_exceptions(policy):
         policy_name = policy.get('metadata', {}).get('name', 'unknown')
         gitlab_link = '{}/{}.yaml'.format(GITLAB_EC_BASE, policy_name)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         results = []
         for src in policy.get('spec', {}).get('sources', []):
             for exc_value in src.get('config', {}).get('exclude', []):
@@ -99,7 +99,7 @@ class KonfluxClient:
                 if eu:
                     try:
                         exp = datetime.strptime(str(eu)[:19], '%Y-%m-%dT%H:%M:%S')
-                        exp = exp.replace(tzinfo=timezone.utc)
+                        exp = exp.replace(tzinfo=UTC)
                         days_left = (exp - now).days
                     except ValueError:
                         pass
@@ -284,7 +284,7 @@ class KonfluxClient:
         if not data:
             return []
         items = data.get('items', [])
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now - timedelta(hours=hours)
         results = []
         for item in items:
@@ -293,7 +293,7 @@ class KonfluxClient:
             if ts:
                 try:
                     created = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-                    created = created.replace(tzinfo=timezone.utc)
+                    created = created.replace(tzinfo=UTC)
                     if created < cutoff:
                         continue
                 except ValueError:

@@ -11,9 +11,9 @@ import time
 
 from kubernetes import client
 
-from config import CollectorConfig
 from clients.kubearchive import KubeArchiveClient
 from clients.kubernetes import KubernetesClient
+from config import CollectorConfig
 from logger import setup_logger
 from openshift_auth import _ensure_k8s_config
 

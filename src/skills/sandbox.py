@@ -3,7 +3,7 @@
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from skills.models import ExecutionResult
 
@@ -33,7 +33,7 @@ class ContainerSandbox:
         return 'ic-skill-{}-{}'.format(safe, ts)
 
     def run(self, skill, code_blocks, params=None, triggered_by='cli'):
-        started = datetime.now(timezone.utc).isoformat()
+        started = datetime.now(UTC).isoformat()
         job_name = self._job_name(skill.name)
 
         script = '#!/bin/bash\nset -euo pipefail\n\n'

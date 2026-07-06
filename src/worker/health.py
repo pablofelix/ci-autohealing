@@ -6,7 +6,7 @@ can reach the worker without interfering with the pipeline loop.
 
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from logger import setup_logger
 

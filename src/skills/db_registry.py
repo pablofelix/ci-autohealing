@@ -5,7 +5,7 @@ registry when DB is unavailable (local dev without database).
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Dict, List, Optional
 
 from skills.models import SkillEntry, SkillMetadata, SourceEntry
@@ -20,20 +20,22 @@ class DatabaseSkillRegistry:
     def save(self):
         pass
 
-    def add_source(self, name: str, url: str, commit: str, local_path: str) -> SourceEntry:
-        now = datetime.now(timezone.utc).isoformat()
+    def add_source(self, name: str, url: str, commit: str, local_path: str,
+                   branch: Optional[str] = None) -> SourceEntry:
+        now = datetime.now(UTC).isoformat()
         with self.db.connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO skill_sources (name, url, commit_sha, local_path, added_at, updated_at)
-                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                INSERT INTO skill_sources (name, url, commit_sha, local_path, branch, added_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (name) DO UPDATE
                 SET url = EXCLUDED.url, commit_sha = EXCLUDED.commit_sha,
-                    local_path = EXCLUDED.local_path, updated_at = NOW()
-            """, (name, url, commit, local_path))
+                    local_path = EXCLUDED.local_path, branch = EXCLUDED.branch,
+                    updated_at = NOW()
+            """, (name, url, commit, local_path, branch))
             conn.commit()
         return SourceEntry(name=name, url=url, commit=commit,
-                           added_at=now, local_path=local_path)
+                           added_at=now, local_path=local_path, branch=branch)
 
     def remove_source(self, name: str) -> int:
         with self.db.connection() as conn:
@@ -165,12 +167,13 @@ class DatabaseSkillRegistry:
         with self.db.connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT name, url, commit_sha, local_path, added_at
+                SELECT name, url, commit_sha, local_path, added_at, branch
                 FROM skill_sources ORDER BY name
             """)
             return [SourceEntry(
                 name=r[0], url=r[1], commit=r[2] or '',
                 local_path=r[3] or '', added_at=str(r[4]),
+                branch=r[5],
             ) for r in cur.fetchall()]
 
     def update_source_commit(self, name: str, commit: str):
@@ -211,8 +214,9 @@ class DatabaseSkillRegistry:
                 INSERT INTO skill_runs (
                     skill_name, status, exit_code, risk_level,
                     duration_seconds, stdout, stderr, params,
-                    triggered_by, started_at, completed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    triggered_by, started_at, completed_at,
+                    component_name, application, triage_item_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s, %s)
             """, (
                 result.skill_name, result.status, result.exit_code,
                 result.risk_level, result.duration_seconds,
@@ -220,7 +224,10 @@ class DatabaseSkillRegistry:
                 result.stderr[:10000] if result.stderr else None,
                 json.dumps({}),
                 getattr(result, 'triggered_by', 'cli'),
-                result.started_at or datetime.now(timezone.utc).isoformat(),
+                result.started_at or datetime.now(UTC).isoformat(),
+                getattr(result, 'component_name', None),
+                getattr(result, 'application', None),
+                getattr(result, 'triage_item_id', None),
             ))
 
     def get_run_history(self, skill_name=None, limit=20):

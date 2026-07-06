@@ -2,8 +2,52 @@ target-version = "py311"
 line-length = 120
 
 [lint]
-select = ["E", "F", "W"]
-ignore = ["E501"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort — import ordering (STYLE.md)
+    "B",    # bugbear — common anti-patterns (mutable defaults, assert False, etc.)
+    "S",    # bandit — security checks inline
+    "UP",   # pyupgrade — modernize syntax
+    "SIM",  # simplify — unnecessary complexity
+    "T20",  # print detection — print() in library code
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "S101",   # assert OK in tests
+    "S104",   # binding 0.0.0.0 is intentional for API server
+    "S108",   # /tmp usage is acceptable for our scripts
+    "S110",   # try-except-pass is intentional for optional feature checks
+    "S112",   # try-except-continue is intentional in collectors
+    "S310",   # url_open is fine for internal URLs
+    "S404",   # subprocess import OK (we control inputs)
+    "S501",   # verify=False — existing pattern for internal APIs behind VPN; do NOT add new uses
+    "S603",   # subprocess calls are validated elsewhere
+    "S607",   # partial path OK for oc/kubectl
+    "S608",   # SQL formatting flagged by our own check-style.sh
+    "B904",   # raise from — too many existing uses to fix now
+    "B905",   # zip strict — python 3.10+, we target 3.11 but existing code doesn't use it
+    "UP006",  # keep typing.List/Dict — existing codebase convention
+    "UP007",  # keep Optional[X] — existing codebase convention
+    "UP032",  # keep .format() — STYLE.md: correct for 3.6-compatible code
+    "UP035",  # keep typing.List/Dict for 3.7 compat in some modules
+    "UP045",  # keep Optional[X] over X | None — existing convention
+    "SIM102", # nested if — sometimes clearer than combined condition
+    "SIM105", # contextlib.suppress — try/except/pass is explicit and clear
+    "SIM108", # ternary — multi-line if/else is often more readable
+]
 
 [lint.per-file-ignores]
 "src/clients/tekton_results.py" = ["E402"]
+"src/cli/*.py" = ["T20", "E402"]                 # CLI uses print() and has late imports
+"src/tests/**/*.py" = ["S101", "T20", "S106"]   # assert, print, hardcoded passwords OK in tests
+"src/*.py" = ["T20"]                            # entry-point scripts use print()
+"scripts/*.py" = ["T20", "S"]                   # scripts have different security model
+
+[lint.isort]
+known-first-party = [
+    "analyzers", "api", "cli", "clients", "collectors",
+    "config", "mcp_server", "openshift_auth", "proactive",
+    "repositories", "shared_config", "skills", "utils",
+]

@@ -601,7 +601,8 @@ class AIAnalysisRepository:
                 SELECT id, model_used, root_cause, failure_category,
                        confidence_score, recommended_fix, recommended_files,
                        can_auto_fix, requires_human_review, analyzed_at,
-                       langfuse_trace_id, tokens_used, cost_usd
+                       langfuse_trace_id, tokens_used, cost_usd,
+                       analysis_json
                 FROM ai_analysis
                 WHERE release_name = %s
                 ORDER BY analyzed_at DESC
@@ -626,6 +627,7 @@ class AIAnalysisRepository:
                 'langfuse_trace_id': row[10],
                 'tokens_used': row[11],
                 'cost_usd': row[12],
+                'analysis_json': row[13],
             }
 
     def get_extended_status(self, application):
@@ -838,6 +840,351 @@ class AIAnalysisRepository:
                     return dict(zip(cols, row))
 
             return None
+
+    def get_full_analysis(self, component, application):
+        """Latest AI analysis with analysis_json for review. Checks build, conforma, release."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT 'build', b.component_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                JOIN build_failures b ON a.build_failure_id = b.id
+                WHERE b.component_name = %s AND b.application = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            cursor.execute("""
+                SELECT 'conforma', c.component_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE c.component_name = %s AND c.application = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            cursor.execute("""
+                SELECT 'release', a.release_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                WHERE a.release_name = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component,))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            return None
+
+    @staticmethod
+    def _full_analysis_dict(row):
+        return {
+            'analysis_type': row[0],
+            'component_name': row[1],
+            'model_used': row[2],
+            'root_cause': row[3],
+            'failure_category': row[4],
+            'confidence_score': row[5],
+            'recommended_fix': row[6],
+            'analyzed_at': row[7],
+            'analysis_json': row[8],
+            'human_verdict': row[9],
+            'actual_root_cause': row[10],
+        }
+
+    def record_verdict(self, component, application, verdict,
+                       actual_root_cause=None, verdict_by=None):
+        """Record human verdict on AI analysis accuracy.
+
+        Args:
+            component: Component name
+            application: Application name
+            verdict: correct, partial, incorrect, or unknown
+            actual_root_cause: What actually caused it (if different from AI diagnosis)
+            verdict_by: Who provided the verdict (user, auto-resolve, etc.)
+        """
+        valid = ('correct', 'partial', 'incorrect', 'unknown')
+        if verdict not in valid:
+            raise ValueError("verdict must be one of: {}".format(', '.join(valid)))
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE ai_analysis SET
+                    human_verdict = %s,
+                    human_verdict_at = NOW(),
+                    human_verdict_by = %s,
+                    actual_root_cause = COALESCE(%s, actual_root_cause)
+                WHERE id = (
+                    SELECT a.id FROM ai_analysis a
+                    LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                    LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE (b.component_name = %s AND b.application = %s)
+                       OR (c.component_name = %s AND c.application = %s)
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                )
+            """, (verdict, verdict_by, actual_root_cause,
+                  component, application, component, application))
+            conn.commit()
+            updated = cursor.rowcount > 0
+
+        if updated and verdict in ('correct', 'partial', 'incorrect'):
+            self._update_confidence_models(component, application, verdict)
+
+        return updated
+
+    def _update_confidence_models(self, component, application, verdict):
+        """Update feature weights from new verdict (incremental learning)."""
+        try:
+            from analyzers.confidence_features import FeatureVector
+            from analyzers.feature_weights import FeatureWeightService
+
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT a.analysis_json FROM ai_analysis a
+                    LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                    LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE (b.component_name = %s AND b.application = %s)
+                       OR (c.component_name = %s AND c.application = %s)
+                    ORDER BY a.analyzed_at DESC LIMIT 1
+                """, (component, application, component, application))
+                row = cursor.fetchone()
+                if not row or not row[0]:
+                    return
+
+                analysis_json = row[0]
+                metadata = {}
+                if isinstance(analysis_json, list):
+                    for tc in analysis_json:
+                        if isinstance(tc, dict) and 'confidence_metadata' in tc.get('input', {}):
+                            metadata = tc['input']['confidence_metadata']
+                            break
+                elif isinstance(analysis_json, dict):
+                    metadata = analysis_json.get('confidence_metadata', {})
+
+                features_used = metadata.get('features_used', [])
+                if not features_used:
+                    return
+
+                feature_dict = {f: True for f in features_used}
+                features = FeatureVector(**{
+                    k: feature_dict.get(k, False)
+                    for k in FeatureVector.__dataclass_fields__
+                })
+
+                was_correct = verdict == 'correct' or (verdict == 'partial')
+                weight_service = FeatureWeightService(self.db)
+                weight_service.update_from_verdict(features, was_correct)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Feature weight update failed for %s", component, exc_info=True)
+
+    def get_quality_metrics(self, application=None, days=30):
+        """Aggregate AI quality metrics from human verdicts."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            app_filter = ""
+            params = [days]
+            if application:
+                app_filter = "AND (b.application = %s OR c.application = %s)"
+                params.extend([application, application])
+
+            cursor.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE a.human_verdict IS NOT NULL) AS total_with_verdict,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'unknown') AS unknown,
+                    ROUND(AVG(a.confidence_score) FILTER (WHERE a.human_verdict = 'correct'), 2) AS avg_conf_correct,
+                    ROUND(AVG(a.confidence_score) FILTER (WHERE a.human_verdict = 'incorrect'), 2) AS avg_conf_incorrect,
+                    COUNT(*) AS total_analyses
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE a.analyzed_at > NOW() - make_interval(days => %s)
+                {app_filter}
+            """.format(app_filter=app_filter), params)
+            row = cursor.fetchone()
+
+            total_judged = row[0] or 0
+            correct = row[1] or 0
+            partial = row[2] or 0
+
+            result = {
+                'total_with_verdict': total_judged,
+                'correct': correct,
+                'partial': partial,
+                'incorrect': row[3] or 0,
+                'unknown': row[4] or 0,
+                'accuracy': round((correct + partial * 0.5) / total_judged, 2) if total_judged > 0 else None,
+                'avg_confidence_correct': float(row[5]) if row[5] else None,
+                'avg_confidence_incorrect': float(row[6]) if row[6] else None,
+                'total_analyses': row[7] or 0,
+            }
+
+            cursor.execute("""
+                SELECT
+                    a.failure_category,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) AS total
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE a.human_verdict IS NOT NULL
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                  {app_filter}
+                GROUP BY a.failure_category
+                ORDER BY COUNT(*) DESC
+            """.format(app_filter=app_filter), params)
+
+            result['by_category'] = {
+                r[0]: {'correct': r[1], 'partial': r[2], 'incorrect': r[3], 'total': r[4]}
+                for r in cursor.fetchall()
+            }
+
+            return result
+
+    def get_verdict_stats_by_category(self, analyzer_type='build', days=90):
+        """Return verdict stats grouped by failure_category.
+
+        Used by BayesianPriorService to compute P(correct | category).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            if analyzer_type == 'build':
+                join = "JOIN build_failures b ON a.build_failure_id = b.id"
+            elif analyzer_type == 'conforma':
+                join = "JOIN conforma_results b ON a.conforma_result_id = b.id"
+            else:
+                join = """LEFT JOIN build_failures bf ON a.build_failure_id = bf.id
+                          LEFT JOIN conforma_results cr ON a.conforma_result_id = cr.id"""
+
+            cursor.execute("""
+                SELECT
+                    a.failure_category AS category,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    COUNT(*) AS total
+                FROM ai_analysis a
+                {join}
+                WHERE a.human_verdict IS NOT NULL
+                  AND a.analyzed_at > NOW() - make_interval(days => %s)
+                GROUP BY a.failure_category
+                ORDER BY COUNT(*) DESC
+            """.format(join=join), (days,))
+
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_calibration_data(self, analyzer_type=None, category=None, days=90):
+        """Return confidence_score and verdict accuracy for calibration curves.
+
+        Each row has 'confidence' (predicted) and 'accuracy' (0/0.5/1 actual).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            conditions = ["a.human_verdict IS NOT NULL",
+                          "a.analyzed_at > NOW() - make_interval(days => %s)"]
+            params = [days]
+
+            if analyzer_type == 'build':
+                conditions.append("a.build_failure_id IS NOT NULL")
+            elif analyzer_type == 'conforma':
+                conditions.append("a.conforma_result_id IS NOT NULL")
+
+            if category:
+                conditions.append("a.failure_category = %s")
+                params.append(category)
+
+            where = " AND ".join(conditions)
+            cursor.execute("""
+                SELECT
+                    a.confidence_score,
+                    a.human_verdict,
+                    a.failure_category
+                FROM ai_analysis a
+                WHERE {where}
+                ORDER BY a.analyzed_at
+            """.format(where=where), params)
+
+            result = []
+            for row in cursor.fetchall():
+                verdict = row[1]
+                if verdict == 'correct':
+                    accuracy = 1.0
+                elif verdict == 'partial':
+                    accuracy = 0.5
+                elif verdict == 'incorrect':
+                    accuracy = 0.0
+                else:
+                    continue
+                result.append({
+                    'confidence': float(row[0]) if row[0] else 0.5,
+                    'accuracy': accuracy,
+                    'category': row[2],
+                })
+            return result
+
+    def get_resolved_conforma_with_analysis(self, application=None, limit=50):
+        """Get resolved conforma violations that have AI analysis attached.
+
+        Returns violation + analysis data for regression testing.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            app_filter = ""
+            params = []
+            if application:
+                app_filter = "AND cr.application = %s"
+                params.append(application)
+            params.append(limit)
+
+            cursor.execute("""
+                SELECT
+                    cr.id, cr.component_name, cr.scenario, cr.application,
+                    cr.violations_count, cr.violation_summary,
+                    cr.first_detected_at, cr.resolved_at, cr.jira_key,
+                    a.id as analysis_id, a.failure_category, a.confidence_score,
+                    a.root_cause, a.recommended_fix, a.can_auto_fix,
+                    a.human_verdict, a.actual_root_cause,
+                    a.model_used
+                FROM conforma_results cr
+                JOIN ai_analysis a ON a.conforma_result_id = cr.id
+                WHERE cr.is_resolved = TRUE
+                  {app_filter}
+                ORDER BY cr.resolved_at DESC NULLS LAST
+                LIMIT %s
+            """.format(app_filter=app_filter), params)
+
+            cols = [
+                'id', 'component_name', 'scenario', 'application',
+                'violations_count', 'violation_summary',
+                'first_detected_at', 'resolved_at', 'jira_key',
+                'analysis_id', 'failure_category', 'confidence_score',
+                'root_cause', 'recommended_fix', 'can_auto_fix',
+                'human_verdict', 'actual_root_cause',
+                'model_used',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_conforma_queue(self, application):
         with self.db.connection() as conn:

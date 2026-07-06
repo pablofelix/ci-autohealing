@@ -11,8 +11,8 @@ import argparse
 import sys
 
 from config import CollectorConfig
-from services.batch_analysis_service import BatchAnalysisService
 from logger import setup_logger
+from services.batch_analysis_service import BatchAnalysisService
 
 logger = setup_logger(__name__)
 

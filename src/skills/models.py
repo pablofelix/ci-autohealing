@@ -1,7 +1,27 @@
 """Data models for the ic skill registry."""
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+
+def resolve_working_dir(skill_path, working_dir_setting='skill'):
+    """Resolve the working directory for a skill.
+
+    Args:
+        skill_path: absolute path to the skill directory (where SKILL.md lives)
+        working_dir_setting: 'skill' (default), 'repo-root', or a relative path
+    """
+    if working_dir_setting == 'repo-root':
+        d = os.path.abspath(skill_path)
+        while d != os.path.dirname(d):
+            if os.path.isdir(os.path.join(d, '.git')):
+                return d
+            d = os.path.dirname(d)
+        return os.path.abspath(skill_path)
+    if working_dir_setting and working_dir_setting != 'skill':
+        return os.path.normpath(os.path.join(skill_path, working_dir_setting))
+    return os.path.abspath(skill_path)
 
 
 @dataclass
@@ -37,6 +57,8 @@ class SkillMetadata:
     user_invocable: bool = False
     category: str = ''
     risk_level: str = 'medium'  # 'low', 'medium', 'high'
+    execution_mode: str = ''  # 'script', 'agent', or '' (auto-detect)
+    working_dir: str = 'skill'  # 'skill', 'repo-root', or relative path
     ic_metadata: Optional[IcMetadata] = None
 
     def to_dict(self) -> dict:
@@ -49,6 +71,10 @@ class SkillMetadata:
         }
         if self.category:
             d['category'] = self.category
+        if self.execution_mode:
+            d['execution_mode'] = self.execution_mode
+        if self.working_dir and self.working_dir != 'skill':
+            d['working_dir'] = self.working_dir
         if self.ic_metadata:
             d['ic_metadata'] = self.ic_metadata.to_dict()
         return d
@@ -65,6 +91,8 @@ class SkillMetadata:
             user_invocable=data.get('user_invocable', data.get('user-invocable', False)),
             category=data.get('category', ''),
             risk_level=data.get('risk_level', data.get('risk-level', 'medium')),
+            execution_mode=data.get('execution_mode', data.get('execution-mode', '')),
+            working_dir=data.get('working_dir', data.get('working-dir', 'skill')),
             ic_metadata=ic_meta,
         )
 
@@ -78,19 +106,30 @@ class SourceEntry:
     commit: str
     added_at: str
     local_path: str
+    branch: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             'name': self.name,
             'url': self.url,
             'commit': self.commit,
             'added_at': self.added_at,
             'local_path': self.local_path,
         }
+        if self.branch:
+            d['branch'] = self.branch
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceEntry':
-        return cls(**data)
+        return cls(
+            name=data['name'],
+            url=data['url'],
+            commit=data['commit'],
+            added_at=data['added_at'],
+            local_path=data['local_path'],
+            branch=data.get('branch'),
+        )
 
 
 @dataclass
@@ -145,6 +184,9 @@ class ExecutionResult:
     steps_executed: int = 0
     steps_total: int = 0
     triggered_by: str = 'cli'
+    component_name: Optional[str] = None
+    application: Optional[str] = None
+    triage_item_id: Optional[int] = None
     dry_run_steps: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -160,5 +202,8 @@ class ExecutionResult:
             'steps_executed': self.steps_executed,
             'steps_total': self.steps_total,
             'triggered_by': self.triggered_by,
+            'component_name': self.component_name,
+            'application': self.application,
+            'triage_item_id': self.triage_item_id,
             'dry_run_steps': self.dry_run_steps,
         }

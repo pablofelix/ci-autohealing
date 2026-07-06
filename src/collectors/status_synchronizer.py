@@ -8,12 +8,13 @@ Provides:
 
 import time
 from dataclasses import replace
+from datetime import datetime
 
-from logger import setup_logger
-from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubernetesClient, TektonResultsClient
 from clients.pipelinerun_query import query_pipelineruns
-from models import Component, BuildStatus
+from logger import setup_logger
+from models import BuildStatus, Component
+from repositories import BuildFailureRepository, DatabaseConnection
 from tekton_parsers import classify_build_status
 
 logger = setup_logger(__name__)
@@ -327,6 +328,10 @@ class StatusSynchronizer:
                     logger.warning("Triage auto-resolve failed for %s",
                                    component.name, exc_info=True)
 
+                self._auto_verdict(component.name, app,
+                                   resolution_commit_sha=current.get('commit_sha'))
+                self._correlate_skill_runs(component.name, app)
+
             if self.build_repo.record_successful_build(
                 component.name, current['name'], current['uid'],
                 app, ns, component.repository_url, component.branch
@@ -346,6 +351,58 @@ class StatusSynchronizer:
             logger.info("Current status: Failed (will be collected by comprehensive collector)")
 
         return result
+
+    def _auto_verdict(self, component_name, application,
+                      resolution_commit_sha=None):
+        """Smart auto-verdict using GitHub PR correlation when available."""
+        try:
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            ai_repo = AIAnalysisRepository(self.build_repo.db)
+            analysis = ai_repo.get_analysis_by_component(component_name, application, 'build')
+            if not analysis or analysis.get('human_verdict'):
+                return
+
+            verdict = 'correct'
+            token = getattr(self.config, 'github_token', None)
+            if token and resolution_commit_sha:
+                try:
+                    from collectors.verdict_correlator import VerdictCorrelator
+                    correlator = VerdictCorrelator(self.config, self.build_repo.db)
+                    verdict = correlator.correlate_build_resolution(
+                        component_name, application,
+                        resolution_commit_sha, datetime.utcnow()
+                    )
+                except Exception as e:
+                    logger.warning("Smart correlation failed for %s, using simple verdict: %s",
+                                   component_name, str(e)[:100])
+                    verdict = 'correct'
+
+            ai_repo.record_verdict(
+                component_name, application, verdict,
+                verdict_by='auto-resolve')
+            logger.info("Auto-verdict '%s' for %s AI analysis", verdict, component_name)
+        except Exception:
+            logger.debug("Auto-verdict failed for %s", component_name, exc_info=True)
+
+    def _correlate_skill_runs(self, component_name, application):
+        """Mark recent skill_runs for this component with outcome=build_passed."""
+        try:
+            with self.build_repo.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE skill_runs
+                    SET outcome = 'build_passed'
+                    WHERE component_name = %s
+                      AND application = %s
+                      AND outcome IS NULL
+                      AND started_at > NOW() - INTERVAL '7 days'
+                """, (component_name, application))
+                if cursor.rowcount > 0:
+                    conn.commit()
+                    logger.info("Marked %d skill_runs as build_passed for %s",
+                                cursor.rowcount, component_name)
+        except Exception:
+            logger.debug("Skill run correlation failed for %s", component_name, exc_info=True)
 
     def run(self, components=None):
         start_time = time.time()

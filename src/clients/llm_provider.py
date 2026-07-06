@@ -50,6 +50,26 @@ class LLMProvider(ABC):
             LLMResponse with content, tool_calls, token counts
         """
 
+    def create_conversation(self, system, messages, tools=None, max_tokens=4096):
+        """Send a multi-turn conversation to the LLM.
+
+        Unlike create_message() which builds a single user turn,
+        this accepts a full messages list for agent-mode tool_use loops.
+        Tool choice defaults to 'auto' (model decides text vs tool_use).
+
+        Args:
+            system: System prompt
+            messages: Full conversation history [{role, content}, ...]
+            tools: Optional tool definitions
+            max_tokens: Maximum tokens in response
+
+        Returns:
+            LLMResponse with content, tool_calls (including IDs), token counts
+        """
+        raise NotImplementedError(
+            '{} does not support multi-turn conversations'.format(
+                type(self).__name__))
+
     @abstractmethod
     def model_name(self):
         """Return the model identifier for logging/tracking.

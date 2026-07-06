@@ -17,19 +17,19 @@ from datetime import datetime
 
 from kubernetes import client
 
-from logger import setup_logger
-from openshift_auth import _ensure_k8s_config
-from repositories import DatabaseConnection, BuildFailureRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient, UnifiedPipelineClient
 from clients.pipelinerun_query import query_pipelineruns
-from models import ScanResult, Component
+from logger import setup_logger
+from models import Component, ScanResult
+from openshift_auth import _ensure_k8s_config
+from repositories import BuildFailureRepository, DatabaseConnection
 from tekton_parsers import (
+    classify_build_status,
     extract_error_from_logs,
     extract_failed_step_from_logs,
     extract_failed_step_from_pipelinerun,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
-    classify_build_status,
 )
 
 logger = setup_logger(__name__)

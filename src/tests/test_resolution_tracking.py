@@ -1,6 +1,7 @@
 """Tests for resolution commit SHA tracking and related features."""
 
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from collectors.status_synchronizer import StatusSynchronizer

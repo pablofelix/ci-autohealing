@@ -20,16 +20,70 @@ def _use_api():
 
 
 def _api():
-    from cli.api_client import get_client, APIClient
+    from cli.api_client import APIClient, get_client
     if _is_cluster():
         return get_client()
-    url = ic_config.get_api_url() or 'http://localhost:8000'
-    return APIClient(url)
+    return APIClient('http://localhost:8000')
 
 
 def _app():
     from cli import config as cfg
     return cfg.APPLICATION_NAME
+
+
+def _triage_jira_map(application):
+    """Build component→jira_key map from all active triage items (single query)."""
+    from cli.db import get_repo
+    from repositories.triage_repository import TriageRepository
+    jira_map = {}
+    try:
+        items = get_repo(TriageRepository).get_active(application)
+        for item in items:
+            jira_key = item.get('jira_key')
+            if jira_key:
+                for comp in item.get('components', []):
+                    if comp not in jira_map:
+                        jira_map[comp] = jira_key
+    except Exception:
+        pass
+    return jira_map
+
+
+def _triage_info_map(application):
+    """Build component→{jira_key, group_label, root_cause} from active triage items."""
+    from cli.db import get_repo
+    from repositories.triage_repository import TriageRepository
+    info = {}
+    try:
+        items = get_repo(TriageRepository).get_active(application)
+        for item in items:
+            entry = {
+                'jira_key': item.get('jira_key'),
+                'group_label': item.get('group_label'),
+                'root_cause': item.get('root_cause'),
+            }
+            for comp in item.get('components', []):
+                if comp not in info:
+                    info[comp] = entry
+    except Exception:
+        pass
+    return info
+
+
+def _triage_jira_map_safe(application):
+    """Build component→jira_key map, using local DB (works even in cluster mode)."""
+    try:
+        return _triage_jira_map(application)
+    except Exception:
+        return {}
+
+
+def _triage_info_map_safe(application):
+    """Build component→triage info map, using local DB (works even in cluster mode)."""
+    try:
+        return _triage_info_map(application)
+    except Exception:
+        return {}
 
 
 def require_data():
@@ -66,14 +120,98 @@ def get_alerts(application=None):
     app = application or _app()
     if _is_cluster():
         return _api().get(f'/api/v1/applications/{app}/alerts') or {}
+    from datetime import datetime
+
     from cli.db import get_repo
     from repositories.build_failure_repository import BuildFailureRepository
     from repositories.conforma_repository import ConformaRepository
     build_repo = get_repo(BuildFailureRepository)
     conforma_repo = get_repo(ConformaRepository)
+
+    triage = build_repo.get_triage_summary(app)
+    build_failures = []
+    for comp in triage.get('failing_components', []):
+        build_failures.append({
+            'component': comp['component'],
+            'status': comp.get('status', 'Failed'),
+            'error_type': comp.get('error_type'),
+            'first_seen': str(comp.get('first_detected_at', '')),
+            'last_seen': str(comp.get('last_updated_at', '')),
+            'occurrence_count': comp.get('failure_count', 1),
+            'has_logs': comp.get('has_logs', False),
+            'has_analysis': comp.get('ai_analyzed', False),
+        })
+
+    from cli import config as cfg
+    from utils.conforma_utils import (
+        apply_policy_correction,
+        categorize_policy,
+        compute_blocks,
+        compute_exception_coverage_details,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+    )
+    from utils.conforma_utils import (
+        policy_env as _policy_env,
+    )
+    from utils.conforma_utils import (
+        policy_url as _policy_url,
+    )
+    exceptions_by_policy = fetch_exceptions_by_policy(cfg.NAMESPACE)
+    jira_map = _triage_jira_map(app)
+    conforma_violations = []
+    summaries = conforma_repo.get_violation_summaries(app)
+    for s in summaries:
+        comp_name = s['component_name']
+        scenario = s.get('scenario', '')
+        jira_key = s.get('jira_key') or jira_map.get(comp_name)
+        rules = extract_violation_rules(s.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        uv_count, _ = count_unique_violations(s.get('violation_summary', ''))
+        conforma_violations.append({
+            'component': comp_name,
+            'component_name': comp_name,
+            'status': 'Conforma Violation',
+            'error_type': scenario,
+            'first_seen': str(s.get('first_detected_at', '')),
+            'last_seen': str(s.get('last_updated_at', '')),
+            'occurrence_count': 1,
+            'has_logs': s.get('violation_summary') is not None,
+            'has_analysis': s.get('ai_analyzed', False),
+            'violations_count': s.get('violations_count', 0),
+            'unique_violations': uv_count or None,
+            'warnings_count': s.get('warnings_count', 0),
+            'scenario': scenario,
+            'category': categorize_policy(scenario),
+            'policy_url': _policy_url(scenario),
+            'jira_key': jira_key,
+            'violation_summary': s.get('violation_summary', ''),
+            'exception_coverage': cov['coverage'],
+            'exception_coverage_stage': cov['stage'],
+            'exception_coverage_prod': cov['prod'],
+            'exception_env_tag': cov['env_tag'],
+            'policy_env': _policy_env(extract_policy_from_scenario(scenario)),
+            'blocks': compute_blocks(scenario, cov['stage'], cov['prod']),
+            'policy_url_stage': cov['policy_url_stage'],
+            'policy_url_prod': cov['policy_url_prod'],
+            'covered_rules_stage': cov['covered_rules_stage'],
+            'covered_rules_prod': cov['covered_rules_prod'],
+            'uncovered_rules_stage': cov['uncovered_rules_stage'],
+            'uncovered_rules_prod': cov['uncovered_rules_prod'],
+        })
+
+    apply_policy_correction(conforma_violations, exceptions_by_policy)
+
+    now = datetime.utcnow().isoformat()
     return {
-        'triage': build_repo.get_triage_summary(app),
-        'conforma': conforma_repo.find_unresolved_component_names(app),
+        'build_failures': build_failures,
+        'conforma_violations': conforma_violations,
+        'nightly_warnings': [],
+        'total_count': len(build_failures) + len(conforma_violations),
+        'last_sync': now,
     }
 
 
@@ -95,13 +233,111 @@ def get_failure_details(component, application=None):
     return get_repo(BuildFailureRepository).get_failure_details(component, app)
 
 
-def get_conforma_violations(application=None):
+def get_conforma_violations(application=None, reporter_env=None,
+                            reporter_build_type=None, include_future=None):
     app = application or _app()
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        branch = app_to_reporter_branch(app)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        return fetch_reporter_violations(branch, env=env, build_type=build_type)
     if _is_cluster():
-        return _api().get(f'/api/v1/applications/{app}/violations') or []
+        alerts = _api().get(f'/api/v1/applications/{app}/alerts') or {}
+        return alerts.get('conforma_violations', [])
+    from cli import config as cfg
     from cli.db import get_repo
     from repositories.conforma_repository import ConformaRepository
-    return get_repo(ConformaRepository).find_unresolved_component_names(app)
+    from utils.conforma_utils import (
+        apply_policy_correction,
+        compute_blocks,
+        compute_exception_coverage_details,
+        count_unique_violations,
+        enrich_with_coverage,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        policy_url,
+    )
+    from utils.conforma_utils import (
+        policy_env as _penv,
+    )
+    conforma_repo = get_repo(ConformaRepository)
+    violations = conforma_repo.get_violation_summaries(app, include_future=include_future)
+    jira_map = _triage_jira_map(app)
+    exceptions_by_policy = fetch_exceptions_by_policy(cfg.NAMESPACE)
+    for v in violations:
+        if not v.get('jira_key'):
+            v['jira_key'] = jira_map.get(v.get('component_name'))
+        v['component'] = v.get('component_name', '')
+        scenario = v.get('scenario', '')
+        v['policy_name'] = extract_policy_from_scenario(scenario)
+        v['policy_url'] = policy_url(scenario)
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        v['policy_env'] = _penv(v['policy_name'])
+        v['exception_coverage_stage'] = cov['stage']
+        v['exception_coverage_prod'] = cov['prod']
+        v['exception_env_tag'] = cov['env_tag']
+        v['blocks'] = compute_blocks(scenario, cov['stage'], cov['prod'])
+        v['covered_rules_stage'] = cov['covered_rules_stage']
+        v['covered_rules_prod'] = cov['covered_rules_prod']
+        v['uncovered_rules_stage'] = cov['uncovered_rules_stage']
+        v['uncovered_rules_prod'] = cov['uncovered_rules_prod']
+        unique_count, unique_rules = count_unique_violations(
+            v.get('violation_summary', ''))
+        v['unique_violations'] = unique_count if v.get('violation_summary') else None
+        v['unique_rules'] = unique_rules
+    enrich_with_coverage(violations, exceptions_by_policy)
+    apply_policy_correction(violations, exceptions_by_policy)
+    return violations
+
+
+def get_conforma_rules(application=None, reporter_env=None,
+                       reporter_build_type=None, include_future=None):
+    """Get violations grouped by rule. Returns list of rule dicts:
+    [{'rule': str, 'title': str, 'solution': str, 'components': [str], 'count': int}]
+    """
+    app = application or _app()
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_rules
+        branch = app_to_reporter_branch(app)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        return fetch_reporter_rules(branch, env=env, build_type=build_type)
+    if _is_cluster():
+        result = _api().get(f'/api/v1/applications/{app}/violations/rules',
+                            params={'reporter_env': reporter_env,
+                                    'reporter_build_type': reporter_build_type})
+        return result if isinstance(result, list) else []
+    from utils.conforma_utils import count_unique_violations
+    violations = get_conforma_violations(application=app, include_future=include_future)
+    rules_map = {}
+    for v in violations:
+        comp = v.get('component_name', '')
+        _, uv_rules = count_unique_violations(v.get('violation_summary', ''))
+        for r in uv_rules:
+            rule = r['rule']
+            if rule not in rules_map:
+                rules_map[rule] = {
+                    'rule': rule,
+                    'title': '',
+                    'solution': '',
+                    'components': set(),
+                    'violation_rows': 0,
+                }
+            rules_map[rule]['components'].add(comp)
+            rules_map[rule]['violation_rows'] += 1
+    result = []
+    for entry in rules_map.values():
+        entry['components'] = sorted(entry['components'])
+        entry['count'] = len(entry['components'])
+        result.append(entry)
+    result.sort(key=lambda r: (-r['count'], r['rule']))
+    return result
 
 
 def get_conforma_details(component, application=None):
@@ -116,10 +352,29 @@ def get_conforma_details(component, application=None):
 def get_triage_items(application=None):
     app = application or _app()
     if _is_cluster():
-        return _api().get(f'/api/v1/applications/{app}/triage') or []
-    from cli.db import get_repo
-    from repositories.triage_repository import TriageRepository
-    return get_repo(TriageRepository).get_active_items(app)
+        import io
+        import sys
+        old_stderr = sys.stderr
+        for path in [f'/api/v1/applications/{app}/triage/report',
+                     f'/api/v1/applications/{app}/triage']:
+            try:
+                sys.stderr = io.StringIO()
+                data = _api().get(path)
+            except Exception:
+                data = None
+            finally:
+                sys.stderr = old_stderr
+            if data and isinstance(data, dict) and 'items' in data:
+                return data
+    try:
+        from cli.db import get_repo
+        from repositories.triage_repository import TriageRepository
+        repo = get_repo(TriageRepository)
+        items = repo.get_report(app)
+        summary = repo.get_summary(app)
+        return {'application': app, 'summary': summary, 'items': items}
+    except Exception:
+        return {'items': []}
 
 
 def get_daily_stats(application=None):
@@ -157,7 +412,8 @@ def get_failures(application=None):
         return _api().get(f'/api/v1/applications/{app}/failures') or []
     from cli.db import get_repo
     from repositories.build_failure_repository import BuildFailureRepository
-    return get_repo(BuildFailureRepository).get_failing_components(app)
+    triage = get_repo(BuildFailureRepository).get_triage_summary(app)
+    return triage.get('failing_components', [])
 
 
 def get_dashboard(application=None):
@@ -177,9 +433,29 @@ def get_export(component, fmt='slack', application=None):
 
 def get_schedule(application=None):
     app = application or _app()
-    if _is_cluster():
+    if _use_api():
         return _api().get(f'/api/v1/applications/{app}/schedule')
     return None
+
+
+def get_release_details(name, application=None, include_artifacts=False):
+    app = application or _app()
+    if _use_api():
+        params = {}
+        if include_artifacts:
+            params['include_artifacts'] = 'true'
+        return _api().get(
+            f'/api/v1/applications/{app}/releases/{name}', params=params)
+    from api.routes.releases import (
+        _build_release_details,
+        _fetch_release_cr,
+    )
+    from cli import config as cfg
+    try:
+        rel_json = _fetch_release_cr(name, cfg.NAMESPACE)
+    except Exception:
+        return None
+    return _build_release_details(rel_json, cfg.NAMESPACE, include_artifacts=include_artifacts)
 
 
 def get_jira_issue(jira_key):
@@ -191,13 +467,30 @@ def get_jira_issue(jira_key):
 def get_policy_exceptions():
     if _is_cluster():
         return _api().get('/api/v1/policies/exceptions')
-    return None
+    from cli import config as cfg
+    from clients.konflux_client import KonfluxClient
+    try:
+        client = KonfluxClient(namespace=cfg.NAMESPACE)
+        policies = client.get_ec_policies()
+        all_exceptions = []
+        for policy in policies:
+            all_exceptions.extend(client.extract_exceptions(policy))
+        return {'exceptions': all_exceptions, 'total': len(all_exceptions)}
+    except Exception:
+        return None
 
 
 def get_policy_bindings():
     if _is_cluster():
         return _api().get('/api/v1/policies/bindings')
-    return None
+    from cli import config as cfg
+    from clients.konflux_client import KonfluxClient
+    try:
+        client = KonfluxClient(namespace=cfg.NAMESPACE)
+        bindings = client.get_release_plan_admissions()
+        return {'bindings': bindings, 'total': len(bindings)}
+    except Exception:
+        return None
 
 
 def submit_analysis(component, analysis_data, application=None):
@@ -226,4 +519,23 @@ def remove_watched_application(app):
     if _is_cluster():
         data = _api().delete(f'/api/v1/config/applications/{app}')
         return data.get('applications', []) if data else []
+    return None
+
+
+def get_onboarding_status(application=None):
+    app = application or _app()
+    if _use_api():
+        return _api().get(f'/api/v1/applications/{app}/onboarding')
+    return None
+
+
+def get_onboarding_describe(component, application=None, diff=False):
+    app = application or _app()
+    if _use_api():
+        params = {}
+        if diff:
+            params['diff'] = 'true'
+        return _api().get(
+            f'/api/v1/applications/{app}/onboarding/{component}',
+            params=params if params else None)
     return None

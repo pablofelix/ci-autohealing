@@ -14,7 +14,7 @@ from repositories.ai_analysis_repository import AIAnalysisRepository
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.error_pattern_repository import ErrorPatternRepository
-from repositories.repository_factory import get_repository, get_pool
+from repositories.repository_factory import get_pool, get_repository
 from repositories.resolution_attempt_repository import ResolutionAttemptRepository
 
 router = APIRouter(tags=["applications"])
@@ -83,9 +83,9 @@ def get_daily_stats(application: str, days: int = 7) -> List[Dict[str, Any]]:
     return _build_repo().get_daily_stats(application, days)
 
 
-@router.get("/applications/{application}/triage", response_model=TriageResponse)
+@router.get("/applications/{application}/triage-summary", response_model=TriageResponse)
 def get_triage(application: str):
-    """Triage summary: failing vs working components."""
+    """Triage summary: failing vs working components (build status)."""
     triage = _build_repo().get_triage_summary(application)
     return TriageResponse(
         application=application,

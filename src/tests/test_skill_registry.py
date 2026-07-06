@@ -5,10 +5,10 @@ import tempfile
 import textwrap
 import unittest
 
-from skills.models import IcMetadata, SkillEntry, SkillMetadata, SourceEntry
-from skills.loader import _parse_yaml_simple, discover_skills, parse_skill_md
-from skills.registry import SkillRegistry
 from skills.known_sources import KNOWN_SOURCES, resolve_source
+from skills.loader import _parse_yaml_simple, discover_skills, parse_skill_md
+from skills.models import IcMetadata, SkillEntry, SkillMetadata, SourceEntry
+from skills.registry import SkillRegistry
 
 
 class TestSkillMetadata(unittest.TestCase):
@@ -258,14 +258,28 @@ class TestSkillRegistry(unittest.TestCase):
 class TestKnownSources(unittest.TestCase):
 
     def test_resolve_known(self):
-        name, url = resolve_source('aiops-infra')
+        name, url, branch = resolve_source('aiops-infra')
         self.assertEqual(name, 'aiops-infra')
         self.assertIn('github.com', url)
+        self.assertIsNone(branch)
+
+    def test_resolve_known_with_branch(self):
+        name, url, branch = resolve_source('aiops-infra/conforma')
+        self.assertEqual(name, 'aiops-infra/conforma')
+        self.assertIn('github.com', url)
+        self.assertEqual(branch, 'skill/conforma')
 
     def test_resolve_url(self):
-        name, url = resolve_source('https://github.com/org/my-repo')
+        name, url, branch = resolve_source('https://github.com/org/my-repo')
         self.assertEqual(name, 'my-repo')
         self.assertEqual(url, 'https://github.com/org/my-repo')
+        self.assertIsNone(branch)
+
+    def test_resolve_url_with_branch(self):
+        name, url, branch = resolve_source('https://github.com/org/my-repo@feature')
+        self.assertEqual(name, 'my-repo@feature')
+        self.assertEqual(url, 'https://github.com/org/my-repo')
+        self.assertEqual(branch, 'feature')
 
     def test_resolve_unknown(self):
         with self.assertRaises(ValueError):
@@ -274,7 +288,7 @@ class TestKnownSources(unittest.TestCase):
     def test_known_sources_catalog(self):
         self.assertIn('aiops-infra', KNOWN_SOURCES)
         self.assertIn('ai-helpers', KNOWN_SOURCES)
-        for name, info in KNOWN_SOURCES.items():
+        for _name, info in KNOWN_SOURCES.items():
             self.assertIn('url', info)
             self.assertIn('description', info)
 

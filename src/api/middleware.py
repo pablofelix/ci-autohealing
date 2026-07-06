@@ -8,7 +8,6 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-
 _API_KEY: Optional[str] = os.environ.get("IC_API_KEY")
 
 

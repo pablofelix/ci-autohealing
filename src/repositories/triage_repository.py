@@ -22,6 +22,20 @@ class TriageRepository:
                   failed_step, slack_thread_urls, jira_key, notes))
             return cursor.fetchone()[0]
 
+    def build_jira_map(self, application):
+        """Build component->jira_key map from active triage items."""
+        jira_map = {}
+        try:
+            for item in self.get_active(application):
+                jira_key = item.get('jira_key')
+                if jira_key:
+                    for comp in item.get('components', []):
+                        if comp not in jira_map:
+                            jira_map[comp] = jira_key
+        except Exception:
+            pass
+        return jira_map
+
     def get_active(self, application):
         with self.db.connection() as conn:
             cursor = conn.cursor()
@@ -156,7 +170,7 @@ class TriageRepository:
             """, (url, item_id, url))
             return cursor.rowcount > 0
 
-    def resolve_item(self, item_id, resolution=None, pr_url=None):
+    def resolve_item(self, item_id, resolution=None, pr_url=None, verdict=None):
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -166,8 +180,22 @@ class TriageRepository:
                     resolution_pr_url = COALESCE(%s, resolution_pr_url),
                     updated_at = NOW()
                 WHERE id = %s
+                RETURNING components, application
             """, (resolution, pr_url, item_id))
-            return cursor.rowcount > 0
+            row = cursor.fetchone()
+            if not row or not verdict:
+                return cursor.rowcount > 0
+            components, application = row
+            if components and application:
+                from repositories.ai_analysis_repository import AIAnalysisRepository
+                ai_repo = AIAnalysisRepository(self.db)
+                for comp in components:
+                    try:
+                        ai_repo.record_verdict(comp, application, verdict,
+                                               verdict_by='triage')
+                    except Exception:
+                        pass
+            return True
 
     def get_report(self, application, date=None):
         """Get triage items grouped for a report, optionally filtered by date."""

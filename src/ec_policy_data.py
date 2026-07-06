@@ -5,11 +5,11 @@ Replaces the GitLab→YAML pipeline with direct K8s REST API calls.
 Outputs JSON to stdout for consumption by the ic shell script.
 """
 
+import argparse
 import json
 import logging
 import os
 import sys
-import argparse
 
 from clients.konflux_client import KonfluxClient
 from logger import setup_logger

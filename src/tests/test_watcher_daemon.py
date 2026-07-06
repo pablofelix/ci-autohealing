@@ -5,7 +5,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from config import (
-    CollectorConfig, DatabaseConfig, KubernetesConfig, WatcherConfig,
+    CollectorConfig,
+    DatabaseConfig,
+    KubernetesConfig,
+    WatcherConfig,
 )
 from watcher.daemon import WatchDaemon, _GoneError
 
@@ -128,12 +131,11 @@ class TestWatchStream(unittest.TestCase):
 
         with patch('watcher.daemon.watch.Watch', return_value=mock_watch), \
              patch('watcher.daemon._ensure_k8s_config'), \
-             patch('watcher.daemon.client.CustomObjectsApi'):
-            with self.assertRaises(_GoneError):
-                daemon._watch_stream(
-                    'tekton.dev', 'v1', 'pipelineruns',
-                    'app=test', MagicMock(), 'test-app/build', None,
-                )
+             patch('watcher.daemon.client.CustomObjectsApi'), self.assertRaises(_GoneError):
+            daemon._watch_stream(
+                'tekton.dev', 'v1', 'pipelineruns',
+                'app=test', MagicMock(), 'test-app/build', None,
+            )
 
     def test_handler_error_doesnt_crash_stream(self):
         config = _make_config()

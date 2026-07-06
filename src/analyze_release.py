@@ -6,12 +6,13 @@ Outputs JSON to stdout for consumption by the ic shell script.
 Logs go to stderr to keep stdout clean for JSON parsing.
 """
 
+import argparse
 import json
 import logging
 import sys
-import argparse
-from config import CollectorConfig
+
 from analyzers.release_failure_analyzer import ReleaseFailureAnalyzer
+from config import CollectorConfig
 from logger import setup_logger
 
 # Redirect ALL logger handlers to stderr so stdout is clean for JSON output.

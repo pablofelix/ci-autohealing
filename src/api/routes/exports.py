@@ -3,20 +3,18 @@
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
-
-from security.redact import redact_secrets
 
 from mcp_server.models import AnalysisDetails
 from repositories.ai_analysis_repository import AIAnalysisRepository
 from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
-
+from security.redact import redact_secrets
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
 
 
@@ -165,8 +163,8 @@ def _format_failure_duration(first_detected_at):
         return None
     first = first_detected_at
     if hasattr(first, 'tzinfo') and (first.tzinfo is None):
-        first = first.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+        first = first.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
     days = (now - first).days
     if days == 0:
         return "today"

@@ -43,6 +43,7 @@ class UpdateRequest(BaseModel):
 class ResolveRequest(BaseModel):
     resolution: Optional[str] = None
     resolution_pr_url: Optional[str] = None
+    verdict: Optional[str] = None
 
 
 @router.get("/applications/{application}/triage")
@@ -52,6 +53,12 @@ def get_triage_report(application: str, date: Optional[str] = None) -> Dict[str,
     items = repo.get_report(application, date=date)
     summary = repo.get_summary(application)
     return {"application": application, "summary": summary, "items": items}
+
+
+@router.get("/applications/{application}/triage/report")
+def get_triage_report_alt(application: str, date: Optional[str] = None) -> Dict[str, Any]:
+    """Triage report (alternative path to avoid route collision)."""
+    return get_triage_report(application, date=date)
 
 
 @router.get("/applications/{application}/triage/{item_id}")
@@ -134,4 +141,13 @@ def resolve_triage_item(application: str, item_id: int, req: ResolveRequest) -> 
         raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
 
     repo.resolve_item(item_id, resolution=req.resolution, pr_url=req.resolution_pr_url)
+
+    if req.verdict and req.verdict in ('correct', 'partial', 'incorrect'):
+        from repositories.ai_analysis_repository import AIAnalysisRepository
+        from repositories.repository_factory import get_repository
+        ai_repo = get_repository(AIAnalysisRepository)
+        components = existing.get('components', [])
+        if components:
+            ai_repo.record_verdict(components[0], application, req.verdict, verdict_by='api')
+
     return {"action": "resolved", "item_id": item_id}

@@ -70,6 +70,7 @@ class KubernetesClient(PipelineRunSource):
             data = api.get_namespaced_custom_object(
                 group='appstudio.redhat.com', version='v1alpha1',
                 namespace=ns, plural='components', name=component_name,
+                _request_timeout=10,
             )
             spec = data.get('spec', {})
             status = data.get('status', {})
@@ -93,6 +94,7 @@ class KubernetesClient(PipelineRunSource):
             result = api.list_namespaced_custom_object(
                 group='appstudio.redhat.com', version='v1alpha1',
                 namespace=ns, plural='components',
+                _request_timeout=10,
             )
             components = []
             for item in result.get('items', []):
@@ -101,14 +103,16 @@ class KubernetesClient(PipelineRunSource):
                 app = spec.get('application', '')
                 if application and app != application:
                     continue
+                meta = item.get('metadata', {})
                 components.append({
-                    'name': item.get('metadata', {}).get('name', ''),
+                    'name': meta.get('name', ''),
                     'application': app,
                     'container_image': spec.get('containerImage', ''),
                     'repository_url': spec.get('source', {}).get('git', {}).get('url', ''),
                     'branch': spec.get('source', {}).get('git', {}).get('revision', ''),
                     'last_built_commit': status.get('lastBuiltCommit', ''),
                     'nudges': spec.get('build-nudges-ref', []),
+                    'created_at': meta.get('creationTimestamp', ''),
                 })
             return components
         except Exception:
@@ -123,6 +127,7 @@ class KubernetesClient(PipelineRunSource):
             result = api.list_namespaced_custom_object(
                 group='pipelinesascode.tekton.dev', version='v1alpha1',
                 namespace=ns, plural='repositories',
+                _request_timeout=10,
             )
             repos = []
             for item in result.get('items', []):
@@ -150,6 +155,7 @@ class KubernetesClient(PipelineRunSource):
                 namespace=ns, plural='pipelineruns',
                 label_selector='appstudio.openshift.io/component={}'.format(
                     component_name),
+                _request_timeout=10,
             )
             runs = []
             for item in result.get('items', []):
@@ -162,6 +168,7 @@ class KubernetesClient(PipelineRunSource):
                         status = 'succeeded' if cond.get('status') == 'True' else 'failed'
                         if cond.get('reason') == 'Running':
                             status = 'running'
+                annotations = meta.get('annotations', {})
                 runs.append({
                     'name': meta.get('name', ''),
                     'status': status,
@@ -170,8 +177,37 @@ class KubernetesClient(PipelineRunSource):
                     'event_type': labels.get(
                         'pipelinesascode.tekton.dev/event-type', ''),
                     'created_at': meta.get('creationTimestamp', ''),
+                    'chains_signed': annotations.get(
+                        'chains.tekton.dev/signed', ''),
                 })
             runs.sort(key=lambda r: r['created_at'], reverse=True)
             return runs[:limit]
         except Exception:
             return []
+
+    def trigger_rebuild(self, component_name, namespace=None):
+        """Annotate a Component CR to trigger a fresh Konflux build.
+
+        Sets build.appstudio.openshift.io/request=trigger-pac-build on the
+        Component custom resource, which Konflux's build controller picks up
+        and starts a new PipelineRun (event_type=incoming).
+        """
+        if not _LABEL_VALUE_RE.match(component_name):
+            raise ValueError("Invalid component name: {!r}".format(
+                component_name))
+        ns = namespace or self.namespace
+        _ensure_k8s_config()
+        api = client.CustomObjectsApi()
+        body = {
+            'metadata': {
+                'annotations': {
+                    'build.appstudio.openshift.io/request': 'trigger-pac-build',
+                },
+            },
+        }
+        api.patch_namespaced_custom_object(
+            group='appstudio.redhat.com', version='v1alpha1',
+            namespace=ns, plural='components', name=component_name,
+            body=body,
+        )
+        return True

@@ -103,6 +103,64 @@ class RegistryClient:
             logger.debug("Failed to list tags for %s/%s: %s", registry, repository, e)
             return []
 
+    def get_manifest(self, registry, repository, reference):
+        """Fetch a manifest (manifest list or single image) from the registry.
+
+        For manifest lists (multi-arch images), returns the index with per-arch
+        manifest references. For single images, returns the image manifest.
+        """
+        accept = ', '.join([
+            'application/vnd.oci.image.index.v1+json',
+            'application/vnd.docker.distribution.manifest.list.v2+json',
+            'application/vnd.oci.image.manifest.v1+json',
+            'application/vnd.docker.distribution.manifest.v2+json',
+        ])
+        try:
+            resp = self._api_get(
+                registry, '{}/manifests/{}'.format(repository, reference),
+                accept=accept, repository=repository)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            logger.debug("Manifest fetch failed for %s/%s@%s: %s",
+                         registry, repository, reference[:16], e)
+        return None
+
+    def resolve_per_arch_digest(self, registry, repository, target_digest):
+        """Check if target_digest is a per-arch manifest within this repo's latest image.
+
+        Fetches the manifest list for the latest tag and checks if any platform
+        manifest matches the target digest. Returns the matching platform info
+        or None.
+        """
+        tags = self.list_tags(registry, repository)
+        if not tags:
+            return None
+
+        digest_tags = [t for t in tags if not t.startswith('sha256-')]
+        if not digest_tags:
+            return None
+
+        for tag in digest_tags[:3]:
+            manifest = self.get_manifest(registry, repository, tag)
+            if not manifest:
+                continue
+
+            manifests = manifest.get('manifests', [])
+            if not manifests:
+                continue
+
+            for m in manifests:
+                if m.get('digest') == target_digest:
+                    platform = m.get('platform', {})
+                    return {
+                        'manifest_list_tag': tag,
+                        'architecture': platform.get('architecture', ''),
+                        'os': platform.get('os', ''),
+                        'digest': target_digest,
+                    }
+        return None
+
     def fetch_log_artifact(self, registry, repository, pr_name):
         """Fetch export-pipeline-logs artifact for a PipelineRun.
 
@@ -354,6 +412,267 @@ class RegistryClient:
                     'package': package,
                     'fix_version': fix_version,
                 })
+        return results
+
+    def check_source_image(self, registry, repository, digest):
+        """Check if a source container image exists for a given binary image digest.
+
+        Uses two strategies:
+        1. OCI referrers API — look for source-image-related artifact types
+        2. Tag convention — check for sha256-{hash}.src tag
+
+        Returns dict: {'exists': bool|None, 'method': str, 'details': str}
+        None means we couldn't determine (auth failure, timeout, etc.)
+        """
+        if not digest.startswith('sha256:'):
+            return {'exists': None, 'method': 'skipped', 'details': 'Invalid digest format'}
+
+        digest_hash = digest.split(':', 1)[1]
+
+        # Strategy 1: Check referrers for source-image artifacts
+        try:
+            resp = self._api_get(
+                registry,
+                '{}/referrers/{}'.format(repository, digest),
+                accept='application/vnd.oci.image.index.v1+json',
+                repository=repository,
+            )
+            if resp.status_code == 200:
+                index = resp.json()
+                manifests = index.get('manifests', [])
+                source_refs = [
+                    m for m in manifests
+                    if any(kw in m.get('artifactType', '').lower()
+                           for kw in ('source', 'src'))
+                ]
+                if source_refs:
+                    return {
+                        'exists': True,
+                        'method': 'referrers',
+                        'details': 'Found {} source referrer(s), artifactType: {}'.format(
+                            len(source_refs), source_refs[0].get('artifactType', '')),
+                    }
+        except Exception as e:
+            logger.debug("Referrers check failed for %s/%s@%s: %s",
+                         registry, repository, digest[:16], e)
+
+        # Strategy 2: Check for .src tag convention
+        src_tag = 'sha256-{}.src'.format(digest_hash)
+        try:
+            resp = self._api_get(
+                registry,
+                '{}/manifests/{}'.format(repository, src_tag),
+                accept='application/vnd.oci.image.manifest.v1+json',
+                repository=repository,
+            )
+            if resp.status_code == 200:
+                return {
+                    'exists': True,
+                    'method': 'src_tag',
+                    'details': 'Source image found at tag {}'.format(src_tag),
+                }
+            elif resp.status_code == 404:
+                pass
+            else:
+                logger.debug("Source tag check got %d for %s/%s:%s",
+                             resp.status_code, registry, repository, src_tag)
+        except Exception as e:
+            logger.debug("Source tag check failed for %s/%s:%s: %s",
+                         registry, repository, src_tag, e)
+
+        # Strategy 3: HEAD request to check descriptor (same as ec.oci.descriptor)
+        try:
+            resp = self._session.head(
+                'https://{}/v2/{}/manifests/{}'.format(registry, repository, src_tag),
+                headers={
+                    'Accept': 'application/vnd.oci.image.manifest.v1+json',
+                    **(
+                        {'Authorization': 'Bearer {}'.format(
+                            self._get_bearer_token(registry, repository))}
+                        if self._get_bearer_token(registry, repository) else {}
+                    ),
+                },
+                timeout=TIMEOUT,
+            )
+            if resp.status_code == 200:
+                return {
+                    'exists': True,
+                    'method': 'head_request',
+                    'details': 'Source image confirmed via HEAD for tag {}'.format(src_tag),
+                }
+        except Exception:
+            pass
+
+        # If referrers returned empty and .src tag 404'd, source image is absent
+        return {
+            'exists': False,
+            'method': 'referrers+src_tag',
+            'details': 'No source image found via referrers API or .src tag convention',
+        }
+
+    def check_artifact_health(self, registry, repository, digest):
+        """Check all 4 OCI artifacts for a given binary image digest.
+
+        Artifacts: .sig (signature), .src (source container),
+                   .att (attestation), .sbom (SBOM)
+
+        Uses the referrers API first (one call classifies all types),
+        then falls back to tag convention for artifacts not found.
+
+        Returns dict: {
+            'digest': str,
+            'artifacts': {type: {'exists': bool|None, 'method': str, 'details': str}},
+            'healthy': bool,
+            'missing': [str],
+        }
+        """
+        if not digest.startswith('sha256:'):
+            return {
+                'digest': digest,
+                'artifacts': {},
+                'healthy': False,
+                'missing': ['sig', 'src', 'att', 'sbom'],
+            }
+
+        digest_hash = digest.split(':', 1)[1]
+        found_via_referrers = set()
+
+        # Strategy 1: Single referrers API call to classify all artifact types
+        try:
+            resp = self._api_get(
+                registry,
+                '{}/referrers/{}'.format(repository, digest),
+                accept='application/vnd.oci.image.index.v1+json',
+                repository=repository,
+            )
+            if resp.status_code == 200:
+                manifests = resp.json().get('manifests', [])
+                for m in manifests:
+                    art_type = m.get('artifactType', '').lower()
+                    if any(kw in art_type for kw in ('source', 'src')):
+                        found_via_referrers.add('src')
+                    if 'in-toto' in art_type or 'attestation' in art_type:
+                        found_via_referrers.add('att')
+                    if any(kw in art_type for kw in ('spdx', 'cyclonedx', 'sbom')):
+                        found_via_referrers.add('sbom')
+                    if 'signature' in art_type or 'cosign' in art_type:
+                        found_via_referrers.add('sig')
+        except Exception as e:
+            logger.debug("Referrers check failed for %s/%s@%s: %s",
+                         registry, repository, digest[:16], e)
+
+        # Strategy 2: Tag convention fallback for artifacts not found via referrers
+        tag_suffixes = {'sig': '.sig', 'src': '.src', 'att': '.att', 'sbom': '.sbom'}
+        tag_results = {}
+        for art_type, suffix in tag_suffixes.items():
+            if art_type in found_via_referrers:
+                continue
+            tag = 'sha256-{}{}'.format(digest_hash, suffix)
+            try:
+                resp = self._session.head(
+                    'https://{}/v2/{}/manifests/{}'.format(registry, repository, tag),
+                    headers=self._auth_headers(registry, repository),
+                    timeout=TIMEOUT,
+                )
+                tag_results[art_type] = resp.status_code == 200
+            except Exception:
+                tag_results[art_type] = None
+
+        # Build per-artifact status
+        artifacts = {}
+        for art_type in ('sig', 'src', 'att', 'sbom'):
+            if art_type in found_via_referrers:
+                artifacts[art_type] = {
+                    'exists': True,
+                    'method': 'referrers',
+                    'details': 'Found via referrers API',
+                }
+            elif art_type in tag_results:
+                tag = 'sha256-{}{}'.format(digest_hash, tag_suffixes[art_type])
+                if tag_results[art_type] is True:
+                    artifacts[art_type] = {
+                        'exists': True,
+                        'method': 'tag',
+                        'details': 'Found at tag {}'.format(tag),
+                    }
+                elif tag_results[art_type] is False:
+                    artifacts[art_type] = {
+                        'exists': False,
+                        'method': 'tag',
+                        'details': 'Not found at tag {}'.format(tag),
+                    }
+                else:
+                    artifacts[art_type] = {
+                        'exists': None,
+                        'method': 'tag',
+                        'details': 'Could not determine (request failed)',
+                    }
+            else:
+                artifacts[art_type] = {
+                    'exists': None,
+                    'method': 'none',
+                    'details': 'No referrers API and no tag check',
+                }
+
+        missing = [t for t in ('sig', 'src', 'att', 'sbom')
+                   if not artifacts.get(t, {}).get('exists')]
+
+        return {
+            'digest': digest,
+            'artifacts': artifacts,
+            'healthy': len(missing) == 0,
+            'missing': missing,
+        }
+
+    def _auth_headers(self, registry, repository):
+        """Build auth headers for a registry request."""
+        token = self._get_bearer_token(registry, repository)
+        headers = {'Accept': 'application/vnd.oci.image.manifest.v1+json'}
+        if token:
+            headers['Authorization'] = 'Bearer {}'.format(token)
+        return headers
+
+    def check_artifact_health_batch(self, components, timeout=60):
+        """Check artifact health for multiple components in parallel.
+
+        Args:
+            components: list of dicts with 'name' and 'containerImage' keys
+            timeout: max seconds for the entire batch
+
+        Returns:
+            dict mapping component name to artifact health dict
+        """
+        targets = []
+        for comp in components:
+            name = comp.get('name', '')
+            image = comp.get('containerImage', '')
+            if not image:
+                continue
+            registry, repository, tag_or_digest = self.parse_image_ref(image)
+            if tag_or_digest.startswith('sha256:'):
+                targets.append((name, registry, repository, tag_or_digest))
+
+        import threading
+        _local = threading.local()
+
+        def _check_one(name, reg, repo, dig):
+            return name, self.check_artifact_health(reg, repo, dig)
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=SARIF_WORKERS) as pool:
+            futures = {
+                pool.submit(_check_one, name, reg, repo, dig): name
+                for name, reg, repo, dig in targets
+            }
+            for future in as_completed(futures, timeout=timeout):
+                try:
+                    name, health = future.result()
+                    results[name] = health
+                except Exception:
+                    results[futures[future]] = {
+                        'digest': '', 'artifacts': {},
+                        'healthy': False, 'missing': ['sig', 'src', 'att', 'sbom'],
+                    }
         return results
 
     @staticmethod

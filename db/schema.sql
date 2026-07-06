@@ -162,11 +162,18 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
     -- Pattern reference
     error_pattern_id INTEGER REFERENCES error_patterns(id) ON DELETE SET NULL,
 
+    -- Human feedback
+    human_verdict VARCHAR(20),
+    human_verdict_at TIMESTAMP,
+    human_verdict_by VARCHAR(100),
+    actual_root_cause TEXT,
+
     created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_build_failure ON ai_analysis(build_failure_id);
 CREATE INDEX IF NOT EXISTS idx_ai_category ON ai_analysis(failure_category);
+CREATE INDEX IF NOT EXISTS idx_ai_analysis_verdict ON ai_analysis(human_verdict) WHERE human_verdict IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ai_can_auto_fix ON ai_analysis(can_auto_fix);
 CREATE INDEX IF NOT EXISTS idx_ai_langfuse_trace ON ai_analysis(langfuse_trace_id);
 

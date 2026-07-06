@@ -7,7 +7,7 @@ Python kubernetes client) behind this common interface.
 
 from abc import ABC, abstractmethod
 
-from tekton_parsers import extract_taskrun_names, extract_failed_step_names, build_taskrun_detail
+from tekton_parsers import build_taskrun_detail, extract_failed_step_names, extract_taskrun_names
 
 
 class PipelineRunSource(ABC):

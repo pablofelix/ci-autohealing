@@ -56,9 +56,8 @@ _FIXER_BY_CATEGORY = {
 
 def _get_candidates(db_conn, min_confidence, max_count):
     """Query for conforma violations eligible for autonomous fixing."""
-    with db_conn.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
+    with db_conn.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
                 SELECT c.id, c.component_name,
                        COALESCE(c.application, 'acme-v2-0') AS application,
                        c.repository_url,
@@ -80,12 +79,12 @@ def _get_candidates(db_conn, min_confidence, max_count):
                 ORDER BY a.confidence_score DESC, c.first_detected_at ASC
                 LIMIT %s
             """, (
-                min_confidence,
-                list(_FIXER_BY_CATEGORY.keys()),
-                max_count,
-            ))
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            min_confidence,
+            list(_FIXER_BY_CATEGORY.keys()),
+            max_count,
+        ))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 def _branch_exists(github, repo_url, branch):

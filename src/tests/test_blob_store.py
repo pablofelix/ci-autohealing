@@ -5,8 +5,12 @@ import tempfile
 import unittest
 
 from clients.blob_store import (
-    BlobStore, make_blob_key, should_offload, resolve_blob_fields,
-    get_blob_store, BLOB_THRESHOLD,
+    BLOB_THRESHOLD,
+    BlobStore,
+    get_blob_store,
+    make_blob_key,
+    resolve_blob_fields,
+    should_offload,
 )
 
 
@@ -163,7 +167,7 @@ class TestResolveBlobFields(unittest.TestCase):
             'blob_refs': {'violation_details': key},
         }
         resolve_blob_fields(row, fields=('violation_details',))
-        self.assertEqual(row['violation_details'], '{"rules": []}')
+        self.assertEqual(row['violation_details'], {'rules': []})
         self.assertIsNone(row['build_logs'])
 
     def test_missing_blob_returns_none(self):

@@ -4,8 +4,32 @@ Validates LLM outputs to catch hallucinations and enforce schemas.
 Separate models for build failures vs Conforma violations.
 """
 
-from typing import List, Literal
+from typing import Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field, field_validator
+
+
+class EvidenceReference(BaseModel):
+    """A reference to documentation, config file, or log evidence."""
+    type: Literal['doc', 'config', 'log', 'policy']
+    url: str = ''
+    description: str = Field(..., min_length=3)
+
+
+class SourceTransparency(BaseModel):
+    """Academic-style source attribution and limitation disclosure."""
+    sources_consulted: List[str] = Field(
+        default_factory=list,
+        description="What data sources were actually used in this analysis"
+    )
+    sources_unavailable: List[str] = Field(
+        default_factory=list,
+        description="Sources that were attempted but failed or were not available"
+    )
+    limitations: List[str] = Field(
+        default_factory=list,
+        description="Factors that could change the diagnosis if more data were available"
+    )
 
 
 class AnalysisResult(BaseModel):
@@ -58,6 +82,16 @@ class AnalysisResult(BaseModel):
         description="Whether human review is required before applying fix"
     )
 
+    evidence_references: List[EvidenceReference] = Field(
+        default_factory=list,
+        description="Links to docs, config files, or log evidence supporting the diagnosis"
+    )
+
+    source_transparency: Optional[SourceTransparency] = Field(
+        default=None,
+        description="What sources were used, what was unavailable, and analysis limitations"
+    )
+
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
@@ -99,6 +133,10 @@ class ConformaAnalysisResult(BaseModel):
         'policy_version_label',
         'policy_fips_check',
         'policy_deprecated_task',
+        'policy_deprecated_image',
+        'policy_slsa_provenance',
+        'policy_snyk_error',
+        'policy_labels',
         'policy_sbom_vendor_label',
         'policy_cpe_label',
         'policy_source_image',
@@ -137,6 +175,16 @@ class ConformaAnalysisResult(BaseModel):
         description="Whether human review is required (usually True for policy violations)"
     )
 
+    evidence_references: List[EvidenceReference] = Field(
+        default_factory=list,
+        description="Links to docs, config files, or log evidence supporting the diagnosis"
+    )
+
+    source_transparency: Optional[SourceTransparency] = Field(
+        default=None,
+        description="What sources were used, what was unavailable, and analysis limitations"
+    )
+
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
@@ -173,6 +221,7 @@ class ReleaseAnalysisResult(BaseModel):
         'rpa_mapping_typo',
         'cross_product_dependency',
         'missing_ec_exception',
+        'build_artifact_missing',
         'validation_error',
         'publish_failure',
         'access_denied',
@@ -200,6 +249,18 @@ class ReleaseAnalysisResult(BaseModel):
         description="Files that need modification (in Build-Config or konflux-release-data)"
     )
 
+    fix_action_type: Literal[
+        'rebuild',
+        'file_change',
+        'config_change',
+        'multi_step',
+        'investigation_needed',
+        'other'
+    ] = Field(
+        default='investigation_needed',
+        description="Type of fix action: rebuild, file_change, config_change, multi_step, investigation_needed, other"
+    )
+
     can_auto_fix: bool = Field(
         default=False,
         description="Whether this failure can be automatically fixed"
@@ -220,6 +281,16 @@ class ReleaseAnalysisResult(BaseModel):
         description="Which team should fix this (e.g., RHOAI, RHAII, RelEng)"
     )
 
+    evidence_references: List[EvidenceReference] = Field(
+        default_factory=list,
+        description="Links to docs, config files, or log evidence supporting the diagnosis"
+    )
+
+    source_transparency: Optional[SourceTransparency] = Field(
+        default=None,
+        description="What sources were used, what was unavailable, and analysis limitations"
+    )
+
     @field_validator('confidence_score')
     @classmethod
     def round_confidence(cls, v):
@@ -229,6 +300,82 @@ class ReleaseAnalysisResult(BaseModel):
     @classmethod
     def validate_string_list(cls, v):
         return [f.strip() for f in v if f and f.strip()]
+
+    @field_validator('root_cause', 'recommended_fix')
+    @classmethod
+    def validate_not_placeholder(cls, v):
+        placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
+        if v.lower().strip() in placeholders:
+            raise ValueError(f"Invalid placeholder value: {v}")
+        return v.strip()
+
+
+class OnboardingAnalysisResult(BaseModel):
+    """Validated analysis output from LLM for onboarding blockers."""
+
+    root_cause: str = Field(
+        ...,
+        min_length=10,
+        description="What is blocking this onboarding and why"
+    )
+
+    failure_category: Literal[
+        'automation_stuck',
+        'pr_review_needed',
+        'missing_prerequisite',
+        'configuration_error',
+        'infrastructure_issue',
+        'branch_conflict',
+        'first_build_failing',
+        'manual_intervention',
+        'upstream_dependency',
+    ] = Field(
+        ...,
+        description="Classification of the onboarding blocker"
+    )
+
+    confidence_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in analysis (0.0 to 1.0)"
+    )
+
+    recommended_fix: str = Field(
+        ...,
+        min_length=10,
+        description="Specific actions to unblock onboarding"
+    )
+
+    blocked_step: str = Field(
+        default='',
+        description="Which automation or Konflux step is blocked"
+    )
+
+    can_auto_fix: bool = Field(
+        default=False,
+        description="Whether this can be automatically resolved"
+    )
+
+    requires_human_review: bool = Field(
+        default=True,
+        description="Whether human review is needed"
+    )
+
+    evidence_references: List[EvidenceReference] = Field(
+        default_factory=list,
+        description="Links to Jira tickets, PRs, or docs"
+    )
+
+    source_transparency: Optional[SourceTransparency] = Field(
+        default=None,
+        description="What data sources were used in this analysis"
+    )
+
+    @field_validator('confidence_score')
+    @classmethod
+    def round_confidence(cls, v):
+        return round(v, 2)
 
     @field_validator('root_cause', 'recommended_fix')
     @classmethod
@@ -282,6 +429,115 @@ class ScenariosAnalysisResult(BaseModel):
         return round(v, 2)
 
     @field_validator('findings', 'recommendations')
+    @classmethod
+    def validate_not_placeholder(cls, v):
+        placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
+        if v.lower().strip() in placeholders:
+            raise ValueError(f"Invalid placeholder value: {v}")
+        return v.strip()
+
+
+class CategoryMetrics(BaseModel):
+    """Accuracy metrics for a single failure category."""
+    correct: int = 0
+    partial: int = 0
+    incorrect: int = 0
+    total: int = 0
+    avg_confidence: float = 0.0
+
+
+class RegressionMetrics(BaseModel):
+    """Aggregate regression test results from resolved conforma violations."""
+
+    total_resolved: int = Field(
+        ..., ge=0, description="Total resolved violations in the dataset"
+    )
+    with_ai_analysis: int = Field(
+        ..., ge=0, description="Resolved violations that had AI analysis"
+    )
+    ai_coverage_pct: float = Field(
+        ..., ge=0.0, le=100.0, description="Percentage of resolved violations with AI analysis"
+    )
+    accuracy: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Overall category accuracy (0-1)"
+    )
+    calibration_score: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="How well confidence scores predict correctness (0-1)"
+    )
+    by_category: Dict[str, CategoryMetrics] = Field(
+        default_factory=dict,
+        description="Accuracy breakdown per failure_category"
+    )
+    auto_fix_accuracy: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="How well can_auto_fix matches actual resolution speed"
+    )
+    coverage_gaps: List[str] = Field(
+        default_factory=list,
+        description="Violation rule groups with 0% AI coverage"
+    )
+    improvements: List[str] = Field(
+        default_factory=list,
+        description="Specific suggestions to improve the analyzer"
+    )
+
+
+class ConfigFinding(BaseModel):
+    """A single finding from the Konflux configuration audit."""
+
+    title: str = Field(..., min_length=5, description="Short finding title")
+    severity: Literal['critical', 'warning', 'info']
+    category: Literal[
+        'expired_exceptions', 'policy_gap', 'scenario_coverage',
+        'pipeline_config', 'auto_rebuild_candidate', 'rule_catalog_gap'
+    ]
+    description: str = Field(..., min_length=10, description="Detailed description")
+    recommendation: str = Field(..., min_length=10, description="What to do about it")
+    affected_components: List[str] = Field(
+        default_factory=list,
+        description="Components affected by this finding"
+    )
+    can_auto_fix: bool = Field(
+        default=False,
+        description="Whether this can be fixed automatically (e.g., rebuild)"
+    )
+    fix_action: Literal[
+        'rebuild', 'config_change', 'exception',
+        'pipeline_update', 'investigation'
+    ] = Field(
+        default='investigation',
+        description="Type of fix action needed"
+    )
+
+
+class ConfigAnalysisResult(BaseModel):
+    """Validated output from the Konflux configuration analyzer."""
+
+    findings: List[ConfigFinding] = Field(
+        default_factory=list,
+        description="List of configuration issues found"
+    )
+    overall_severity: Literal['critical', 'warning', 'info'] = Field(
+        ..., description="Worst severity among findings"
+    )
+    confidence_score: float = Field(
+        ..., ge=0.0, le=1.0, description="Confidence in analysis (0-1)"
+    )
+    summary: str = Field(
+        ..., min_length=10, description="Overall configuration health summary"
+    )
+    auto_rebuild_candidates: List[str] = Field(
+        default_factory=list,
+        description="Components that would likely be fixed by a rebuild"
+    )
+
+    @field_validator('confidence_score')
+    @classmethod
+    def round_confidence(cls, v):
+        return round(v, 2)
+
+    @field_validator('summary')
     @classmethod
     def validate_not_placeholder(cls, v):
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']

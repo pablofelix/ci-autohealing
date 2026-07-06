@@ -3,7 +3,10 @@
 import json
 
 from clients.blob_store import (
-    get_blob_store, make_blob_key, resolve_blob_fields, should_offload,
+    get_blob_store,
+    make_blob_key,
+    resolve_blob_fields,
+    should_offload,
 )
 
 
@@ -148,6 +151,42 @@ class ConformaRepository:
                     return True
         except Exception:
             return False
+
+    def get_violation_summaries(self, application, include_future=None):
+        """Summary of all unresolved violations (no violation_details). One query.
+
+        Args:
+            include_future: None = current only (default), True = future only,
+                           'all' = both current and future.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            future_clause = ''
+            if include_future is None:
+                future_clause = ' AND is_future = FALSE'
+            elif include_future is True:
+                future_clause = ' AND is_future = TRUE'
+            cursor.execute("""
+                SELECT DISTINCT ON (component_name, scenario)
+                    component_name, scenario,
+                    violations_count, warnings_count, successes_count,
+                    violation_summary,
+                    repository_url, commit_sha,
+                    first_detected_at, last_updated_at,
+                    ai_analyzed, jira_key, is_future
+                FROM conforma_results
+                WHERE application = %s AND is_resolved = FALSE{}
+                ORDER BY component_name, scenario, last_updated_at DESC
+            """.format(future_clause), (application,))
+            cols = [
+                'component_name', 'scenario',
+                'violations_count', 'warnings_count', 'successes_count',
+                'violation_summary',
+                'repository_url', 'commit_sha',
+                'first_detected_at', 'last_updated_at',
+                'ai_analyzed', 'jira_key', 'is_future',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_violation_details(self, component, application):
         """Full violation details for a component. Used by MCP/API for describe views."""

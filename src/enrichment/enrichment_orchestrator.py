@@ -8,15 +8,15 @@ Manages the enrichment pipeline:
 """
 
 import time
-from typing import Any, Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from config import CollectorConfig
 from enrichment.context_source import ContextSource, EnrichmentResult
+from logger import setup_logger
 from repositories.connection import DatabaseConnection
 from repositories.context_enrichment_repository import ContextEnrichmentRepository
-from logger import setup_logger
 
 logger = setup_logger(__name__)
 

@@ -16,14 +16,14 @@ Designed for:
 - Part of comprehensive collection pipeline
 """
 
-import sys
 import argparse
+import sys
 
 from config import CollectorConfig
 from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
+from enrichment.sources.build_history import BuildHistorySource
 from enrichment.sources.dependency_context import DependencyContextSource
 from enrichment.sources.related_failures import RelatedFailuresSource
-from enrichment.sources.build_history import BuildHistorySource
 from logger import setup_logger
 
 logger = setup_logger(__name__)

@@ -3,7 +3,10 @@
 import json
 
 from clients.blob_store import (
-    get_blob_store, make_blob_key, resolve_blob_fields, should_offload,
+    get_blob_store,
+    make_blob_key,
+    resolve_blob_fields,
+    should_offload,
 )
 
 

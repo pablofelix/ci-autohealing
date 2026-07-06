@@ -16,16 +16,16 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import CollectorConfig
 from clients.github_client import GitHubClient
+from config import CollectorConfig
+from logger import setup_logger
 from repositories.connection import DatabaseConnection
 from repositories.resolution_attempt_repository import ResolutionAttemptRepository
-from logger import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -37,9 +37,8 @@ def check_build_resolved_after(db_conn, component_name, application, after_ts):
     build. If that happened after the PR merged, we attribute the fix to our PR.
     Returns None if not yet resolved.
     """
-    with db_conn.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
+    with db_conn.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
                 SELECT pipelinerun_name
                 FROM build_failures
                 WHERE component_name = %s
@@ -49,8 +48,8 @@ def check_build_resolved_after(db_conn, component_name, application, after_ts):
                 ORDER BY resolved_at DESC
                 LIMIT 1
             """, (component_name, application, after_ts))
-            row = cur.fetchone()
-            return row[0] if row else None
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 def verify_one(attempt, github, db_conn, repo_obj, dry_run=False):

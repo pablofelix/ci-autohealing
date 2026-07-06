@@ -412,8 +412,9 @@ class TestRegistryClientParseImageRef(unittest.TestCase):
 class TestRegistryClientParseSarif(unittest.TestCase):
 
     def _parse(self, data):
-        from clients.registry_client import RegistryClient
         import json
+
+        from clients.registry_client import RegistryClient
         return RegistryClient._parse_sarif(json.dumps(data).encode())
 
     def test_basic_sarif(self):
@@ -502,6 +503,7 @@ class TestExtractLogsFromTarball(unittest.TestCase):
     def test_valid_tarball(self):
         import io
         import tarfile
+
         from clients.registry_client import RegistryClient
 
         buf = io.BytesIO()

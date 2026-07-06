@@ -7,9 +7,8 @@ before failures fully manifest. CVE checks query the OCI registry for SARIF data
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Dict
-
-from datetime import datetime, timezone
 
 from logger import setup_logger
 
@@ -56,6 +55,7 @@ class HealthMonitor:
         warnings.extend(self.get_cve_warnings())
         warnings.extend(self.get_stale_nightly_builds())
         warnings.extend(self.get_stale_warnings())
+        warnings.extend(self.get_pcc_freshness_warnings())
         return warnings
 
     def get_degrading_components(self):
@@ -265,7 +265,7 @@ class HealthMonitor:
             rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
 
         warnings = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for r in rows:
             last_build = r['last_successful_build']
             if last_build is None:
@@ -274,7 +274,7 @@ class HealthMonitor:
                     r['component_name'], r['application'] or '?')
             else:
                 if last_build.tzinfo is None:
-                    last_build = last_build.replace(tzinfo=timezone.utc)
+                    last_build = last_build.replace(tzinfo=UTC)
                 hours_ago = (now - last_build).total_seconds() / 3600
                 severity = 'critical' if hours_ago >= 48 else 'warning'
                 msg = '{} ({}) — last successful build {:.0f}h ago ({})'.format(
@@ -427,6 +427,8 @@ class HealthMonitor:
         except Exception:
             pass
 
+        pcc_freshness = self._check_pcc_freshness()
+
         return {
             'application': application,
             'fbc_component': fbc_name,
@@ -436,7 +438,118 @@ class HealthMonitor:
             'blockers': blockers,
             'blockers_count': len(blockers),
             'gha_validation': gha_validation,
+            'pcc_freshness': pcc_freshness,
         }
+
+    def get_pcc_freshness_warnings(self):
+        """Generate HealthWarning entries if the PCC cache is stale."""
+        pcc = self._check_pcc_freshness()
+        if not pcc or pcc.get('status') != 'stale':
+            return []
+
+        missing = pcc.get('missing_versions', [])
+        preview = ', '.join(missing[:5])
+        if len(missing) > 5:
+            preview += ' (+{} more)'.format(len(missing) - 5)
+
+        return [HealthWarning(
+            component_name='pcc-cache',
+            application='(release-infra)',
+            signal_type='pcc_stale',
+            severity='critical',
+            message='PCC cache is stale — {} version(s) in registry not in cache: {}. '
+                    'FBC fragment builds will produce catalogs missing these versions. '
+                    'Run regen-pcc-cache workflow in RHOAI-Build-Config.'.format(
+                        len(missing), preview),
+            evidence=pcc,
+        )]
+
+    def _check_pcc_freshness(self):
+        """Check if the PCC (Pre-Computed Catalog) cache is up to date.
+
+        Compares the shipped versions cached in RHOAI-Build-Config against
+        the actual bundle tags published in registry.redhat.io. If the registry
+        has versions not present in the PCC cache, the FBC fragment builds will
+        produce catalogs missing those versions — potentially pruning shipped
+        releases from the operator channel.
+
+        Returns a dict with status ('fresh', 'stale', 'unknown'), details,
+        and the last regen-pcc-cache workflow run info.
+        """
+        build_config_owner = os.environ.get(
+            'GITHUB_BUILD_CONFIG_OWNER', 'red-hat-data-services')
+        build_config_repo = os.environ.get(
+            'GITHUB_BUILD_CONFIG_REPO', 'RHOAI-Build-Config')
+        token = os.environ.get('GITHUB_TOKEN', '')
+
+        if not token:
+            return None
+
+        result = {
+            'status': 'unknown',
+            'cached_versions': 0,
+            'registry_versions': 0,
+            'missing_versions': [],
+            'last_regen': None,
+        }
+
+        try:
+            from clients.github_client import GitHubClient
+            gh = GitHubClient(token=token)
+
+            runs = gh.get_workflow_runs(
+                build_config_owner, build_config_repo,
+                'regen-pcc-cache.yaml', limit=1)
+            if runs:
+                latest = runs[0]
+                result['last_regen'] = {
+                    'conclusion': latest.get('conclusion'),
+                    'date': latest.get('created_at'),
+                    'url': latest.get('html_url'),
+                }
+
+            cached_content = gh.get_file_content(
+                build_config_owner, build_config_repo,
+                'pcc/shipped_rhoai_versions_granular.txt')
+            if not cached_content:
+                logger.debug("PCC freshness: could not read shipped versions file")
+                return result
+
+            cached_versions = set()
+            for line in cached_content.strip().splitlines():
+                tag = line.strip()
+                if tag:
+                    cached_versions.add(tag)
+            result['cached_versions'] = len(cached_versions)
+
+            from clients.registry_client import RegistryClient
+            rc = RegistryClient()
+            registry_tags = rc.list_tags(
+                'registry.redhat.io', 'rhoai/odh-operator-bundle')
+
+            if not registry_tags:
+                logger.debug("PCC freshness: could not list registry tags "
+                             "(may need registry.redhat.io credentials)")
+                return result
+
+            registry_versions = {t for t in registry_tags if t.startswith('v')}
+            result['registry_versions'] = len(registry_versions)
+
+            missing = sorted(registry_versions - cached_versions)
+            result['missing_versions'] = missing
+
+            if missing:
+                result['status'] = 'stale'
+                logger.warning(
+                    "PCC cache is stale: %d version(s) in registry.redhat.io "
+                    "not in PCC cache: %s", len(missing), ', '.join(missing[:5]))
+            else:
+                result['status'] = 'fresh'
+
+        except Exception as exc:
+            logger.debug("PCC freshness check failed: %s", exc)
+
+        return result
 
     def get_stale_components(self, application=None, use_cache=True,
                               diagnose=True):
@@ -615,3 +728,129 @@ class HealthMonitor:
                 },
             ))
         return warnings
+
+    def check_snapshot_freshness(self, application=None):
+        """Compare snapshot images against latest builds to detect stale images.
+
+        For each component in the latest Snapshot, checks whether the image
+        matches the most recent successful build. Flags components where:
+        - The latest build failed (snapshot has an old pre-failure image)
+        - A newer successful build exists (snapshot wasn't regenerated)
+        - No builds are found (component may be misconfigured)
+        """
+        from clients.tekton_results import TektonResultsClient
+
+        namespace = os.environ.get('NAMESPACE', '')
+        app_name = application or os.environ.get('APPLICATION_NAME', '')
+
+        if not namespace:
+            return {'application': app_name, 'error': 'NAMESPACE not set'}
+
+        from clients.konflux_client import KonfluxClient
+        kfx = KonfluxClient(namespace=namespace)
+
+        snapshots = kfx.get_snapshots(app_filter=app_name, limit=1)
+        if not snapshots:
+            return {'application': app_name, 'error': 'No snapshots found'}
+
+        snap = snapshots[0]
+        snap_name = snap.get('metadata', {}).get('name', '')
+        snap_created = snap.get('metadata', {}).get('creationTimestamp', '')
+        snap_components = {}
+        for c in snap.get('spec', {}).get('components', []):
+            name = c.get('name', '')
+            image = c.get('containerImage', '')
+            if name and image:
+                snap_components[name] = image
+
+        tr = TektonResultsClient(namespace=namespace)
+        recent_builds = tr.query_pipelinerun_records(app_name, page_size=500)
+
+        latest_by_comp = {}
+        for pr in recent_builds:
+            labels = pr.get('metadata', {}).get('labels', {})
+            comp = labels.get('appstudio.openshift.io/component', '')
+            event_type = labels.get('pipelinesascode.tekton.dev/event-type', '')
+            if not comp or (event_type and event_type not in ('push', 'incoming')):
+                continue
+
+            created = pr.get('metadata', {}).get('creationTimestamp', '')
+            prev = latest_by_comp.get(comp)
+            if prev and prev['created'] >= created:
+                continue
+
+            conditions = pr.get('status', {}).get('conditions', [])
+            succeeded = bool(conditions and conditions[-1].get('status') == 'True')
+            reason = conditions[-1].get('reason', '') if conditions else ''
+
+            pr_results = {}
+            for r in pr.get('status', {}).get('results', []):
+                pr_results[r.get('name', '')] = r.get('value', '')
+
+            image_url = pr_results.get('IMAGE_URL', '')
+            image_digest = pr_results.get('IMAGE_DIGEST', '')
+            output_image = '{}@{}'.format(image_url, image_digest) if image_url and image_digest else ''
+
+            latest_by_comp[comp] = {
+                'created': created,
+                'succeeded': succeeded,
+                'pr_name': pr.get('metadata', {}).get('name', ''),
+                'output_image': output_image,
+                'reason': reason,
+            }
+
+        fresh = []
+        stale = []
+        no_builds = []
+
+        def _digest(image_url):
+            if '@sha256:' in image_url:
+                return image_url.split('@')[-1]
+            return ''
+
+        for comp_name, snap_image in sorted(snap_components.items()):
+            latest = latest_by_comp.get(comp_name)
+            if not latest:
+                no_builds.append({
+                    'component': comp_name,
+                    'snapshot_image': snap_image,
+                })
+                continue
+
+            if not latest['succeeded']:
+                stale.append({
+                    'component': comp_name,
+                    'snapshot_image': snap_image,
+                    'reason': 'latest_build_failed',
+                    'latest_build_date': latest['created'],
+                    'latest_build_pr': latest['pr_name'],
+                    'latest_build_reason': latest['reason'],
+                })
+            elif latest['output_image']:
+                snap_digest = _digest(snap_image)
+                build_digest = _digest(latest['output_image'])
+                if snap_digest and build_digest and snap_digest != build_digest:
+                    stale.append({
+                        'component': comp_name,
+                        'snapshot_image': snap_image,
+                        'reason': 'newer_build_available',
+                        'latest_build_date': latest['created'],
+                        'latest_build_pr': latest['pr_name'],
+                        'latest_build_image': latest['output_image'],
+                    })
+                else:
+                    fresh.append(comp_name)
+            else:
+                fresh.append(comp_name)
+
+        return {
+            'application': app_name,
+            'snapshot': snap_name,
+            'snapshot_created': snap_created,
+            'total_components': len(snap_components),
+            'fresh_count': len(fresh),
+            'stale': stale,
+            'no_builds': no_builds,
+            'stale_count': len(stale),
+            'no_builds_count': len(no_builds),
+        }

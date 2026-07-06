@@ -5,11 +5,11 @@ Use collectors.status_synchronizer.StatusSynchronizer for the implementation.
 """
 
 import sys
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
 
-from config import CollectorConfig
 from collectors.status_synchronizer import StatusSynchronizer
+from config import CollectorConfig
 
 
 def main():

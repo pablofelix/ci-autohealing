@@ -7,10 +7,10 @@ Use collectors.status_synchronizer.get_failing_conforma_components for the imple
 import json
 import time
 
+from collectors.status_synchronizer import get_failing_conforma_components
 from config import CollectorConfig
 from logger import setup_logger
-from repositories import DatabaseConnection, ConformaRepository, SyncStatusRepository
-from collectors.status_synchronizer import get_failing_conforma_components
+from repositories import ConformaRepository, DatabaseConnection, SyncStatusRepository
 
 logger = setup_logger(__name__)
 

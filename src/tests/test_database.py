@@ -1,11 +1,13 @@
 """Tests for DatabaseConnection and BuildFailureRepository with mocked connections."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from repositories.connection import DatabaseConnection
-from repositories.build_failure_repository import BuildFailureRepository
+
 from config import DatabaseConfig
 from models import ScanResult
+from repositories.build_failure_repository import BuildFailureRepository
+from repositories.connection import DatabaseConnection
 
 
 @pytest.fixture
@@ -40,9 +42,8 @@ def test_connection_rolls_back_on_error(mock_connect, db):
     mock_conn = MagicMock()
     mock_connect.return_value = mock_conn
 
-    with pytest.raises(ValueError):
-        with db.connection():
-            raise ValueError("test error")
+    with pytest.raises(ValueError), db.connection():
+        raise ValueError("test error")
 
     mock_conn.rollback.assert_called_once()
     mock_conn.close.assert_called_once()

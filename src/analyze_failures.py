@@ -5,10 +5,11 @@ Thin shim that loads config and runs BuildFailureAnalyzer.
 Follows the same pattern as collect_comprehensive.py and sync_component_status.py.
 """
 
-import sys
 import argparse
-from config import CollectorConfig
+import sys
+
 from analyzers.build_failure_analyzer import BuildFailureAnalyzer
+from config import CollectorConfig
 from logger import setup_logger
 
 logger = setup_logger(__name__)

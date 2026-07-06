@@ -20,9 +20,9 @@ import sys
 import textwrap
 from pathlib import Path
 
-from config import CollectorConfig
 from clients.jira_client import JiraClient
 from clients.llm_provider import create_llm_provider
+from config import CollectorConfig
 from logger import setup_logger
 from prompt_loader import load_prompt
 from repositories import DatabaseConnection, JiraCommentDraftRepository
@@ -228,9 +228,8 @@ def main():
 
     # Persist final draft if it changed
     if current_draft != original_draft:
-        with db.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
                     UPDATE jira_comment_drafts SET draft_response = %s
                     WHERE jira_key = %s AND comment_id = %s
                 """, (current_draft, jira_key, comment_id))

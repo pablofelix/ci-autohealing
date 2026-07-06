@@ -5,11 +5,11 @@ Use collectors.build_failure_collector.BuildFailureCollector for the implementat
 """
 
 import sys
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
 
-from config import CollectorConfig
 from collectors.build_failure_collector import BuildFailureCollector
+from config import CollectorConfig
 from logger import setup_logger
 
 logger = setup_logger(__name__)

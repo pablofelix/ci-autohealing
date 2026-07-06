@@ -59,6 +59,23 @@ def validate_jira_key(key):
     return key
 
 
+_RELEASE_PATTERN = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+
+
+def validate_release_name(name):
+    if not name or not name.strip():
+        from api.errors import validation_error
+        validation_error('Release name cannot be empty',
+                         suggestion="Run 'ic get releases' to list recent releases")
+    name = name.strip()
+    if not _RELEASE_PATTERN.match(name):
+        from api.errors import validation_error
+        validation_error(
+            "Invalid release name: '{}' — must be lowercase alphanumeric with dashes".format(name),
+            suggestion="Example: managed-fqnhj")
+    return name
+
+
 def validate_skill_name(name):
     if not name or not name.strip():
         from api.errors import validation_error

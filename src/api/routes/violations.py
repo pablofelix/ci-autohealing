@@ -5,10 +5,14 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 
-from mcp_server.models import ConformaViolationDetails
+from mcp_server.models import (
+    ConformaViolationDetails,
+    ExceptionLifecycleSummary,
+    ExceptionStatus,
+)
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
-
+from repositories.triage_repository import TriageRepository
 from shared_config import KONFLUX_UI_BASE, NAMESPACE
 
 router = APIRouter(tags=["violations"])
@@ -18,44 +22,211 @@ def _conforma_repo():
     return get_repository(ConformaRepository)
 
 
+def _triage_repo():
+    return get_repository(TriageRepository)
+
+
+def _triage_jira_map(application):
+    """Build component→jira_key map from all active triage items (single query)."""
+    return _triage_repo().build_jira_map(application)
+
+
 def _konflux_url(pr_name: str) -> str:
     return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
 
 
 @router.get("/applications/{application}/violations")
-def list_violations(application: str) -> List[Dict[str, Any]]:
-    """List unresolved Conforma violations."""
+def list_violations(
+    application: str,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """List unresolved Conforma violations (summary only, no violation_details).
+
+    Pass reporter_env/reporter_build_type to fetch from conforma-reporter instead
+    of cluster data. Example: ?reporter_env=stage&reporter_build_type=latest
+    """
+    from api.validators import validate_application_name
+    application = validate_application_name(application)
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        return fetch_reporter_violations(branch, env=env, build_type=build_type)
+    from utils.conforma_utils import (
+        categorize_policy,
+        compute_blocks,
+        compute_coverage_by_env,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        policy_env,
+    )
     repo = _conforma_repo()
-    failing = repo.find_unresolved_component_names(application)
-    violations = []
-    for comp_name in sorted(failing):
-        details = repo.get_violation_details(comp_name, application)
-        if details:
-            violations.append(details)
+    violations = repo.get_violation_summaries(application)
+    jira_map = _triage_jira_map(application)
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    for v in violations:
+        if not v.get('jira_key'):
+            v['jira_key'] = jira_map.get(v.get('component_name'))
+        uv_count, _ = count_unique_violations(v.get('violation_summary', ''))
+        v['unique_violations'] = uv_count or None
+        scenario = v.get('scenario', '')
+        v['category'] = categorize_policy(scenario)
+        pname = extract_policy_from_scenario(scenario)
+        v['policy_env'] = policy_env(pname)
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
+        cov_stage = (env_cov.get('stage') or {}).get('coverage')
+        cov_prod = (env_cov.get('prod') or {}).get('coverage')
+        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
     return violations
 
 
 @router.get("/applications/{application}/violations/report")
-def get_conforma_report(application: str) -> Dict[str, Any]:
-    """Full Conforma violations report."""
+def get_conforma_report(
+    application: str,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Conforma violations report (summary, no violation_details).
+
+    Pass reporter_env/reporter_build_type to fetch from conforma-reporter instead.
+    """
+    from api.validators import validate_application_name
+    application = validate_application_name(application)
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_violations
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        violations = fetch_reporter_violations(branch, env=env, build_type=build_type)
+        return {
+            'application': application,
+            'source': '{}/{}'.format(env, build_type),
+            'total_violations': len(violations),
+            'violations': violations,
+        }
+    from utils.conforma_utils import (
+        categorize_policy,
+        compute_blocks,
+        compute_coverage_by_env,
+        count_unique_violations,
+        enrich_with_coverage,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        policy_env,
+    )
     repo = _conforma_repo()
-    failing = repo.find_unresolved_component_names(application)
-    violations = []
-    for comp_name in sorted(failing):
-        details = repo.get_violation_details(comp_name, application)
-        if details:
-            violations.append(details)
+    violations = repo.get_violation_summaries(application)
+    jira_map = _triage_jira_map(application)
+    total_unique = 0
+    groups = {}
+    for v in violations:
+        if not v.get('jira_key'):
+            v['jira_key'] = jira_map.get(v.get('component_name'))
+        v['policy_name'] = extract_policy_from_scenario(v.get('scenario', ''))
+        v['category'] = categorize_policy(v.get('scenario', ''))
+        v['policy_env'] = policy_env(v['policy_name'])
+        uv_count, _ = count_unique_violations(v.get('violation_summary', ''))
+        v['unique_violations'] = uv_count or None
+        total_unique += uv_count
+        cat = v['category']
+        if cat not in groups:
+            groups[cat] = {'components': 0, 'unique_violations': 0}
+        groups[cat]['components'] += 1
+        groups[cat]['unique_violations'] += uv_count
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    enrich_with_coverage(violations, exceptions_by_policy)
+    for v in violations:
+        scenario = v.get('scenario', '')
+        rules = extract_violation_rules(v.get('violation_summary', ''))
+        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
+        cov_stage = (env_cov.get('stage') or {}).get('coverage')
+        cov_prod = (env_cov.get('prod') or {}).get('coverage')
+        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
+    coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
+    for v in violations:
+        cov = v.get('exception_coverage')
+        if cov in coverage_summary:
+            coverage_summary[cov] += 1
+    for cat in ('FBC', 'Components', 'Charts'):
+        groups.setdefault(cat, {'components': 0, 'unique_violations': 0})
     return {
         'application': application,
         'total_violations': len(violations),
+        'total_unique_violations': total_unique,
+        'groups': groups,
+        'coverage_summary': coverage_summary if exceptions_by_policy else None,
         'violations': violations,
     }
+
+
+@router.get("/applications/{application}/violations/rules")
+def list_violation_rules(
+    application: str,
+    reporter_env: Optional[str] = None,
+    reporter_build_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Violations grouped by rule with affected components and solutions."""
+    from api.validators import validate_application_name
+    application = validate_application_name(application)
+    if reporter_env or reporter_build_type:
+        from cli.config import app_to_reporter_branch
+        from clients.conforma_reporter_client import fetch_reporter_rules
+        branch = app_to_reporter_branch(application)
+        env = reporter_env or 'prod'
+        build_type = reporter_build_type or 'latest'
+        return fetch_reporter_rules(branch, env=env, build_type=build_type)
+    from utils.conforma_utils import count_unique_violations
+    repo = _conforma_repo()
+    violations = repo.get_violation_summaries(application)
+    rules_map = {}
+    for v in violations:
+        comp = v.get('component_name', '')
+        _, uv_rules = count_unique_violations(v.get('violation_summary', ''))
+        for r in uv_rules:
+            rule = r['rule']
+            if rule not in rules_map:
+                rules_map[rule] = {
+                    'rule': rule,
+                    'title': '',
+                    'solution': '',
+                    'components': set(),
+                    'violation_rows': 0,
+                }
+            rules_map[rule]['components'].add(comp)
+            rules_map[rule]['violation_rows'] += 1
+    result = []
+    for entry in rules_map.values():
+        entry['components'] = sorted(entry['components'])
+        entry['count'] = len(entry['components'])
+        result.append(entry)
+    result.sort(key=lambda r: (-r['count'], r['rule']))
+    return result
 
 
 @router.get("/applications/{application}/violations/{component}",
             response_model=Optional[ConformaViolationDetails])
 def get_violation(component: str, application: str, include_details: bool = True):
     """Full Conforma policy violation details."""
+    from utils.conforma_utils import (
+        compute_blocks,
+        compute_violation_coverage,
+        count_unique_violations,
+        extract_policy_from_scenario,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+        lookup_exceptions,
+    )
+    from utils.conforma_utils import (
+        policy_env as _policy_env,
+    )
     row = _conforma_repo().get_violation_details(component, application)
     if not row:
         from api.errors import not_found
@@ -64,11 +235,59 @@ def get_violation(component: str, application: str, include_details: bool = True
 
     details = row.get('violation_details') if include_details else None
     konflux = _konflux_url(row.get('pipelinerun_name', ''))
+    scenario = row['scenario']
+    policy_name = extract_policy_from_scenario(scenario)
+
+    cov_fields = {}
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    if exceptions_by_policy:
+        rules = extract_violation_rules(row.get('violation_summary', ''))
+        cov = compute_violation_coverage(
+            rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
+        if cov:
+            cov_fields = {
+                'exception_coverage': cov['coverage'],
+                'covered_rules': cov['covered_rules'],
+                'uncovered_rules': cov['uncovered_rules'],
+                'matching_exceptions': cov['matching_exceptions'],
+            }
+        from utils.conforma_utils import (
+            compute_coverage_by_env,
+        )
+        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
+        cov_fields['exception_coverage_stage'] = (env_cov.get('stage') or {}).get('coverage')
+        cov_fields['exception_coverage_prod'] = (env_cov.get('prod') or {}).get('coverage')
+        cov_fields['exception_env_tag'] = env_cov.get('combined_tag')
+        all_rules = set(rules) if rules else set()
+        s_cov = set((env_cov.get('stage') or {}).get('covered_rules', []))
+        p_cov = set((env_cov.get('prod') or {}).get('covered_rules', []))
+        if cov_fields['exception_coverage_stage']:
+            cov_fields['uncovered_rules_stage'] = sorted(all_rules - s_cov)
+        if cov_fields['exception_coverage_prod']:
+            cov_fields['uncovered_rules_prod'] = sorted(all_rules - p_cov)
+
+    uv_count, uv_rules = count_unique_violations(row.get('violation_summary', ''))
+    vr_list = [
+        r['rule'] + (':' + r['detail'] if r['detail'] else '')
+        for r in uv_rules
+    ]
+
+    p_env = _policy_env(policy_name)
+    blocks = compute_blocks(
+        scenario,
+        cov_fields.get('exception_coverage_stage'),
+        cov_fields.get('exception_coverage_prod'),
+    )
 
     return ConformaViolationDetails(
         component=row['component_name'],
-        scenario=row['scenario'],
+        scenario=scenario,
+        policy_name=policy_name,
+        policy_env=p_env,
+        blocks=blocks,
         violations_count=row['violations_count'],
+        unique_violations=uv_count or None,
+        violation_rules=vr_list or None,
         warnings_count=row['warnings_count'],
         successes_count=row['successes_count'],
         violation_summary=row.get('violation_summary', ''),
@@ -78,4 +297,73 @@ def get_violation(component: str, application: str, include_details: bool = True
         snapshot_name=row.get('snapshot_name'),
         konflux_url=konflux,
         first_detected_at=row.get('first_detected_at', datetime.utcnow()),
+        **cov_fields,
+    )
+
+
+@router.get("/exceptions/lifecycle", response_model=ExceptionLifecycleSummary)
+def get_exception_lifecycle():
+    """Track EC policy exception lifecycle across all policies.
+
+    Returns all exceptions with their status: active, expiring_soon (<7 days),
+    or expired (past effectiveUntil date). Helps identify exceptions that should
+    be cleaned up (expired) or that need urgent root-cause fixes (expiring soon).
+    """
+    from utils.conforma_utils import fetch_exceptions_by_policy
+
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    if not exceptions_by_policy:
+        return ExceptionLifecycleSummary(
+            total_exceptions=0, permanent=0, active_temporary=0,
+            expiring_soon=0, expired=0, exceptions=[])
+
+    all_exceptions = []
+    perm_count = 0
+    active_temp = 0
+    expiring_count = 0
+    expired_count = 0
+
+    for policy_name, exc_list in exceptions_by_policy.items():
+        for exc in exc_list:
+            is_permanent = exc.get('permanent', False)
+            days_left = exc.get('days_left')
+
+            if is_permanent:
+                status = 'active'
+                perm_count += 1
+            elif days_left is not None and days_left < 0:
+                status = 'expired'
+                expired_count += 1
+            elif days_left is not None and days_left < 7:
+                status = 'expiring_soon'
+                expiring_count += 1
+                active_temp += 1
+            else:
+                status = 'active'
+                active_temp += 1
+
+            all_exceptions.append(ExceptionStatus(
+                rule=exc.get('value', ''),
+                policy=policy_name,
+                permanent=is_permanent,
+                effective_until=exc.get('effectiveUntil'),
+                days_left=days_left,
+                status=status,
+                reference=exc.get('reference'),
+                gitlab_link=exc.get('gitlab_link'),
+            ))
+
+    all_exceptions.sort(key=lambda e: (
+        e.status != 'expired',
+        e.status != 'expiring_soon',
+        e.days_left if e.days_left is not None else 9999,
+    ))
+
+    return ExceptionLifecycleSummary(
+        total_exceptions=len(all_exceptions),
+        permanent=perm_count,
+        active_temporary=active_temp,
+        expiring_soon=expiring_count,
+        expired=expired_count,
+        exceptions=all_exceptions,
     )
