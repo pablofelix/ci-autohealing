@@ -601,7 +601,8 @@ class AIAnalysisRepository:
                 SELECT id, model_used, root_cause, failure_category,
                        confidence_score, recommended_fix, recommended_files,
                        can_auto_fix, requires_human_review, analyzed_at,
-                       langfuse_trace_id, tokens_used, cost_usd
+                       langfuse_trace_id, tokens_used, cost_usd,
+                       analysis_json
                 FROM ai_analysis
                 WHERE release_name = %s
                 ORDER BY analyzed_at DESC
@@ -626,6 +627,7 @@ class AIAnalysisRepository:
                 'langfuse_trace_id': row[10],
                 'tokens_used': row[11],
                 'cost_usd': row[12],
+                'analysis_json': row[13],
             }
 
     def get_extended_status(self, application):
@@ -839,6 +841,70 @@ class AIAnalysisRepository:
 
             return None
 
+    def get_full_analysis(self, component, application):
+        """Latest AI analysis with analysis_json for review. Checks build, conforma, release."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT 'build', b.component_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                JOIN build_failures b ON a.build_failure_id = b.id
+                WHERE b.component_name = %s AND b.application = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            cursor.execute("""
+                SELECT 'conforma', c.component_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE c.component_name = %s AND c.application = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component, application))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            cursor.execute("""
+                SELECT 'release', a.release_name, a.model_used, a.root_cause,
+                       a.failure_category, a.confidence_score,
+                       a.recommended_fix, a.analyzed_at, a.analysis_json,
+                       a.human_verdict, a.actual_root_cause
+                FROM ai_analysis a
+                WHERE a.release_name = %s
+                ORDER BY a.analyzed_at DESC LIMIT 1
+            """, (component,))
+            row = cursor.fetchone()
+            if row:
+                return self._full_analysis_dict(row)
+
+            return None
+
+    @staticmethod
+    def _full_analysis_dict(row):
+        return {
+            'analysis_type': row[0],
+            'component_name': row[1],
+            'model_used': row[2],
+            'root_cause': row[3],
+            'failure_category': row[4],
+            'confidence_score': row[5],
+            'recommended_fix': row[6],
+            'analyzed_at': row[7],
+            'analysis_json': row[8],
+            'human_verdict': row[9],
+            'actual_root_cause': row[10],
+        }
+
     def record_verdict(self, component, application, verdict,
                        actual_root_cause=None, verdict_by=None):
         """Record human verdict on AI analysis accuracy.
@@ -883,8 +949,8 @@ class AIAnalysisRepository:
     def _update_confidence_models(self, component, application, verdict):
         """Update feature weights from new verdict (incremental learning)."""
         try:
-            from analyzers.feature_weights import FeatureWeightService
             from analyzers.confidence_features import FeatureVector
+            from analyzers.feature_weights import FeatureWeightService
 
             with self.db.connection() as conn:
                 cursor = conn.cursor()
@@ -1077,6 +1143,48 @@ class AIAnalysisRepository:
                     'category': row[2],
                 })
             return result
+
+    def get_resolved_conforma_with_analysis(self, application=None, limit=50):
+        """Get resolved conforma violations that have AI analysis attached.
+
+        Returns violation + analysis data for regression testing.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            app_filter = ""
+            params = []
+            if application:
+                app_filter = "AND cr.application = %s"
+                params.append(application)
+            params.append(limit)
+
+            cursor.execute("""
+                SELECT
+                    cr.id, cr.component_name, cr.scenario, cr.application,
+                    cr.violations_count, cr.violation_summary,
+                    cr.first_detected_at, cr.resolved_at, cr.jira_key,
+                    a.id as analysis_id, a.failure_category, a.confidence_score,
+                    a.root_cause, a.recommended_fix, a.can_auto_fix,
+                    a.human_verdict, a.actual_root_cause,
+                    a.model_used
+                FROM conforma_results cr
+                JOIN ai_analysis a ON a.conforma_result_id = cr.id
+                WHERE cr.is_resolved = TRUE
+                  {app_filter}
+                ORDER BY cr.resolved_at DESC NULLS LAST
+                LIMIT %s
+            """.format(app_filter=app_filter), params)
+
+            cols = [
+                'id', 'component_name', 'scenario', 'application',
+                'violations_count', 'violation_summary',
+                'first_detected_at', 'resolved_at', 'jira_key',
+                'analysis_id', 'failure_category', 'confidence_score',
+                'root_cause', 'recommended_fix', 'can_auto_fix',
+                'human_verdict', 'actual_root_cause',
+                'model_used',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def get_conforma_queue(self, application):
         with self.db.connection() as conn:

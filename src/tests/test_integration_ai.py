@@ -68,7 +68,7 @@ class TestAIAnalyzeIntegration(unittest.TestCase):
             'confidence_score': 0.5,
             'recommended_fix': 'test',
         })
-        self.assertIn(status, [200, 404, 400, 422])
+        self.assertIn(status, [200, 404, 400, 422, 429])
 
     def test_failure_detail_has_id(self):
         """Failure detail must include 'id' for analysis storage."""

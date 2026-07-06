@@ -16,6 +16,28 @@ GITLAB_EC_BASE = os.environ.get('GITLAB_EC_POLICY_URL', '')
 
 _SCENARIO_RE = re.compile(r'^conforma-(.+)-single-component$')
 _VERSION_SUFFIX_RE = re.compile(r'-v\d+-\d+(?:-(?:ea|rc)-\d+)?$')
+_CHART_NAME_RE = re.compile(r'rhai-on-.*-chart')
+_FBC_NAME_RE = re.compile(r'.*-fbc-fragment')
+
+
+def strip_version_suffix(component_name):
+    """Strip RHOAI version suffix from a component name for cross-app matching.
+
+    >>> strip_version_suffix('odh-trustyai-service-v3-5')
+    'odh-trustyai-service'
+    >>> strip_version_suffix('odh-trustyai-service-v3-5-ea-2')
+    'odh-trustyai-service'
+    >>> strip_version_suffix('rhoai-fbc-fragment-v3-5-rc-2')
+    'rhoai-fbc-fragment'
+    >>> strip_version_suffix('odh-cli')
+    'odh-cli'
+    >>> strip_version_suffix('')
+    ''
+    """
+    if not component_name:
+        return ''
+    return _VERSION_SUFFIX_RE.sub('', component_name)
+
 
 def extract_policy_from_scenario(scenario):
     """Extract EC policy name from a conforma scenario string.
@@ -443,6 +465,61 @@ def policy_env(policy_name):
     return ''
 
 
+def compute_blocks(scenario, exception_coverage_stage=None,
+                    exception_coverage_prod=None):
+    """Determine which release push(es) a violation actually blocks.
+
+    Combines the policy environment (from the scenario name) with
+    per-environment exception coverage to produce a single label:
+      'stage'  — blocks stage push only
+      'prod'   — blocks prod push only
+      'stage+prod' — blocks both (e.g., same rules fail both policies)
+      'none'   — fully covered by exceptions in the relevant env
+
+    The scenario tells us which policy was evaluated. Exception coverage
+    tells us whether the violation's rules are covered in each env.
+
+    >>> compute_blocks('conforma-registry-rhoai-prod-v3-5-ea-2-single-component')
+    'prod'
+    >>> compute_blocks('conforma-registry-rhoai-stage-v3-5-single-component')
+    'stage'
+    >>> compute_blocks('conforma-registry-rhoai-prod-v3-5-single-component',
+    ...               exception_coverage_prod='fully_covered')
+    'none'
+    >>> compute_blocks('conforma-registry-rhoai-prod-v3-5-single-component',
+    ...               exception_coverage_stage='not_covered',
+    ...               exception_coverage_prod='partially_covered')
+    'prod'
+    >>> compute_blocks('conforma-registry-rhoai-prod-v3-5-single-component',
+    ...               exception_coverage_stage='fully_covered',
+    ...               exception_coverage_prod='not_covered')
+    'prod'
+    >>> compute_blocks('')
+    ''
+    """
+    pname = extract_policy_from_scenario(scenario)
+    if not pname:
+        return ''
+
+    env = policy_env(pname)
+    if not env:
+        return ''
+
+    blocks = set()
+    if env == 'prod':
+        if exception_coverage_prod != 'fully_covered':
+            blocks.add('prod')
+    elif env == 'stage':
+        if exception_coverage_stage != 'fully_covered':
+            blocks.add('stage')
+
+    if not blocks:
+        return 'none'
+    if blocks == {'stage', 'prod'}:
+        return 'stage+prod'
+    return blocks.pop()
+
+
 def compute_coverage_by_env(rules, scenario, exceptions_by_policy):
     """Check exception coverage in both stage and prod policies.
 
@@ -600,6 +677,160 @@ def policy_url_with_line(policy_name, rules=None):
             if line:
                 return '{}#L{}'.format(url, line)
     return url
+
+
+def detect_component_policy_type(component_name):
+    """Detect the expected policy type based on component naming convention.
+
+    >>> detect_component_policy_type('rhai-on-openshift-chart-v3-5')
+    'chart'
+    >>> detect_component_policy_type('rhai-on-xks-chart-v3-5-ea-2')
+    'chart'
+    >>> detect_component_policy_type('rhoai-fbc-fragment-v3-5')
+    'fbc'
+    >>> detect_component_policy_type('odh-dashboard-v3-5')
+    'registry'
+    >>> detect_component_policy_type('')
+    'registry'
+    """
+    base = strip_version_suffix(component_name)
+    if _CHART_NAME_RE.match(base):
+        return 'chart'
+    if _FBC_NAME_RE.match(base):
+        return 'fbc'
+    return 'registry'
+
+
+_POLICY_TYPE_PREFIX = {
+    'chart': 'registry-rhoai-chart',
+    'fbc': 'fbc-rhoai',
+    'registry': 'registry-rhoai',
+}
+
+
+def expected_policy_prefix(component_name):
+    """Return the expected EC policy name prefix for a component.
+
+    >>> expected_policy_prefix('rhai-on-openshift-chart-v3-5')
+    'registry-rhoai-chart'
+    >>> expected_policy_prefix('rhoai-fbc-fragment-v3-5')
+    'fbc-rhoai'
+    >>> expected_policy_prefix('odh-dashboard-v3-5')
+    'registry-rhoai'
+    """
+    ptype = detect_component_policy_type(component_name)
+    return _POLICY_TYPE_PREFIX.get(ptype, 'registry-rhoai')
+
+
+def _get_permanent_excludes(policy_prefix, exceptions_by_policy):
+    """Get permanent config.exclude rules for a policy prefix.
+
+    Searches for the policy or any of its variants (-prod, -prod-future, -stage).
+    """
+    candidates = [
+        policy_prefix + '-prod',
+        policy_prefix + '-prod-future',
+        policy_prefix + '-stage',
+    ]
+    for name in candidates:
+        if name in exceptions_by_policy:
+            return {e['value'] for e in exceptions_by_policy[name]
+                    if e.get('permanent')}
+    return set()
+
+
+def _is_rule_excluded(rule, excluded_rules):
+    """Check if a rule matches an exclusion (exact or prefix match).
+
+    >>> _is_rule_excluded('cve.cve_results_found', {'cve'})
+    True
+    >>> _is_rule_excluded('labels.required_labels', {'labels.required_labels'})
+    True
+    >>> _is_rule_excluded('hermetic_task.hermetic', {'cve'})
+    False
+    """
+    if rule in excluded_rules:
+        return True
+    return any('.' not in excl and rule.startswith(excl + '.') for excl in excluded_rules)
+
+
+def apply_policy_correction(violations, exceptions_by_policy):
+    """Filter violations caused by ITS policy mismatch.
+
+    Detects components evaluated against the wrong policy (e.g., charts
+    against registry-rhoai-prod instead of registry-rhoai-chart-prod)
+    and removes violations for rules excluded by the correct policy.
+
+    Removes entries entirely when ALL violations are noise.
+    Returns dict: {corrected, removed, filtered_violations, details}.
+    """
+    if not exceptions_by_policy:
+        return {'corrected': 0, 'removed': 0, 'filtered_violations': 0, 'details': []}
+
+    corrected = 0
+    filtered_total = 0
+    to_remove = []
+    details = []
+
+    for v in violations:
+        comp = v.get('component_name', v.get('component', ''))
+        scenario = v.get('scenario', '')
+        actual_policy = extract_policy_from_scenario(scenario)
+        exp_prefix = expected_policy_prefix(comp)
+
+        if actual_policy.startswith(exp_prefix):
+            continue
+
+        correct_excludes = _get_permanent_excludes(exp_prefix, exceptions_by_policy)
+        if not correct_excludes:
+            continue
+
+        summary = v.get('violation_summary', '') or ''
+        rules = extract_violation_rules(summary)
+        noise_rules = {r for r in rules if _is_rule_excluded(r, correct_excludes)}
+        real_rules = rules - noise_rules
+
+        if not real_rules and rules:
+            to_remove.append(v)
+            viol_count = v.get('violations_count', 0) or 0
+            filtered_total += viol_count
+            corrected += 1
+            details.append({
+                'component': comp,
+                'actual_policy': actual_policy,
+                'correct_policy': exp_prefix + '-prod',
+                'noise_violations': viol_count,
+                'action': 'removed',
+            })
+        elif noise_rules:
+            _, all_unique = count_unique_violations(summary)
+            real_unique = [u for u in all_unique
+                           if not _is_rule_excluded(u['rule'], correct_excludes)]
+            noise_count = len(all_unique) - len(real_unique)
+            if noise_count > 0:
+                v['unique_violations'] = len(real_unique)
+                v['unique_rules'] = real_unique
+                v['policy_noise_filtered'] = noise_count
+                v['correct_policy'] = exp_prefix + '-prod'
+                filtered_total += noise_count
+                corrected += 1
+                details.append({
+                    'component': comp,
+                    'actual_policy': actual_policy,
+                    'correct_policy': exp_prefix + '-prod',
+                    'noise_violations': noise_count,
+                    'action': 'filtered',
+                })
+
+    for v in to_remove:
+        violations.remove(v)
+
+    return {
+        'corrected': corrected,
+        'removed': len(to_remove),
+        'filtered_violations': filtered_total,
+        'details': details,
+    }
 
 
 def fetch_exceptions_from_gitlab():

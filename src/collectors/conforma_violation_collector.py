@@ -11,10 +11,10 @@ For each component with a failing Conforma test:
 import json
 import time
 
-from logger import setup_logger
-from repositories import DatabaseConnection, ConformaRepository
 from clients import KubeArchiveClient, KubernetesClient, TektonResultsClient
 from clients.pipelinerun_query import query_pipelineruns
+from logger import setup_logger
+from repositories import ConformaRepository, DatabaseConnection
 from tekton_parsers import extract_conforma_component_info, extract_verify_taskrun_name
 
 logger = setup_logger(__name__)
@@ -177,7 +177,7 @@ class ConformaViolationCollector:
                 logger.warning("Could not parse summary step")
 
         if detailed_logs:
-            result['violation_summary'] = detailed_logs[:10000]
+            result['violation_summary'] = detailed_logs[:100000]
             logger.info("Detailed report: %d chars", len(detailed_logs))
 
         if report_logs:
@@ -315,7 +315,7 @@ class ConformaViolationCollector:
         logger.info("Found %d component/scenario pairs with failing Conforma tests", len(failing))
 
         collected = 0
-        for i, (key, info) in enumerate(sorted(failing.items()), 1):
+        for i, (_key, info) in enumerate(sorted(failing.items()), 1):
             component = info['component']
             logger.info("[%d/%d] %s", i, len(failing), component)
             logger.info("Scenario: %s", info['scenario'])
