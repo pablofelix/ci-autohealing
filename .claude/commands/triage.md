@@ -20,12 +20,14 @@ Use MCP tools first, fall back to CLI:
 
 This shows tracked items, untracked failures, and the overall triage state. Present this to the user first.
 
-### If a specific component was provided as `$ARGUMENTS`:
+### If a specific component or release was provided as `$ARGUMENTS`:
 
-Auto-detect the failure type from the alerts data:
-- Build failure → follow the /triage-build workflow for that component
-- Conforma violation → follow the /triage-conforma workflow for that component
-- Both → handle build first, then conforma
+Auto-detect the failure type from the name and alerts data:
+- **Release name** (contains `-stage-` or `-prod-`, or matches `rhoai-v*` pattern) → follow the /triage-release workflow for that release
+- **Build failure** → follow the /triage-build workflow for that component
+- **Conforma violation** → follow the /triage-conforma workflow for that component
+- **Onboarding issue** (component shows incomplete onboarding) → follow the /triage-onboarding workflow for that component
+- **Both build + conforma** → handle build first, then conforma
 
 ### If no component was provided:
 
@@ -34,12 +36,16 @@ Ask the user what type of failures to triage using AskUserQuestion:
 Options:
 - **Build failures** — follow the /triage-build workflow
 - **Conforma violations** — follow the /triage-conforma workflow
-- **Both** — run /triage-build first, then /triage-conforma
+- **Release failures** — follow the /triage-release workflow
+- **Onboarding blockers** — follow the /triage-onboarding workflow
+- **All** — run /triage-build, then /triage-conforma, then /triage-release, then /triage-onboarding
 
 ### Workflow references
 
 - Build triage: follow the exact steps in /triage-build
 - Conforma triage: follow the exact steps in /triage-conforma
+- Release triage: follow the exact steps in /triage-release
+- Onboarding triage: follow the exact steps in /triage-onboarding
 
 **CRITICAL**: ALL failures/violations MUST be tracked via `ic triage track` or `mcp__ic__track_triage_item()`. After any action (Jira, Slack, fix), update the triage item. This maintains state across sessions.
 

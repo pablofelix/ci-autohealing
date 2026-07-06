@@ -403,6 +403,96 @@ Goal: the release AI analyzer has the same context as a human engineer doing tri
 
 ---
 
+## Phase 13: Triage Skills Completion
+
+Goal: complete triage skill coverage for all failure types and make skills educational.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `/triage-release` skill — 8-step release failure triage | Claude skill | done |
+| `/triage` dispatcher routes to release triage | Claude skill | done |
+| Release auto-detect in `/triage` (stage/prod name patterns) | Claude skill | done |
+| Educational mode: explain Konflux concepts using docs MCP | All triage skills | done |
+
+---
+
+## Phase 14: Product Pages Integration
+
+Goal: replace decommissioned Smartsheet with Product Pages for release schedule data. All RHOAI/RHAI releases are consolidated under Product Pages product `rhai` (id: 3184).
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| Product Pages MCP discovery (rhai, rhai-3.5, rhai-3.6) | MCP | done |
+| Fetch RHAI 3.5 EA1/EA2/GA schedule milestones | MCP | done |
+| `sync_schedule_from_productpages()` — populate release_schedule DB | API | done |
+| Replace `_release_fetch_smartsheet_dates()` in bash | CLI | done |
+| Product Pages API client with OIDC/Kerberos auth | Client | planned |
+| Scheduled sync via worker (daily refresh) | Worker | planned |
+
+**Key data mapping:**
+- Product Pages entity: `Red Hat AI` (shortname: `rhai`, id: 3184)
+- Releases: `rhai-3.5` (id: 3358), `rhai-3.6` (id: 3365), `rhai-3.4` (id: 3354)
+- RHOAI milestones: Code Freeze, Feature Freeze, Initial RC, Release Window, RHOAI Release
+
+---
+
+## Phase 15: Component Onboarding Automation (done)
+
+Goal: track and assist component onboarding into RHOAI Konflux workspace, reducing manual steps and preventing tickets from being prematurely closed.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| Onboarding status tracker (two-phase: Konflux 9 steps + Automation 14 steps) | `ic onboard status` / `get_onboarding_status()` / API | done |
+| Onboarding describe with progress bars + next action | `ic onboard describe <comp>` / `get_onboarding_describe()` / API | done |
+| Parallel API queries (ThreadPoolExecutor, 8 workers, 30s timeout) | API | done |
+| 14 automation steps (was 10): +auto_merge, product_listing, renovate, rkc | API | done |
+| Bot error analysis (14 error patterns, timeline, stuck step detection) | API | done |
+| Jira ticket cross-reference (RHOAI + ODH onboarding tickets) | API | done |
+| Nudge PR tracking (dependency update PRs) | API | done |
+| OnboardingAnalyzer — LLM diagnosis of blockers (9 categories) | `ic ai analyze onboarding <comp>` / API | done |
+| MCP tool for AI agents | `analyze_onboarding()` | done |
+| Triage skill for onboarding | `/triage-onboarding` | done |
+| Regression tester against completed onboardings | `ic ai regression onboarding` | done |
+| Heuristic blocker analysis + fix suggestions | API | done |
+
+---
+
+## Current Release Status (updated 2026-07-06)
+
+**RHAI 3.5 schedule (from Product Pages):**
+
+| Milestone | EA1 | EA2 | GA |
+|-----------|-----|-----|-----|
+| RHOAI Planning Freeze | May 1 | May 15 | Jun 24 |
+| RHOAI Feature Freeze | — | — | Jul 17 |
+| RHOAI Code Freeze | May 15 | Jun 19 | Jul 24 |
+| RHOAI Initial RC | May 21 | Jun 25 | Jul 30 |
+| RHOAI Release Window | Jun 16-17 | Jul 14-15 | Aug 18-19 |
+| RHOAI Release | Jun 18 | Jul 16 | Aug 20 |
+| RHAI 3.5 GA | — | — | Aug 20 |
+
+**EA2 status (as of Jul 1):**
+- RC1: Jun 23 ✓ — RC2: Jul 3 (PCC cache regen, not code change)
+- 1 blocker: consume ray cuda (hardware dependency)
+- Release window: Jul 14-15
+- Israel testing started Jul 5
+
+**3.5 GA status:**
+- Code freeze: Jul 24
+- 5 blockers (same as prior week)
+- Same-day release coordinated with RHAI team
+
+**Known issues:**
+- PCC cache not auto-refreshing after releases (seen EA1+EA2, sustaining investigating)
+- Konflux config validator blocking scheduled nightlies (Alex+Mhamad fix, deadline Jul 17)
+- Onboarding automation prematurely closing Jira tickets
+
+**People:**
+- Ujjwal: new build IC, mentored by Moulali
+- Jira dashboard: https://redhat.atlassian.net/jira/dashboards/23119
+
+---
+
 ## Principles
 
 - **Three layers stay aligned**: every feature ships in CLI + MCP + API
