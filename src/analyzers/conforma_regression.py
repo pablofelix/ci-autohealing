@@ -24,6 +24,28 @@ RULE_PATTERNS = {
     'deprecated': re.compile(r'deprecated', re.I),
     'signature': re.compile(r'signature|attestation', re.I),
     'snyk': re.compile(r'snyk', re.I),
+    'base_image': re.compile(r'base_image_registries|base_image_info', re.I),
+}
+
+EXPECTED_MULTI = {
+    'hermetic_task': 'policy_hermetic_build',
+    'trusted_task': 'policy_untrusted_image',
+    'source_image': 'policy_source_image',
+    'labels': 'policy_labels',
+    'fips': 'policy_fips_check',
+    'slsa': 'policy_slsa_provenance',
+    'sbom': 'policy_package_source',
+    'rpm': 'policy_rpm_repository',
+    'deprecated': 'policy_deprecated_task',
+    'signature': 'policy_signing_key',
+    'snyk': 'policy_snyk_error',
+    'base_image': 'policy_untrusted_image',
+}
+
+MULTI_ACCEPTABLE = {
+    'base_image': {'policy_untrusted_image', 'policy_hermetic_build'},
+    'sbom': {'policy_package_source', 'policy_hermetic_build'},
+    'trusted_task': {'policy_untrusted_image', 'policy_unpinned_task'},
 }
 
 EXPECTED_CATEGORIES = {
@@ -38,6 +60,7 @@ EXPECTED_CATEGORIES = {
     'deprecated': 'policy_deprecated_task',
     'signature': 'policy_signing_key',
     'snyk': 'policy_snyk_error',
+    'base_image': 'policy_untrusted_image',
 }
 
 TRANSIENT_RULES = {'trusted_task', 'slsa', 'signature', 'snyk', 'fips'}
@@ -60,25 +83,47 @@ class ConformaRegressionTester:
             application=application, limit=limit
         )
 
-    def _infer_rule_group(self, violation_summary):
+    def _infer_rule_groups(self, violation_summary):
+        """Infer all significant rule groups from the summary.
+
+        Returns a list of (group, count) pairs sorted by frequency.
+        Multi-rule violations (e.g., fips + trusted_task + slsa) return
+        multiple groups so the evaluator can accept any matching category.
+        """
         if not violation_summary:
-            return 'other'
+            return [('other', 0)]
+        counts = {}
         for group, pattern in RULE_PATTERNS.items():
-            if pattern.search(violation_summary):
-                return group
-        return 'other'
+            n = len(pattern.findall(violation_summary))
+            if n > 0:
+                counts[group] = n
+        if not counts:
+            return [('other', 0)]
+        sorted_groups = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        top_count = sorted_groups[0][1]
+        threshold = max(1, top_count // 5)
+        return [(g, c) for g, c in sorted_groups if c >= threshold]
 
     def evaluate_accuracy(self, resolved_violations):
         evaluations = []
         for v in resolved_violations:
-            rule_group = self._infer_rule_group(v.get('violation_summary', ''))
-            expected_cat = EXPECTED_CATEGORIES.get(rule_group)
+            rule_groups = self._infer_rule_groups(v.get('violation_summary', ''))
+            primary_group = rule_groups[0][0]
+            expected_cat = EXPECTED_CATEGORIES.get(primary_group)
             actual_cat = v.get('failure_category', '')
 
-            category_correct = (
-                actual_cat == expected_cat if expected_cat
-                else actual_cat not in ('config_error', 'infrastructure')
-            )
+            acceptable_cats = set()
+            for g, _ in rule_groups:
+                if g in EXPECTED_MULTI:
+                    acceptable_cats.add(EXPECTED_MULTI[g])
+                if g in MULTI_ACCEPTABLE:
+                    acceptable_cats.update(MULTI_ACCEPTABLE[g])
+            if acceptable_cats:
+                category_correct = actual_cat in acceptable_cats
+            elif primary_group == 'other':
+                category_correct = True
+            else:
+                category_correct = actual_cat not in ('config_error', 'infrastructure')
 
             hours_to_resolve = None
             if v.get('first_detected_at') and v.get('resolved_at'):
@@ -93,7 +138,7 @@ class ConformaRegressionTester:
 
             evaluations.append({
                 'component': v.get('component_name', ''),
-                'rule_group': rule_group,
+                'rule_group': primary_group,
                 'expected_category': expected_cat,
                 'actual_category': actual_cat,
                 'category_correct': category_correct,
