@@ -2354,12 +2354,20 @@ def ai_status():
 def ai_regression(domain, app, limit, verbose, use_llm):
     """Regression test AI analyzer against resolved data.
 
-    DOMAIN is 'conforma' (default) or 'onboarding'.
+    DOMAIN is 'conforma' (default), 'build', 'release', or 'onboarding'.
     """
-    from cli.formatting import bold, cyan, green, red, section_header, yellow
+    from cli.formatting import cyan, yellow
 
     if domain == 'onboarding':
         _ai_regression_onboarding(app, limit, verbose, use_llm)
+        return
+
+    if domain == 'build':
+        _ai_regression_build(app, limit, verbose)
+        return
+
+    if domain == 'release':
+        _ai_regression_release(limit, verbose)
         return
 
     from cli.db import require_db
@@ -2375,11 +2383,17 @@ def ai_regression(domain, app, limit, verbose, use_llm):
         print(yellow('No resolved violations with AI analysis found'))
         print(cyan("Run 'ic ai analyze' on more components to build history"))
         return
-    section_header('Conforma AI Regression Report')
+    _print_regression_report('Conforma AI Regression Report', result)
+
+
+def _print_regression_report(title, result):
+    """Shared formatting for regression test results."""
+    from cli.formatting import bold, green, red, section_header
+    section_header(title)
     print()
     m = result['metrics']
     print(bold('Coverage:'))
-    print('  Resolved violations:   {}'.format(m['total_resolved']))
+    print('  Resolved items:        {}'.format(m['total_resolved']))
     print('  With AI analysis:      {} ({}%)'.format(
         m['with_ai_analysis'], m['ai_coverage_pct']))
     print('  Evaluated this run:    {}'.format(result['evaluations_count']))
@@ -2411,6 +2425,43 @@ def ai_regression(domain, app, limit, verbose, use_llm):
         for i, imp in enumerate(m['improvements'], 1):
             print('  {}. {}'.format(i, imp))
         print()
+
+
+def _ai_regression_build(app, limit, verbose):
+    """Regression test the build failure analyzer."""
+    from cli.db import require_db
+    from cli.formatting import cyan, yellow
+    if not require_db():
+        return
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    from analyzers.build_regression import BuildRegressionTester
+    tester = BuildRegressionTester(config)
+    application = app or cfg.APPLICATION_NAME
+    result = tester.run(application=application, limit=limit, verbose=verbose)
+    if not result.get('analyzed'):
+        print(yellow('No resolved build failures with AI analysis found'))
+        print(cyan("Run 'ic ai analyze' on more components to build history"))
+        return
+    _print_regression_report('Build Failure AI Regression Report', result)
+
+
+def _ai_regression_release(limit, verbose):
+    """Regression test the release failure analyzer."""
+    from cli.db import require_db
+    from cli.formatting import cyan, yellow
+    if not require_db():
+        return
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    from analyzers.release_regression import ReleaseRegressionTester
+    tester = ReleaseRegressionTester(config)
+    result = tester.run(limit=limit, verbose=verbose)
+    if not result.get('analyzed'):
+        print(yellow('No release analyses found'))
+        print(cyan("Run 'ic ai analyze-release' on release failures to build history"))
+        return
+    _print_regression_report('Release Failure AI Regression Report', result)
 
 
 def _ai_regression_onboarding(app, limit, verbose, use_llm):

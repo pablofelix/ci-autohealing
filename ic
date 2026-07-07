@@ -2662,17 +2662,25 @@ cmd_ai() {
                 *) cmd_ai_stats ;;
             esac
             ;;
+        regression)
+            shift
+            local reg_domain="${1:-conforma}"
+            shift 2>/dev/null || true
+            $PYTHON "$SCRIPT_DIR/ic.py" ai-regression "$reg_domain" "$@"
+            ;;
         *)
             echo -e "${BOLD}IC AI - AI Analysis Commands${NC}"
             echo ""
-            echo "Usage: ic ai {analyze|enrich|batch|status|stats}"
+            echo "Usage: ic ai {analyze|enrich|batch|regression|status|stats}"
             echo ""
             echo "Commands:"
             echo "  analyze <num|component>  Analyze a specific failure"
             echo "  analyze --all            Analyze all pending failures"
             echo "  enrich [component]       Enrich failures with context"
             echo "  analyze release <name>   Analyze a failed release"
+            echo "  analyze onboarding <c>   Analyze onboarding blockers"
             echo "  analyze scenarios [app]  Analyze ITS scenario config"
+            echo "  regression [domain]      Run AI regression (conforma|onboarding)"
             echo "  batch --estimate         Show queue depth (no API calls)"
             echo "  batch --limit N          Analyze N failures in batch"
             echo "  batch --limit N --all    Batch across all applications"
@@ -2753,6 +2761,10 @@ cmd_ai_analyze() {
     elif [ "$1" = "scenarios" ] || [ "$1" = "its" ]; then
         shift
         cmd_ai_analyze_scenarios "$@"
+        return $?
+    elif [ "$1" = "onboarding" ]; then
+        shift
+        cmd_onboard_analyze "$@"
         return $?
     elif [ "$1" = "conforma" ]; then
         analysis_type="conforma"
@@ -11168,6 +11180,258 @@ cmd_jira_create_conforma() {
     fi
 }
 
+# --- Onboarding commands (API client) ---
+
+cmd_onboard_status() {
+    local show_all=false output_json=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all|-a)  show_all=true; shift ;;
+            --json)    output_json=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local api_url="${IC_API_URL:-http://localhost:8000}"
+    local data
+    data=$(curl -sf --max-time 60 "${api_url}/api/v1/applications/${APPLICATION_NAME}/onboarding" 2>/dev/null)
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: API unavailable or timeout (is the server running?)${NC}"
+        return 1
+    fi
+
+    if [ "$output_json" = true ]; then
+        echo "$data" | jq .
+        return
+    fi
+
+    # Check for API error (e.g. NAMESPACE not set)
+    local api_error
+    api_error=$(echo "$data" | jq -r '.error // ""')
+    if [ -n "$api_error" ] && [ "$api_error" != "null" ]; then
+        echo -e "${YELLOW}⚠ ${api_error}${NC}"
+        return 1
+    fi
+
+    section_header "Onboarding Status: ${APPLICATION_NAME}"
+    echo ""
+
+    local total complete partial incomplete
+    total=$(echo "$data" | jq -r '.components | length')
+    complete=$(echo "$data" | jq '[.components[] | select(.progress >= 100)] | length')
+    partial=$(echo "$data" | jq '[.components[] | select(.progress > 0 and .progress < 100)] | length')
+    incomplete=$(echo "$data" | jq '[.components[] | select(.progress == 0)] | length')
+
+    echo -e "  Total: ${BOLD}${total}${NC}  Complete: ${GREEN}${complete}${NC}  Partial: ${YELLOW}${partial}${NC}  Incomplete: ${RED}${incomplete}${NC}"
+    echo ""
+
+    if [ "$total" = "0" ]; then
+        echo -e "  ${YELLOW}No onboarding data found.${NC}"
+        return
+    fi
+
+    # Header
+    printf "  %-35s %-10s %-10s %-14s %s\n" "Component" "Konflux" "Automat." "Phase" "Progress"
+    printf "  %-35s %-10s %-10s %-14s %s\n" \
+        "$(printf '%0.s-' {1..35})" "$(printf '%0.s-' {1..10})" "$(printf '%0.s-' {1..10})" \
+        "$(printf '%0.s-' {1..14})" "$(printf '%0.s-' {1..20})"
+
+    # Filter: show only partial/incomplete unless --all
+    local filter='. components[]'
+    if [ "$show_all" = false ]; then
+        filter='.components[] | select(.progress < 100)'
+    fi
+
+    echo "$data" | jq -r "$filter | \"\(.name)\t\(.konflux_progress // \"?\")\t\(.automation_progress // \"?\")\t\(.phase // \"?\")\t\(.progress // 0)\"" 2>/dev/null | \
+    sort -t$'\t' -k5 -n | while IFS=$'\t' read -r name kfx auto phase progress; do
+        local color="${GREEN}"
+        [ "$progress" -lt 100 ] 2>/dev/null && color="${YELLOW}"
+        [ "$progress" -lt 50 ] 2>/dev/null && color="${RED}"
+        # Progress bar
+        local done_n=$((progress / 5))
+        local left_n=$((20 - done_n))
+        local bar=""
+        for ((i=0; i<done_n; i++)); do bar+="█"; done
+        for ((i=0; i<left_n; i++)); do bar+="░"; done
+        printf "  %-35s %-10s %-10s %-14s ${color}%s %3d%%${NC}\n" \
+            "${name:0:35}" "$kfx" "$auto" "$phase" "$bar" "$progress"
+    done
+    echo ""
+}
+
+cmd_onboard_describe() {
+    local component="${1:-}"
+    local output_json=false
+    [ "${2:-}" = "--json" ] && output_json=true
+
+    if [ -z "$component" ]; then
+        echo -e "${RED}Usage: ic onboard describe <component>${NC}"
+        return 1
+    fi
+
+    local api_url="${IC_API_URL:-http://localhost:8000}"
+    local data
+    data=$(curl -sf --max-time 60 "${api_url}/api/v1/applications/${APPLICATION_NAME}/onboarding/${component}" 2>/dev/null)
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: API unavailable or component not found${NC}"
+        return 1
+    fi
+
+    if [ "$output_json" = true ]; then
+        echo "$data" | jq .
+        return
+    fi
+
+    local phase progress comp_type
+    phase=$(echo "$data" | jq -r '.phase // "?"')
+    progress=$(echo "$data" | jq -r '.progress // 0')
+    comp_type=$(echo "$data" | jq -r '.type // "?"')
+
+    section_header "Onboarding: ${component}"
+    echo ""
+    echo -e "  Type: ${BOLD}${comp_type}${NC}  Phase: ${BOLD}${phase}${NC}  Progress: ${BOLD}${progress}%${NC}"
+    echo ""
+
+    # Konflux steps
+    local kfx_done kfx_total
+    kfx_done=$(echo "$data" | jq '[.steps[] | select(.status == "done")] | length' 2>/dev/null)
+    kfx_total=$(echo "$data" | jq '.steps | length' 2>/dev/null)
+    echo -e "  ${BOLD}Konflux Setup${NC} ($kfx_done/$kfx_total)"
+    echo "$data" | jq -r '.steps[] | "\(.status)\t\(.label // .step)\t\(.detail // "")\t\(.fix // "")"' 2>/dev/null | while IFS=$'\t' read -r status label detail fix; do
+        local icon="${RED}✗${NC}"
+        [ "$status" = "done" ] && icon="${GREEN}✓${NC}"
+        [ "$status" = "warn" ] && icon="${YELLOW}!${NC}"
+        [ "$status" = "skip" ] && icon="${CYAN}–${NC}"
+        local line="  ${icon} ${label}"
+        [ -n "$detail" ] && line+=" — ${detail}"
+        echo -e "$line"
+        [ -n "$fix" ] && echo -e "       ${CYAN}Fix: ${fix}${NC}"
+    done
+    echo ""
+
+    # Automation steps
+    local auto_done auto_total
+    auto_done=$(echo "$data" | jq '[.automation_steps[] | select(.status == "done")] | length' 2>/dev/null)
+    auto_total=$(echo "$data" | jq '.automation_steps | length' 2>/dev/null)
+    if [ "$auto_total" != "0" ] && [ "$auto_total" != "null" ]; then
+        echo -e "  ${BOLD}Automation Steps${NC} ($auto_done/$auto_total)"
+        echo "$data" | jq -r '.automation_steps[] | "\(.status)\t\(.label)\t\(.matched_label // "")\t\(.pr_links[0] // "")"' 2>/dev/null | while IFS=$'\t' read -r status label matched pr; do
+            local icon="${RED}✗${NC}"
+            [ "$status" = "done" ] && icon="${GREEN}✓${NC}"
+            [ "$status" = "in_progress" ] && icon="${YELLOW}…${NC}"
+            local line="  ${icon} ${label}"
+            [ -n "$pr" ] && line+=" ${CYAN}${pr}${NC}"
+            echo -e "$line"
+        done
+        echo ""
+    fi
+
+    # Bot errors
+    local has_errors
+    has_errors=$(echo "$data" | jq -r '.bot_error_analysis.has_errors // false' 2>/dev/null)
+    if [ "$has_errors" = "true" ]; then
+        local retry_count
+        retry_count=$(echo "$data" | jq -r '.bot_error_analysis.retry_count // 0')
+        echo -e "  ${BOLD}Bot Errors${NC} (${RED}${retry_count} retries${NC})"
+        echo "$data" | jq -r '.bot_error_analysis.error_categories[] | "  - \(.category) (\(.count)x): \(.description)"' 2>/dev/null
+        echo ""
+    fi
+
+    # Analysis (heuristic)
+    local blocked_at
+    blocked_at=$(echo "$data" | jq -r '.analysis.blocked_at // ""' 2>/dev/null)
+    if [ -n "$blocked_at" ] && [ "$blocked_at" != "null" ]; then
+        local reason impact
+        reason=$(echo "$data" | jq -r '.analysis.blocked_reason // "?"')
+        impact=$(echo "$data" | jq -r '.analysis.impact // "?"')
+        echo -e "  ${BOLD}Blocked at:${NC} ${RED}${blocked_at}${NC}"
+        echo -e "  ${BOLD}Reason:${NC} ${reason}"
+        echo -e "  ${BOLD}Impact:${NC} ${impact}"
+        echo ""
+    fi
+
+    # Jira tickets
+    echo "$data" | jq -r '.jira_tickets[]? | "  Jira: \(.key) [\(.status)] \(.summary[:60])"' 2>/dev/null
+    echo ""
+}
+
+cmd_onboard_analyze() {
+    local component="${1:-}"
+    if [ -z "$component" ]; then
+        echo -e "${RED}Usage: ic ai analyze onboarding <component>${NC}"
+        return 1
+    fi
+
+    local api_url="${IC_API_URL:-http://localhost:8000}"
+    echo -e "${CYAN}Analyzing onboarding: ${BOLD}${component}${NC}"
+    echo ""
+
+    local data
+    data=$(curl -sf --max-time 120 -X POST "${api_url}/api/v1/applications/${APPLICATION_NAME}/onboarding/${component}/analyze" 2>/dev/null)
+    if [ -z "$data" ]; then
+        echo -e "${RED}Error: API unavailable or analysis failed${NC}"
+        return 1
+    fi
+
+    local error
+    error=$(echo "$data" | jq -r '.error // ""')
+    if [ -n "$error" ] && [ "$error" != "null" ]; then
+        echo -e "${RED}Error: ${error}${NC}"
+        return 1
+    fi
+
+    local root_cause category confidence fix blocked_step can_auto model cost
+    root_cause=$(echo "$data" | jq -r '.root_cause // "?"')
+    category=$(echo "$data" | jq -r '.failure_category // "?"')
+    confidence=$(echo "$data" | jq -r '.confidence_score // 0')
+    fix=$(echo "$data" | jq -r '.recommended_fix // "?"')
+    blocked_step=$(echo "$data" | jq -r '.blocked_step // ""')
+    can_auto=$(echo "$data" | jq -r '.can_auto_fix // false')
+    model=$(echo "$data" | jq -r '.model_used // "?"')
+    cost=$(echo "$data" | jq -r '.cost_usd // 0')
+
+    section_header "Onboarding Analysis: ${component}"
+    echo ""
+
+    # Confidence with color
+    local conf_pct conf_color
+    conf_pct=$(echo "$confidence" | awk '{printf "%d", $1 * 100}')
+    if [ "$conf_pct" -ge 80 ] 2>/dev/null; then
+        conf_color="${GREEN}"
+    elif [ "$conf_pct" -ge 50 ] 2>/dev/null; then
+        conf_color="${YELLOW}"
+    else
+        conf_color="${RED}"
+    fi
+
+    echo -e "  ${BOLD}Category:${NC}    ${category}"
+    echo -e "  ${BOLD}Confidence:${NC}  ${conf_color}${conf_pct}%${NC}"
+    [ -n "$blocked_step" ] && [ "$blocked_step" != "null" ] && \
+        echo -e "  ${BOLD}Blocked at:${NC} ${blocked_step}"
+    echo -e "  ${BOLD}Auto-fix:${NC}   ${can_auto}"
+    echo ""
+    echo -e "  ${BOLD}Root Cause:${NC}"
+    echo "  $root_cause" | fold -s -w 76 | sed 's/^/  /'
+    echo ""
+    echo -e "  ${BOLD}Recommended Fix:${NC}"
+    echo "  $fix" | fold -s -w 76 | sed 's/^/  /'
+    echo ""
+
+    # Source transparency
+    local sources
+    sources=$(echo "$data" | jq -r '.source_transparency.sources_consulted[]?' 2>/dev/null)
+    if [ -n "$sources" ]; then
+        echo -e "  ${BOLD}Sources:${NC}"
+        echo "$sources" | while IFS= read -r src; do
+            echo "    - $src"
+        done
+        echo ""
+    fi
+
+    echo -e "  ${CYAN}Model: ${model}  Cost: \$${cost}${NC}"
+    echo ""
+}
+
 # Main command router
 case "${1:-}" in
     get)
@@ -11400,6 +11664,25 @@ case "${1:-}" in
                 echo -e "${RED}Usage: ic snapshot check${NC}"
                 echo "  Check snapshot freshness — detect stale or failed build images."
                 exit 1
+                ;;
+        esac
+        ;;
+    onboard)
+        case "${2:-}" in
+            describe)  cmd_onboard_describe "$3" "${4:-}" ;;
+            status|"") shift; cmd_onboard_status "$@" ;;
+            *)
+                echo -e "${BOLD}IC Onboard - Onboarding Status${NC}"
+                echo ""
+                echo "Usage: ic onboard {status|describe}"
+                echo ""
+                echo "Commands:"
+                echo "  status [--all] [--json]     Show onboarding overview"
+                echo "  describe <component> [--json] Show component detail"
+                echo ""
+                echo "AI Analysis:"
+                echo "  ic ai analyze onboarding <component>"
+                echo "  ic ai regression onboarding"
                 ;;
         esac
         ;;

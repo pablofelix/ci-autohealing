@@ -457,7 +457,7 @@ Goal: track and assist component onboarding into RHOAI Konflux workspace, reduci
 
 ---
 
-## Phase 16: Build & Release AI Quality (next)
+## Phase 16: Build & Release AI Quality (in progress)
 
 Goal: apply the same regression testing and config analysis approach that improved the conforma AI analyzer (from 41% to target 80%+ accuracy) to build failures and release failures. Use existing AI triage tracker data as ground truth.
 
@@ -472,15 +472,15 @@ Test `BuildFailureAnalyzer` predictions against resolved build failures as groun
 
 | Feature | Surface | Status |
 |---------|---------|--------|
-| `BuildRegressionTester` — compare AI predictions vs actual resolutions | `src/analyzers/build_regression.py` | planned |
-| Query resolved failures with AI analysis (build_failures + ai_analysis JOIN) | Repository | planned |
-| Evaluate failure_category accuracy (AI predicted vs resolution pattern) | Analyzer | planned |
-| Evaluate can_auto_fix accuracy (was it actually auto-fixable?) | Analyzer | planned |
-| Compute calibration score (confidence vs correctness correlation) | Analyzer | planned |
-| Coverage gap detection (failure patterns with 0% AI coverage) | Analyzer | planned |
-| Improvement suggestions (catch-all overuse, low-confidence categories) | Analyzer | planned |
-| CLI: `ic ai regression --type build [--app APP] [--limit N]` | CLI | planned |
-| MCP: `get_build_regression()` | MCP tool | planned |
+| `BuildRegressionTester` — compare AI predictions vs actual resolutions | `src/analyzers/build_regression.py` | done |
+| Query resolved failures with AI analysis (build_failures + ai_analysis JOIN) | Repository | done |
+| Evaluate failure_category accuracy (AI predicted vs resolution pattern) | Analyzer | done |
+| Evaluate can_auto_fix accuracy (was it actually auto-fixable?) | Analyzer | done |
+| Compute calibration score (confidence vs correctness correlation) | Analyzer | done |
+| Coverage gap detection (failure patterns with 0% AI coverage) | Analyzer | done |
+| Improvement suggestions (catch-all overuse, low-confidence categories) | Analyzer | done |
+| CLI: `ic ai regression build [--app APP] [--limit N]` | CLI | done |
+| MCP: `get_regression_report(domain='build')` | MCP tool | done |
 
 **Key metrics to compute:**
 - Accuracy by failure_category (dependency_issue, build_config, test_failure, etc.)
@@ -499,13 +499,13 @@ Test `ReleaseFailureAnalyzer` predictions against resolved release failures.
 
 | Feature | Surface | Status |
 |---------|---------|--------|
-| `ReleaseRegressionTester` — compare AI vs resolution for release failures | `src/analyzers/release_regression.py` | planned |
-| Query release attempts with AI analysis that later succeeded | Repository | planned |
-| Evaluate root cause accuracy (verify-conforma vs infra vs config) | Analyzer | planned |
-| Track resolution path (which violations were actually fixed vs excepted) | Analyzer | planned |
-| SHA tracing accuracy (did AI correctly identify stale SHAs?) | Analyzer | planned |
-| CLI: `ic ai regression --type release [--app APP]` | CLI | planned |
-| MCP: `get_release_regression()` | MCP tool | planned |
+| `ReleaseRegressionTester` — evaluate release analysis quality and completeness | `src/analyzers/release_regression.py` | done |
+| Query release analyses from ai_analysis table | Repository | done |
+| Evaluate category validity + completeness (affected_images, owner_team, fix_action) | Analyzer | done |
+| Track actionable vs transient classification | Analyzer | done |
+| Confidence calibration across release categories | Analyzer | done |
+| CLI: `ic ai regression release [--limit N]` | CLI | done |
+| MCP: `get_regression_report(domain='release')` | MCP tool | done |
 
 **Release-specific metrics:**
 - Was the release blocker correctly identified? (wrong component → wasted investigation time)
@@ -552,7 +552,7 @@ Extend `ic ai regression` to support all failure types from a single command.
 
 | Feature | Surface | Status |
 |---------|---------|--------|
-| `--type conforma\|build\|release\|all` flag | CLI | planned |
+| `ic ai regression <domain>` supports conforma, build, release, onboarding | CLI | done |
 | Combined quality dashboard: `ic ai quality` | CLI | planned |
 | Weekly quality report with trends | CLI | planned |
 | Export training data for model improvement | `ic ai export-training-data --type build` | planned |

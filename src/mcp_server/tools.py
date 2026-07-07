@@ -3036,6 +3036,41 @@ def get_config_analysis(
 
 @mcp.tool()
 @async_tool
+def get_regression_report(
+    domain: str = "conforma",
+    application: str = DEFAULT_APPLICATION,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Run AI analyzer regression tests against resolved data.
+
+    Measures category accuracy, confidence calibration, coverage gaps, and
+    suggests improvements. Uses resolved failures/violations as ground truth.
+
+    Args:
+        domain: Which analyzer to test: 'conforma', 'build', or 'release'
+        application: Application name (used by conforma and build)
+        limit: Max items to evaluate (default 50)
+    """
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    db = _db_connection()
+
+    if domain == 'build':
+        from analyzers.build_regression import BuildRegressionTester
+        tester = BuildRegressionTester(config, db=db)
+        return tester.run(application=application, limit=limit)
+    elif domain == 'release':
+        from analyzers.release_regression import ReleaseRegressionTester
+        tester = ReleaseRegressionTester(config, db=db)
+        return tester.run(limit=limit)
+    else:
+        from analyzers.conforma_regression import ConformaRegressionTester
+        tester = ConformaRegressionTester(config, db=db)
+        return tester.run(application=application, limit=limit)
+
+
+@mcp.tool()
+@async_tool
 def trigger_rebuild(
     component: str,
     namespace: str = "",

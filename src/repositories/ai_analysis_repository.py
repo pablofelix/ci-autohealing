@@ -1186,6 +1186,75 @@ class AIAnalysisRepository:
             ]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
+    def get_resolved_builds_with_analysis(self, application=None, limit=50):
+        """Get resolved build failures that have AI analysis attached."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            app_filter = ""
+            params = []
+            if application:
+                app_filter = "AND bf.application = %s"
+                params.append(application)
+            params.append(limit)
+
+            cursor.execute("""
+                SELECT
+                    bf.id, bf.component_name, bf.application,
+                    bf.failed_task_name, bf.error_type, bf.error_message,
+                    bf.status, bf.resolution_type,
+                    bf.build_start_time, bf.resolved_at, bf.jira_key,
+                    bf.resolution_commit_sha,
+                    a.id as analysis_id, a.failure_category, a.confidence_score,
+                    a.root_cause, a.recommended_fix, a.recommended_files,
+                    a.can_auto_fix, a.human_verdict, a.actual_root_cause,
+                    a.model_used
+                FROM build_failures bf
+                JOIN ai_analysis a ON a.build_failure_id = bf.id
+                WHERE bf.is_resolved = TRUE
+                  {app_filter}
+                ORDER BY bf.resolved_at DESC NULLS LAST
+                LIMIT %s
+            """.format(app_filter=app_filter), params)
+
+            cols = [
+                'id', 'component_name', 'application',
+                'failed_task_name', 'error_type', 'error_message',
+                'status', 'resolution_type',
+                'build_start_time', 'resolved_at', 'jira_key',
+                'resolution_commit_sha',
+                'analysis_id', 'failure_category', 'confidence_score',
+                'root_cause', 'recommended_fix', 'recommended_files',
+                'can_auto_fix', 'human_verdict', 'actual_root_cause',
+                'model_used',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_release_analyses(self, limit=50):
+        """Get all release analyses for regression testing."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    a.id, a.release_name, a.failure_category,
+                    a.confidence_score, a.root_cause, a.recommended_fix,
+                    a.recommended_files, a.can_auto_fix,
+                    a.human_verdict, a.actual_root_cause,
+                    a.model_used, a.analyzed_at, a.analysis_json
+                FROM ai_analysis a
+                WHERE a.release_name IS NOT NULL
+                ORDER BY a.analyzed_at DESC NULLS LAST
+                LIMIT %s
+            """, (limit,))
+
+            cols = [
+                'id', 'release_name', 'failure_category',
+                'confidence_score', 'root_cause', 'recommended_fix',
+                'recommended_files', 'can_auto_fix',
+                'human_verdict', 'actual_root_cause',
+                'model_used', 'analyzed_at', 'analysis_json',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     def get_conforma_queue(self, application):
         with self.db.connection() as conn:
             cursor = conn.cursor()
