@@ -35,5 +35,19 @@ full = [
 [project.scripts]
 ic = "cli.main:cli"
 
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "conftest.py", "*/test_*.py", "setup.py", "build/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 0
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__",
+    "pass",
+    "raise NotImplementedError",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "name": "rhoai-v3-5-ea-2-stage-ocp-419-abcd",
+    "namespace": "rhoai-tenant",
+    "creationTimestamp": "2026-06-30T12:00:00Z",
+    "labels": {
+      "appstudio.openshift.io/application": "rhoai-v3-5-ea-2"
+    }
+  },
+  "spec": {
+    "snapshot": "rhoai-v3-5-ea-2-snap-abcd",
+    "releasePlan": "rhoai-v3-5-ea-2-stage-ocp-419"
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Released",
+        "status": "True",
+        "reason": "Succeeded",
+        "message": "Release was successful",
+        "lastTransitionTime": "2026-06-30T13:00:00Z"
+      }
+    ],
+    "completionTime": "2026-06-30T13:00:00Z",
+    "processing": {
+      "pipelineRun": "release-pipeline-abcd",
+      "roleBinding": "release-role-abcd"
+    },
+    "validation": {
+      "failedPostValidation": false
+    }
+  }
+}

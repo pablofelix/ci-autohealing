@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import UTC
 
 from clients.konflux_client import KonfluxClient
 from logger import setup_logger
@@ -193,8 +194,31 @@ class ConformaEvaluator:
                 saved += 1
         return saved
 
+    def is_stale(self, app_name=None, max_age_hours=8):
+        """Check if future-policy results are older than max_age_hours."""
+        app_name = app_name or self.config.k8s.application_name
+        ts = self.conforma_repo.get_latest_future_timestamp(app_name)
+        if ts is None:
+            return True
+        from datetime import datetime
+        age = datetime.now(UTC) - ts.replace(tzinfo=UTC)
+        return age.total_seconds() > max_age_hours * 3600
+
+    def _filter_changed(self, app_name, all_components):
+        """Return only components whose snapshot image differs from last evaluation."""
+        evaluated = self.conforma_repo.get_evaluated_images(app_name)
+        if not evaluated:
+            return all_components
+        changed = []
+        for c in all_components:
+            name = c['name']
+            image = c.get('containerImage', '')
+            if evaluated.get(name) != image:
+                changed.append(c)
+        return changed
+
     def run(self, app_name=None, policy_tier='future', workers=5,
-            component_filter=None):
+            component_filter=None, incremental=False):
         """Full pipeline: snapshot → evaluate → save.
 
         Returns dict with stats.
@@ -212,6 +236,16 @@ class ConformaEvaluator:
         if not all_components:
             logger.info("No components found in snapshot for {}".format(app_name))
             return {'evaluated': 0, 'failing': 0, 'violations': 0}
+
+        if incremental and not component_filter:
+            original_count = len(all_components)
+            all_components = self._filter_changed(app_name, all_components)
+            skipped = original_count - len(all_components)
+            if not all_components:
+                logger.info("All %d components up to date, skipping", original_count)
+                return {'evaluated': 0, 'failing': 0, 'violations': 0,
+                        'skipped': original_count, 'incremental': True}
+            logger.info("Incremental: %d changed, %d skipped", len(all_components), skipped)
 
         logger.info("Snapshot: {} ({} components)".format(snap_name, len(all_components)))
 

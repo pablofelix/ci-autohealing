@@ -41,7 +41,7 @@ ignore = [
 [lint.per-file-ignores]
 "src/clients/tekton_results.py" = ["E402"]
 "src/cli/*.py" = ["T20", "E402"]                 # CLI uses print() and has late imports
-"src/tests/**/*.py" = ["S101", "T20", "S106"]   # assert, print, hardcoded passwords OK in tests
+"src/tests/**/*.py" = ["S101", "T20", "S105", "S106", "S107"]  # assert, print, hardcoded passwords OK in tests
 "src/*.py" = ["T20"]                            # entry-point scripts use print()
 "scripts/*.py" = ["T20", "S"]                   # scripts have different security model
 

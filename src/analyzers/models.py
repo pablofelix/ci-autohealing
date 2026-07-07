@@ -481,6 +481,14 @@ class RegressionMetrics(BaseModel):
         default_factory=list,
         description="Specific suggestions to improve the analyzer"
     )
+    verifiable_count: int = Field(
+        default=0, ge=0,
+        description="Evaluations with ground truth (included in accuracy)"
+    )
+    unverifiable_count: int = Field(
+        default=0, ge=0,
+        description="Evaluations without ground truth (excluded from accuracy)"
+    )
 
 
 class ConfigFinding(BaseModel):

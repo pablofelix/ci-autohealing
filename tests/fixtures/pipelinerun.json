@@ -1,0 +1,42 @@
+{
+  "metadata": {
+    "name": "odh-model-controller-v3-5-on-push-build-abcd",
+    "namespace": "rhoai-tenant",
+    "creationTimestamp": "2026-06-30T10:00:00Z",
+    "labels": {
+      "appstudio.openshift.io/application": "rhoai-v3-5-ea-2",
+      "appstudio.openshift.io/component": "odh-model-controller-v3-5",
+      "pipelines.appstudio.openshift.io/type": "build",
+      "pipelinesascode.tekton.dev/event-type": "push"
+    },
+    "annotations": {
+      "chains.tekton.dev/signed": "true",
+      "pipelinesascode.tekton.dev/sha": "abc123def456"
+    }
+  },
+  "spec": {
+    "pipelineRef": {
+      "name": "docker-build-oci-ta"
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Succeeded",
+        "status": "True",
+        "reason": "Succeeded",
+        "message": "Tasks Completed: 10 (Skipped: 0), Incomplete: 0",
+        "lastTransitionTime": "2026-06-30T10:15:00Z"
+      }
+    ],
+    "startTime": "2026-06-30T10:00:00Z",
+    "completionTime": "2026-06-30T10:15:00Z",
+    "results": [
+      {"name": "IMAGE_URL", "value": "quay.io/redhat-user-workloads/rhoai-tenant/rhoai-v3-5-ea-2/odh-model-controller-v3-5"},
+      {"name": "IMAGE_DIGEST", "value": "sha256:abcdef1234567890"}
+    ],
+    "childReferences": [
+      {"name": "build-container-task-abcd", "kind": "TaskRun", "pipelineTaskName": "build-container"}
+    ]
+  }
+}

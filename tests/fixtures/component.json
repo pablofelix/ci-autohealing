@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "name": "odh-model-controller-v3-5",
+    "namespace": "rhoai-tenant",
+    "creationTimestamp": "2026-05-01T10:00:00Z",
+    "labels": {
+      "appstudio.openshift.io/application": "rhoai-v3-5-ea-2"
+    },
+    "annotations": {
+      "build.appstudio.openshift.io/pipeline": "{\"name\": \"docker-build-oci-ta\", \"bundle\": \"quay.io/konflux-ci/tekton-catalog/pipeline-docker-build-oci-ta:latest\"}"
+    }
+  },
+  "spec": {
+    "componentName": "odh-model-controller-v3-5",
+    "application": "rhoai-v3-5-ea-2",
+    "source": {
+      "git": {
+        "url": "https://github.com/opendatahub-io/odh-model-controller",
+        "revision": "rhoai-v3.5",
+        "context": "."
+      }
+    },
+    "containerImage": "quay.io/redhat-user-workloads/rhoai-tenant/rhoai-v3-5-ea-2/odh-model-controller-v3-5"
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "Updated",
+        "status": "True"
+      }
+    ]
+  }
+}

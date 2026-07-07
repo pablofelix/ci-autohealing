@@ -223,6 +223,30 @@ class ConformaRepository:
             result = dict(zip(cols, row))
             return resolve_blob_fields(result, fields=('violation_details',))
 
+    def get_evaluated_images(self, application):
+        """Return {component_name: container_image} for future-policy evaluations."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT ON (component_name)
+                    component_name, container_image
+                FROM conforma_results
+                WHERE application = %s AND is_future = TRUE
+                ORDER BY component_name, last_updated_at DESC
+            """, (application,))
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def get_latest_future_timestamp(self, application):
+        """Return the most recent last_updated_at for future evaluations, or None."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MAX(last_updated_at) FROM conforma_results
+                WHERE application = %s AND is_future = TRUE
+            """, (application,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+
     def resolve_fixed_components(self, application, currently_failing, all_seen):
         """Mark (component, scenario) pairs as resolved when we observe them passing.
 
