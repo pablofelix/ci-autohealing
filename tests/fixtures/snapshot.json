@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "name": "rhoai-v3-5-ea-2-snap-abcd",
+    "namespace": "rhoai-tenant",
+    "creationTimestamp": "2026-06-30T11:00:00Z",
+    "labels": {
+      "appstudio.openshift.io/application": "rhoai-v3-5-ea-2"
+    }
+  },
+  "spec": {
+    "application": "rhoai-v3-5-ea-2",
+    "components": [
+      {
+        "name": "odh-model-controller-v3-5",
+        "containerImage": "quay.io/redhat-user-workloads/rhoai-tenant/rhoai-v3-5-ea-2/odh-model-controller-v3-5@sha256:abc123"
+      },
+      {
+        "name": "odh-dashboard-v3-5",
+        "containerImage": "quay.io/redhat-user-workloads/rhoai-tenant/rhoai-v3-5-ea-2/odh-dashboard-v3-5@sha256:def456"
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "type": "AppStudioTestSucceeded",
+        "status": "True",
+        "reason": "Passed",
+        "message": "All integration tests passed"
+      }
+    ]
+  }
+}

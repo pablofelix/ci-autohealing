@@ -80,6 +80,15 @@ def _build_pipeline(config):
         'check_conforma', step_check_conforma, collect_interval))
     pipeline.add_step(PipelineStep(
         'collect_conforma', step_collect_conforma, collect_interval))
+
+    def step_evaluate_future():
+        from collectors.conforma_evaluator import ConformaEvaluator
+        evaluator = ConformaEvaluator(config)
+        return evaluator.run(policy_tier='future', workers=15, incremental=True)
+
+    evaluate_interval = int(os.environ.get('WORKER_EVALUATE_INTERVAL', '7200'))
+    pipeline.add_step(PipelineStep(
+        'evaluate_future', step_evaluate_future, evaluate_interval))
     pipeline.add_step(PipelineStep(
         'enrich_context', step_enrich_context, collect_interval,
         requires_env=['GITHUB_TOKEN']))

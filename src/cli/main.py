@@ -410,6 +410,26 @@ def get_conforma(ctx, filter, output_json, app_name, stage, nightly, policy_filt
                 print('  {}'.format(comp))
         elif isinstance(data, list):
             _print_conforma_table(data, effective_app, policy_filter)
+        if policy_filter in ('future', 'all') and has_db:
+            try:
+                from config import CollectorConfig
+                from repositories import ConformaRepository, DatabaseConnection
+                db = DatabaseConnection(CollectorConfig.from_env().db)
+                ts = ConformaRepository(db).get_latest_future_timestamp(effective_app)
+                if ts:
+                    from datetime import UTC, datetime
+                    age_h = (datetime.now(UTC) - ts.replace(
+                        tzinfo=UTC)).total_seconds() / 3600
+                    if age_h > 8:
+                        from cli.formatting import yellow
+                        print(yellow("  ⚠ Future policy results are {:.0f}h old. "
+                                     "Run: ic conforma evaluate --auto".format(age_h)))
+                elif policy_filter == 'future':
+                    from cli.formatting import yellow
+                    print(yellow("  ⚠ No future policy results. "
+                                 "Run: ic conforma evaluate --auto"))
+            except Exception:
+                pass
         print()
         return
     args = ['get', 'conforma']
@@ -689,7 +709,10 @@ def get_apps(ctx, output_json):
     if ensure_cluster():
         app_list = get_applications()
         apps = [a.get('name', a.get('application', '')) for a in app_list]
-        app_counts = {a.get('name', a.get('application', '')): a.get('failure_count', a.get('count', 0)) for a in app_list}
+        app_counts = {
+            a.get('name', a.get('application', '')): a.get('failure_count', a.get('count', 0))
+            for a in app_list
+        }
     else:
         from cli.db import get_repo
         from repositories.build_failure_repository import BuildFailureRepository
@@ -1473,12 +1496,23 @@ def config(ctx):
 @click.option('--force', '-f', is_flag=True, help='Set even if not in DB')
 def config_set_app(app_name, force):
     """Set active application."""
-    from cli.db import check_db, get_repo
+    from cli.db import check_db
     from cli.formatting import cyan, green, red
-    if check_db():
-        from repositories.build_failure_repository import BuildFailureRepository
-        s = get_repo(BuildFailureRepository).get_overview_stats(app_name)
-        if s['total'] == 0 and not force:
+    if check_db() and not force:
+        from cli.db import _get_db_connection
+        with _get_db_connection().connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1 FROM build_failures WHERE application = %s
+                    UNION ALL
+                    SELECT 1 FROM conforma_results WHERE application = %s
+                    UNION ALL
+                    SELECT 1 FROM sync_status WHERE application = %s
+                )
+            """, (app_name, app_name, app_name))
+            exists = cursor.fetchone()[0]
+        if not exists:
             print(red("Error: Application '{}' not found in database".format(app_name)))
             print()
             _bash_fallback(['get', 'apps'])
@@ -3818,7 +3852,8 @@ def dashboard():
     print(bold('Pattern Library'))
     pl = pattern_repo.get_library_summary()
     print('  Patterns: {} total ({} with confidence data)'.format(pl['total'], pl['with_confidence']))
-    print('  Avg confidence: {}  Total occurrences: {}'.format(cyan('{}%'.format(pl['avg_confidence'])), pl['total_occurrences']))
+    print('  Avg confidence: {}  Total occurrences: {}'.format(
+        cyan('{}%'.format(pl['avg_confidence'])), pl['total_occurrences']))
     print()
 
     print(bold('Fix Outcomes (last 30 days)'))
@@ -3830,7 +3865,8 @@ def dashboard():
 
     print(bold('API Costs (last 30 days)'))
     cs = ai_repo.get_cost_summary()
-    print('  Analyses: {}  Tokens: {}  Cost: {}'.format(cs['analyses'], cs['tokens'], cyan('${}'.format(cs['cost_usd']))))
+    print('  Analyses: {}  Tokens: {}  Cost: {}'.format(
+        cs['analyses'], cs['tokens'], cyan('${}'.format(cs['cost_usd']))))
     print()
 
 
@@ -4187,26 +4223,31 @@ def conforma_scenarios(args):
 @click.option('--policy', 'policy_tier', default='future',
               type=click.Choice(['future', 'stage', 'prod']),
               help='Policy tier to evaluate against (default: future)')
-@click.option('--workers', default=5, type=int,
-              help='Parallel workers for ec validate (default: 5)')
+@click.option('--workers', default=15, type=int,
+              help='Parallel workers for ec validate (default: 15)')
 @click.option('--component', 'component_filter', default=None,
               help='Evaluate only components matching this substring')
 @click.option('--app', 'app_name', default=None,
               help='Application to evaluate (default: current)')
-def conforma_evaluate(policy_tier, workers, component_filter, app_name):
+@click.option('--incremental', is_flag=True,
+              help='Only evaluate components whose image changed since last run')
+@click.option('--auto', 'auto_mode', is_flag=True,
+              help='Auto: full if stale (>8h), incremental otherwise')
+def conforma_evaluate(policy_tier, workers, component_filter, app_name,
+                      incremental, auto_mode):
     """Evaluate snapshot images against EC policy locally.
 
     Runs `ec validate` against the latest snapshot using the specified policy
     tier (future/stage/prod). Results are saved to the DB with is_future=True
     and can be viewed with `ic get conforma --all`.
 
-    This replicates the conforma-reporter view but from cluster data directly.
-
     Examples:
-        ic conforma evaluate                      # future policy (default)
+        ic conforma evaluate                      # future policy, all components
+        ic conforma evaluate --auto               # full if stale, incremental if fresh
+        ic conforma evaluate --incremental        # only changed components
         ic conforma evaluate --policy stage        # stage policy
         ic conforma evaluate --component fbc       # filter components
-        ic conforma evaluate --workers 10          # more parallelism
+        ic conforma evaluate --workers 20          # more parallelism
     """
     from cli.db import require_db
     if not require_db():
@@ -4223,14 +4264,28 @@ def conforma_evaluate(policy_tier, workers, component_filter, app_name):
 
     evaluator = ConformaEvaluator(config)
     effective_app = app_name or cfg.APPLICATION_NAME
+
+    use_incremental = incremental
+    if auto_mode:
+        stale = evaluator.is_stale(effective_app)
+        if stale:
+            click.echo('Results are stale (>8h), running full evaluation...')
+            use_incremental = False
+        else:
+            click.echo('Results are fresh, running incremental...')
+            use_incremental = True
+
     result = evaluator.run(
         app_name=effective_app,
         policy_tier=policy_tier,
         workers=workers,
         component_filter=component_filter,
+        incremental=use_incremental,
     )
 
-    if result['evaluated'] == 0:
+    if result.get('incremental') and result['evaluated'] == 0:
+        click.echo('All components up to date.')
+    elif result['evaluated'] == 0:
         sys.exit(1)
 
 
@@ -4548,7 +4603,8 @@ def health(ctx):
                     score = str(s['health_score']) if s['health_score'] is not None else 'N/A'
                     status = s.get('health_status') or 'unknown'
                     fails = str(s.get('consecutive_failures') or 0)
-                    rate = '{:.0f}%'.format(s['success_rate_last_7d']) if s.get('success_rate_last_7d') is not None else 'N/A'
+                    sr = s.get('success_rate_last_7d')
+                    rate = '{:.0f}%'.format(sr) if sr is not None else 'N/A'
                     print(fmt.format(s['component_name'][:55], score, status, fails, rate))
             else:
                 print('  All components healthy.')

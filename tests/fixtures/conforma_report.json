@@ -1,0 +1,22 @@
+{
+  "component": "odh-model-controller-v3-5",
+  "policy": "registry-rhoai-stage",
+  "violations": [
+    {
+      "rule": "cve_results_found.cve_results_found",
+      "msg": "Found 3 CVEs with severity >= moderate",
+      "severity": "violation",
+      "solution": "Address CVEs in base image or add exception"
+    },
+    {
+      "rule": "not_useful.rpms_signature_check",
+      "msg": "RPM signature check not applicable for this image",
+      "severity": "warning",
+      "solution": "No action needed — warning only"
+    }
+  ],
+  "violation_count": 1,
+  "warning_count": 1,
+  "timestamp": "2026-06-30T10:00:00Z",
+  "snapshot": "rhoai-v3-5-ea-2-snap-abcd"
+}

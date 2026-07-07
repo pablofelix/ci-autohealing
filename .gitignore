@@ -45,6 +45,12 @@ data/
 test-output/
 coverage/
 .pytest_cache/
+.test-results/
+.coverage
+htmlcov/
+
+# Commit attestation log (local only)
+.commit-attestations/
 
 # Agent outputs (Claude Code temporary files)
 .claude/

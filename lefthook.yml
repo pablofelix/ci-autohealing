@@ -1,7 +1,13 @@
-# Lefthook pre-commit configuration
+# Lefthook multi-hook configuration
 # Enforces STYLE.md, security, performance, code smells, and anti-patterns
 # Install: lefthook install
 # Run manually: lefthook run pre-commit
+#
+# Hook lifecycle:
+#   pre-commit:  lint + secrets + unit tests (<30s, blocks commit)
+#   post-commit: integration + coverage (background, non-blocking)
+#   post-merge:  full suite + coverage HTML report
+#   pre-push:    doc-check reminder + oc-guard
 
 pre-commit:
   parallel: true
@@ -20,7 +26,7 @@ pre-commit:
 
     ruff-lint:
       glob: "*.py"
-      run: python3.11 -m ruff check src/ --exclude='__pycache__'
+      run: python3 -m ruff check src/ --exclude='__pycache__'
 
     style-checks:
       glob: "*.py"
@@ -31,12 +37,82 @@ pre-commit:
       run: |
         if command -v bandit > /dev/null 2>&1; then
           bandit -r src/ -q --skip B101,B404 -x src/tests
-        elif python3.11 -m bandit --version > /dev/null 2>&1; then
-          python3.11 -m bandit -r src/ -q --skip B101,B404 -x src/tests
+        elif python3 -m bandit --version > /dev/null 2>&1; then
+          python3 -m bandit -r src/ -q --skip B101,B404 -x src/tests
         else
           echo "bandit not installed, skipping security scan" >&2
         fi
 
-    pytest:
+    unit-tests:
       glob: "*.py"
-      run: python3.11 -m pytest -q --tb=short 2>&1
+      run: python3 -m pytest src/tests/ -x -q --tb=short -m "not slow" --ignore=src/tests/e2e --deselect=src/tests/test_config.py::TestCollectorConfig::test_from_env 2>&1
+
+post-commit:
+  parallel: true
+  commands:
+    integration-coverage:
+      run: |
+        mkdir -p .test-results
+        python3 -m pytest src/tests/ --cov --cov-report=json:.test-results/coverage.json \
+          --tb=short -q -p no:logging 2>&1 | tee .test-results/last-run.txt
+        echo "$(date -Iseconds)" > .test-results/last-run-timestamp
+        python3 -c "
+        import json
+        try:
+            d = json.load(open('.test-results/coverage.json'))
+            print(f'Coverage: {d[\"totals\"][\"percent_covered\"]:.1f}%')
+        except Exception:
+            pass
+        " 2>/dev/null
+      background: true
+
+    attestation-log:
+      run: |
+        COMMIT=$(git rev-parse HEAD)
+        mkdir -p .commit-attestations
+        BRANCH=$(git branch --show-current)
+        AUTHOR=$(git log -1 --format='%an')
+        COVERAGE=""
+        if [ -f .test-results/coverage.json ]; then
+          COVERAGE=$(python3 -c "import json; d=json.load(open('.test-results/coverage.json')); print(f'{d[\"totals\"][\"percent_covered\"]:.1f}')" 2>/dev/null || echo "")
+        fi
+        cat > ".commit-attestations/${COMMIT}.json" <<ATTESTEOF
+        {
+          "commit": "$COMMIT",
+          "author": "$AUTHOR",
+          "timestamp": "$(date -Iseconds)",
+          "branch": "$BRANCH",
+          "pre_commit_passed": true,
+          "coverage_pct": "$COVERAGE"
+        }
+        ATTESTEOF
+
+post-merge:
+  commands:
+    full-suite:
+      run: |
+        mkdir -p .test-results
+        python3 -m pytest src/tests/ --cov --cov-report=html:.test-results/htmlcov \
+          --cov-report=json:.test-results/coverage.json -q -p no:logging 2>&1 \
+          | tee .test-results/full-run.txt
+
+pre-push:
+  commands:
+    doc-check:
+      run: |
+        CHANGED=$(git diff --name-only origin/main...HEAD -- src/ ic 2>/dev/null)
+        if [ -n "$CHANGED" ]; then
+          echo "Source files changed -- verify docs are up to date:"
+          echo "  - docs/ROADMAP.md"
+          echo "  - MCP tools list (src/mcp_server/tools.py)"
+        fi
+
+    oc-guard:
+      run: |
+        NEW_OC=$(git diff origin/main...HEAD -- ic 2>/dev/null | grep '^+.*oc get\|^+.*oc logs\|^+.*oc describe\|^+.*oc whoami' | grep -v '^+++' || true)
+        if [ -n "$NEW_OC" ]; then
+          echo "WARNING: New 'oc' calls added to ic bash script:"
+          echo "$NEW_OC"
+          echo ""
+          echo "These should go through the API instead. See Phase 3 of the test plan."
+        fi

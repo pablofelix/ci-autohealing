@@ -2,6 +2,16 @@
 
 Uses resolved build failures as ground truth to measure analyzer accuracy,
 identify coverage gaps by task name, and suggest improvements.
+
+Ground truth is inferred from two independent sources (neither comes from
+the AI analysis being evaluated):
+  1. failed_task_name — the Tekton task that failed (strong signal, but
+     NULL in ~99% of records)
+  2. error_message — the raw build error text (weaker but available for
+     most builds)
+
+Evaluations without any ground truth are excluded from the accuracy
+metric and reported separately as 'unverifiable'.
 """
 
 import re
@@ -38,6 +48,67 @@ EXPECTED_CATEGORIES = {
     'init': 'config_error',
 }
 
+ERROR_PATTERNS = [
+    (re.compile(
+        r'read-only|registry.*denied|System is currently read-only',
+        re.I,
+    ), 'infrastructure'),
+    (re.compile(
+        r'serviceaccount.*not found|failed to create task run pod.*serviceaccount',
+        re.I,
+    ), 'infrastructure'),
+    (re.compile(
+        r'fatal: not a git repository',
+        re.I,
+    ), 'infrastructure'),
+    (re.compile(
+        r'No package matches|Could not depsolve|Unable to find a match'
+        r'|No match for argument',
+        re.I,
+    ), 'dependency_issue'),
+    (re.compile(
+        r'pip install.*error|uv pip install|Could not find.*version'
+        r'|Preparing metadata.*error',
+        re.I,
+    ), 'dependency_issue'),
+    (re.compile(
+        r'hermeto.*error|prefetch.*fail|cachi2.*error',
+        re.I,
+    ), 'dependency_issue'),
+    (re.compile(r'timed out|Build timed out|PipelineRunTimeout', re.I), 'resource_limit'),
+    (re.compile(
+        r'step-create-sbom.*exited with code|mobster.*error',
+        re.I,
+    ), 'infrastructure'),
+    (re.compile(
+        r'Status code: 404.*repo|repository.*404|repo.*not found',
+        re.I,
+    ), 'build_error'),
+    (re.compile(
+        r'command not found|not found in.*PATH|uv.*not found',
+        re.I,
+    ), 'build_error'),
+    (re.compile(
+        r'step-push.*exited with code|push.*denied|upload.*error'
+        r'|Uploading.*error',
+        re.I,
+    ), 'infrastructure'),
+    (re.compile(
+        r'fips.*check.*fail|fips.*exited with code',
+        re.I,
+    ), 'test_failure'),
+    (re.compile(
+        r'"step-build" exited with code',
+        re.I,
+    ), 'build_error'),
+]
+
+COMPATIBLE_CATEGORIES = {
+    'dependency_issue': {'dependency_issue', 'build_error'},
+    'build_error': {'build_error', 'dependency_issue'},
+    'infrastructure': {'infrastructure', 'build_error'},
+}
+
 FAST_RESOLUTION_HOURS = 48
 
 
@@ -64,17 +135,48 @@ class BuildRegressionTester:
                 return group
         return 'other'
 
+    @staticmethod
+    def _infer_from_error(error_message):
+        """Infer expected categories from build error text.
+
+        Returns a set of acceptable categories, or empty set if no pattern
+        matches.  Multiple patterns may fire on the same error message
+        (e.g. a dependency download failure also looks like a build error),
+        so all matching categories are returned.
+        """
+        if not error_message:
+            return set()
+        cats = set()
+        for pattern, category in ERROR_PATTERNS:
+            if pattern.search(error_message):
+                cats.add(category)
+        return cats
+
     def evaluate_accuracy(self, resolved_failures):
         evaluations = []
         for f in resolved_failures:
             task_group = self._infer_task_group(f.get('failed_task_name', ''))
             expected_cat = EXPECTED_CATEGORIES.get(task_group)
             actual_cat = f.get('failure_category', '')
+            ground_truth_source = 'task_name' if expected_cat else None
+            acceptable_cats = {expected_cat} if expected_cat else set()
 
-            category_correct = (
-                actual_cat == expected_cat if expected_cat
-                else actual_cat not in ('config_error', 'infrastructure')
-            )
+            if not expected_cat:
+                error_cats = self._infer_from_error(f.get('error_message', ''))
+                if error_cats:
+                    acceptable_cats = set(error_cats)
+                    for ec in error_cats:
+                        acceptable_cats.update(
+                            COMPATIBLE_CATEGORIES.get(ec, set())
+                        )
+                    expected_cat = sorted(error_cats)[0]
+                    ground_truth_source = 'error_pattern'
+
+            verifiable = bool(acceptable_cats)
+            if verifiable:
+                category_correct = actual_cat in acceptable_cats
+            else:
+                category_correct = None
 
             hours_to_resolve = None
             if f.get('build_start_time') and f.get('resolved_at'):
@@ -99,6 +201,8 @@ class BuildRegressionTester:
                 'expected_category': expected_cat,
                 'actual_category': actual_cat,
                 'category_correct': category_correct,
+                'verifiable': verifiable,
+                'ground_truth_source': ground_truth_source,
                 'confidence': float(f.get('confidence_score', 0) or 0),
                 'can_auto_fix': f.get('can_auto_fix', False),
                 'was_quick_fix': was_quick_fix,
@@ -152,17 +256,19 @@ class BuildRegressionTester:
                 total_resolved=0, with_ai_analysis=0, ai_coverage_pct=0.0
             )
 
-        correct = sum(1 for e in evaluations if e['category_correct'])
-        accuracy = correct / total
+        verifiable = [e for e in evaluations if e['verifiable']]
+        unverifiable = [e for e in evaluations if not e['verifiable']]
+        correct = sum(1 for e in verifiable if e['category_correct'])
+        accuracy = correct / len(verifiable) if verifiable else 0
 
-        correct_confs = [e['confidence'] for e in evaluations if e['category_correct']]
-        incorrect_confs = [e['confidence'] for e in evaluations if not e['category_correct']]
+        correct_confs = [e['confidence'] for e in verifiable if e['category_correct']]
+        incorrect_confs = [e['confidence'] for e in verifiable if not e['category_correct']]
         avg_correct = sum(correct_confs) / len(correct_confs) if correct_confs else 0
         avg_incorrect = sum(incorrect_confs) / len(incorrect_confs) if incorrect_confs else 0
         calibration = min(1.0, max(0.0, avg_correct - avg_incorrect)) if incorrect_confs else avg_correct
 
         by_category = {}
-        for e in evaluations:
+        for e in verifiable:
             cat = e['actual_category']
             if cat not in by_category:
                 by_category[cat] = CategoryMetrics()
@@ -186,7 +292,9 @@ class BuildRegressionTester:
         total_with_ai = sum(g['with_ai'] for g in coverage_gaps)
         gap_groups = [g['task_name'] for g in coverage_gaps if g['coverage_pct'] < 5]
 
-        improvements = self._suggest_improvements(evaluations, coverage_gaps, by_category)
+        improvements = self._suggest_improvements(
+            verifiable, unverifiable, coverage_gaps, by_category,
+        )
 
         return RegressionMetrics(
             total_resolved=total_resolved_all,
@@ -198,10 +306,20 @@ class BuildRegressionTester:
             auto_fix_accuracy=round(auto_fix_accuracy, 2),
             coverage_gaps=gap_groups,
             improvements=improvements,
+            verifiable_count=len(verifiable),
+            unverifiable_count=len(unverifiable),
         )
 
-    def _suggest_improvements(self, evaluations, coverage_gaps, by_category):
+    def _suggest_improvements(self, verifiable, unverifiable, coverage_gaps, by_category):
         improvements = []
+
+        if unverifiable:
+            improvements.append(
+                '{} evaluations excluded (no ground truth) — populate '
+                'failed_task_name in build records to improve coverage'.format(
+                    len(unverifiable)
+                )
+            )
 
         for cat, m in sorted(by_category.items(), key=lambda x: x[1].avg_confidence):
             if m.avg_confidence < 0.70 and m.total >= 3:
@@ -222,8 +340,8 @@ class BuildRegressionTester:
                 '— many should be more specific'.format(catch_all_count)
             )
 
-        auto_fix_marked = sum(1 for e in evaluations if e.get('can_auto_fix'))
-        quick_fixes = sum(1 for e in evaluations if e.get('was_quick_fix'))
+        auto_fix_marked = sum(1 for e in verifiable if e.get('can_auto_fix'))
+        quick_fixes = sum(1 for e in verifiable if e.get('was_quick_fix'))
         if quick_fixes > auto_fix_marked * 2 and quick_fixes > 5:
             improvements.append(
                 'Auto-fix under-marked: {} failures resolved quickly but only {} marked '
@@ -260,11 +378,18 @@ class BuildRegressionTester:
 
         if verbose:
             for e in evaluations:
-                status = 'OK' if e['category_correct'] else 'WRONG'
+                if not e['verifiable']:
+                    status = 'SKIP'
+                elif e['category_correct']:
+                    status = 'OK'
+                else:
+                    status = 'WRONG'
+                src = e.get('ground_truth_source', '?')
                 logger.info(
-                    "  [%s] %s: %s (expected %s, got %s, conf %.2f)",
-                    status, e['component'], e['task_group'],
-                    e['expected_category'], e['actual_category'], e['confidence']
+                    "  [%s] %s: expected %s, got %s (conf %.2f, src=%s)",
+                    status, e['component'],
+                    e['expected_category'], e['actual_category'],
+                    e['confidence'], src,
                 )
 
         return {

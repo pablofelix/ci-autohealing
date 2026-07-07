@@ -114,6 +114,54 @@ class TestBuildRegressionTester(unittest.TestCase):
                           '{} pattern has no expected category'.format(group))
 
 
+class TestErrorPatternInference(unittest.TestCase):
+
+    def test_infer_registry_readonly(self):
+        cats = BuildRegressionTester._infer_from_error(
+            'Error: System is currently read-only'
+        )
+        self.assertIn('infrastructure', cats)
+
+    def test_infer_package_not_found(self):
+        cats = BuildRegressionTester._infer_from_error(
+            "error: No package matches 'openssl-libs-3.5.1'"
+        )
+        self.assertIn('dependency_issue', cats)
+
+    def test_infer_timeout(self):
+        cats = BuildRegressionTester._infer_from_error('Build timed out')
+        self.assertIn('resource_limit', cats)
+
+    def test_infer_no_match(self):
+        cats = BuildRegressionTester._infer_from_error(
+            'some random message with no patterns'
+        )
+        self.assertEqual(cats, set())
+
+    def test_infer_none_message(self):
+        cats = BuildRegressionTester._infer_from_error(None)
+        self.assertEqual(cats, set())
+
+    def test_unverifiable_excluded(self):
+        config = MagicMock()
+        tester = BuildRegressionTester(config, db=MagicMock(), ai_repo=MagicMock())
+        resolved = [_make_resolved(None, 'build_error', 0.85)]
+        resolved[0]['error_message'] = None
+        evals = tester.evaluate_accuracy(resolved)
+        self.assertFalse(evals[0]['verifiable'])
+        self.assertIsNone(evals[0]['category_correct'])
+
+    def test_error_pattern_verifiable(self):
+        config = MagicMock()
+        tester = BuildRegressionTester(config, db=MagicMock(), ai_repo=MagicMock())
+        resolved = [_make_resolved(None, 'infrastructure', 0.85)]
+        resolved[0]['error_message'] = 'System is currently read-only'
+        evals = tester.evaluate_accuracy(resolved)
+        self.assertTrue(evals[0]['verifiable'])
+        self.assertTrue(evals[0]['category_correct'])
+        self.assertEqual(evals[0]['ground_truth_source'], 'error_pattern')
+
+
 class TestBuildRegressionSuggestions(unittest.TestCase):
 
     def setUp(self):
@@ -125,7 +173,7 @@ class TestBuildRegressionSuggestions(unittest.TestCase):
     def test_suggests_low_confidence(self):
         from analyzers.models import CategoryMetrics
         by_cat = {'build_error': CategoryMetrics(total=5, correct=5, avg_confidence=0.55)}
-        improvements = self.tester._suggest_improvements([], [], by_cat)
+        improvements = self.tester._suggest_improvements([], [], [], by_cat)
         self.assertTrue(any('Low confidence' in i for i in improvements))
 
     def test_suggests_catch_all(self):
@@ -134,7 +182,7 @@ class TestBuildRegressionSuggestions(unittest.TestCase):
             'config_error': CategoryMetrics(total=4),
             'infrastructure': CategoryMetrics(total=3),
         }
-        improvements = self.tester._suggest_improvements([], [], by_cat)
+        improvements = self.tester._suggest_improvements([], [], [], by_cat)
         self.assertTrue(any('catch-all' in i for i in improvements))
 
 
