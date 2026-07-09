@@ -381,14 +381,14 @@ Use the most specific category that matches the violation:
 - `policy_snyk_error` — for test.no_erred_tests when sast-snyk-check errored
 - `policy_labels` — for labels.required_labels, image_labels violations
 - `policy_fips_check` — for FIPS-related rules (fips.fbc_fips_check)
-- `config_error` — for non-standard builds (helm charts missing compliance artifacts)
-- `infrastructure` — only when the violation is clearly caused by transient infra issues
+- `config_error` — ONLY for Helm chart or non-container OCI artifacts where multiple unrelated rules fail simultaneously (sbom.found + labels.required_labels + slsa_source_correlated + cve.cve_results_found) because the build pipeline is not a standard container build. Do NOT use config_error if the violated rule maps to a specific policy category above.
+- `infrastructure` — only when the violation is clearly caused by transient infra issues (timeout, cluster outage, registry unavailable)
 
-Avoid using `infrastructure` or `config_error` as catch-alls. If the violated rule maps to a specific policy category above, use that category.
+CRITICAL: `config_error` and `infrastructure` are NOT catch-all categories. If you are uncertain, pick the most specific policy category matching the primary violated rule. Using config_error when a specific category applies is a diagnostic failure.
 
-### Differential Diagnosis (REQUIRED)
+### Differential Diagnosis (REQUIRED — system rejects analysis if missing)
 
-Generate 2-3 competing hypotheses before selecting your primary diagnosis.
+You MUST generate 2-3 competing hypotheses before selecting your primary diagnosis. The differential_diagnosis field is mandatory and validated — analysis will be rejected if fewer than 2 hypotheses are provided. The first hypothesis must match your primary failure_category.
 
 **Evidence Hierarchy:**
 - Tier 1: EC policy YAML violation output, step-detailed-report lines, Conforma Rule Catalog matches with RHOAI-specific fix
@@ -408,16 +408,18 @@ Before recommending a fix, check context for signs it's already applied:
 
 ### Auto-fix Assessment
 
-Mark `can_auto_fix: false` for almost all Conforma violations because:
-- Most require policy exception approval (human decision)
-- Some require legal agreements or architecture changes
-- Even mechanical fixes (update task digest) need testing
+Mark `can_auto_fix: true` for violations that can be resolved by a deterministic, zero-risk action:
+- Rebuild: rpm version mismatch (policy_rpm_repository with unique_version), outdated version labels (policy_version_label), stale source_image, stale SLSA provenance
+- Digest pinning: policy_unpinned_task — deterministic quay.io API lookup
+- Digest refresh: policy_untrusted_image — re-resolve stale digests via quay.io API
+- Mechanical config add: missing vendor label (policy_sbom_vendor_label), hermetic: true toggle
+- Deprecated task update: policy_deprecated_task — update task bundle to latest version
 
-Only mark `can_auto_fix: true` for:
-- Rebuild-only fixes (version mismatch, outdated labels)
-- Simple config changes with zero risk (hermetic: true, vendor label addition)
-- Digest pinning (policy_unpinned_task — deterministic quay.io API lookup)
-- Digest refresh (policy_untrusted_image — re-resolves old digests to current via quay.io API)
+Mark `can_auto_fix: false` for:
+- Policy exceptions (require ProdSec approval)
+- Legal agreements (package source from unapproved vendor, signing key)
+- Pipeline architecture changes (source image generation, SBOM tooling, chart builds)
+- Anything requiring testing or human judgment
 
 ### When to Suggest Policy Exception
 
@@ -563,3 +565,22 @@ Like an academic paper, your analysis must declare its sources and limitations. 
 - "If the pipeline has a parent PipelineRun that sets hermetic=true, this violation may be a false positive"
 - "Cannot verify whether an exception was recently submitted but not yet merged"
 - "Violation count suggests multi-arch build (4x same violation) but cannot confirm architecture list"
+
+## Component Type Awareness
+
+Components have different compliance expectations based on their type:
+
+**Helm Charts** (component name matches `rhai-on-*-chart`):
+- Charts are OCI artifacts, NOT container images — they fail many container-oriented policies
+- Multiple simultaneous violations (sbom.found + labels.required_labels + cve.cve_results_found + slsa_source_correlated) are expected for charts
+- Use `config_error` category for chart-specific pipeline gaps — this is the correct diagnosis
+- Fixes involve chart-specific pipeline templates, not standard container build changes
+
+**FBC Fragments** (component name matches `*-fbc-fragment`):
+- FIPS check (`fips.fbc_fips_check`) only runs on nightly builds, NOT on CI push builds
+- A FIPS violation on a push build is noise — note this and recommend checking the nightly build instead
+- FBC pruning check failures require investigation of fbc-target-index-pruning-check task logs
+
+**Standard Components** (everything else):
+- Follow the standard analysis guidelines above
+- Never use config_error for a standard component if the violated rule maps to a specific policy category

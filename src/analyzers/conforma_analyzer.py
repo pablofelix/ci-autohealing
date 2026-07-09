@@ -113,6 +113,7 @@ CONFORMA_ANALYSIS_TOOL = {
             },
             'differential_diagnosis': {
                 'type': 'array',
+                'minItems': 2,
                 'items': {
                     'type': 'object',
                     'properties': {
@@ -124,7 +125,7 @@ CONFORMA_ANALYSIS_TOOL = {
                     },
                     'required': ['hypothesis', 'category', 'confidence']
                 },
-                'description': '2-3 competing hypotheses ranked by evidence strength. First = primary diagnosis.'
+                'description': 'REQUIRED: 2-3 competing hypotheses ranked by evidence strength. First = primary diagnosis.'
             },
         },
         'required': [
@@ -132,7 +133,8 @@ CONFORMA_ANALYSIS_TOOL = {
             'failure_category',
             'confidence_score',
             'recommended_fix',
-            'can_auto_fix'
+            'can_auto_fix',
+            'differential_diagnosis'
         ]
     }
 }
@@ -225,7 +227,7 @@ class ConformaAnalyzer:
 
         # Targeted knowledge graph context (fails silently if Neo4j unavailable)
         try:
-            from utils.graph_context import conforma_context
+            from knowledge.graph_context import conforma_context
             graph_section = conforma_context(violation)
         except Exception:
             graph_section = ""
@@ -337,7 +339,7 @@ Use these URLs in evidence_references when relevant:
 
     def _get_doc_refs(self, violation):
         """Generate policy URL references for the LLM context."""
-        from utils.conforma_utils import (
+        from conforma.policy_tools import (
             extract_policy_from_scenario,
             extract_violation_rules,
             policy_url_with_line,
@@ -540,7 +542,7 @@ Use these URLs in evidence_references when relevant:
     def _get_rule_catalog_context(self, violation):
         """Look up violated rules in the conforma_rule_catalog for rich context."""
         try:
-            from utils.conforma_utils import extract_violation_rules
+            from conforma.policy_tools import extract_violation_rules
             summary = violation.get('violation_summary', '') or ''
             rules = extract_violation_rules(summary)
             if not rules:
@@ -707,6 +709,113 @@ Use these URLs in evidence_references when relevant:
                 'requires_human_review': True,
             }
 
+    RULE_TO_CATEGORY = {
+        'hermetic_task': 'policy_hermetic_build',
+        'trusted_task': 'policy_untrusted_image',
+        'attestation_task_bundle': 'policy_untrusted_image',
+        'source_image': 'policy_source_image',
+        'fips': 'policy_fips_check',
+        'deprecated': 'policy_deprecated_task',
+        'deprecated_image': 'policy_deprecated_image',
+        'snyk': 'policy_snyk_error',
+        'rpm_packages': 'policy_rpm_repository',
+        'rpm_repos': 'policy_rpm_repository',
+        'slsa_source': 'policy_slsa_provenance',
+        'slsa_build': 'policy_slsa_provenance',
+    }
+
+    def _validate_category(self, analysis, violation):
+        """Validate category against violation rules — correct catch-all misuse.
+
+        If the LLM chose config_error or infrastructure but the violated rules
+        clearly map to a specific policy category, override the category for
+        non-chart components. Charts legitimately use config_error.
+        """
+        category = analysis.get('failure_category', '')
+        if category not in ('config_error', 'infrastructure'):
+            return analysis
+
+        from conforma.policy_tools import (
+            detect_component_policy_type,
+            extract_violation_rules,
+        )
+
+        component = violation.get('component_name', '')
+        comp_type = detect_component_policy_type(component)
+
+        if comp_type == 'chart' and category == 'config_error':
+            return analysis
+
+        summary = violation.get('violation_summary', '') or ''
+        rules = extract_violation_rules(summary)
+        if not rules:
+            return analysis
+
+        category_votes = {}
+        for rule in rules:
+            for pattern, cat in self.RULE_TO_CATEGORY.items():
+                if pattern in rule:
+                    category_votes[cat] = category_votes.get(cat, 0) + 1
+
+        if not category_votes:
+            return analysis
+
+        best_cat = max(category_votes, key=category_votes.get)
+        total_rules = len(rules)
+        vote_ratio = category_votes[best_cat] / total_rules
+
+        if vote_ratio >= 0.5:
+            logger.warning(
+                "Category corrected: %s -> %s for %s (%.0f%% rule match)",
+                category, best_cat, component, vote_ratio * 100,
+            )
+            analysis['failure_category'] = best_cat
+            analysis['root_cause'] = (
+                '[Category auto-corrected from {}] '.format(category)
+                + analysis.get('root_cause', '')
+            )
+
+        return analysis
+
+    def _validate_differential(self, analysis):
+        """Penalize confidence when differential diagnosis is missing."""
+        dd = analysis.get('differential_diagnosis')
+        if not dd or (isinstance(dd, list) and len(dd) < 2):
+            penalty = 0.10
+            old_conf = analysis.get('confidence_score', 0.5)
+            analysis['confidence_score'] = round(max(0.0, old_conf - penalty), 2)
+            logger.info(
+                "Confidence reduced %.2f -> %.2f (missing differential diagnosis)",
+                old_conf, analysis['confidence_score'],
+            )
+        return analysis
+
+    def _inject_component_type_context(self, system_prompt, violation):
+        """Append component-type guidance so the LLM knows what it's analyzing."""
+        from conforma.policy_tools import detect_component_policy_type
+
+        comp = violation.get('component_name', '')
+        comp_type = detect_component_policy_type(comp)
+
+        if comp_type == 'chart':
+            return system_prompt + (
+                '\n\n## ACTIVE CONTEXT: This is a HELM CHART component.\n'
+                'Helm charts are OCI artifacts, not container images. '
+                'Multiple simultaneous violations (sbom + labels + slsa + cve) '
+                'are expected. Use config_error category for chart pipeline gaps. '
+                'Do NOT attempt to map individual violations to container-oriented '
+                'policy categories.'
+            )
+        elif comp_type == 'fbc':
+            return system_prompt + (
+                '\n\n## ACTIVE CONTEXT: This is an FBC FRAGMENT component.\n'
+                'FIPS check only runs on nightly builds. If this is a push build '
+                'with a fips violation, it is expected noise — note this in your '
+                'analysis. For FBC pruning check failures, investigate the '
+                'fbc-target-index-pruning-check task logs.'
+            )
+        return system_prompt
+
     def _annotate_fix_status(self, analysis, violation):
         """Append fix-status notes when violation context shows a fix may already exist."""
         notes = []
@@ -736,6 +845,7 @@ Use these URLs in evidence_references when relevant:
             Exception: If LLM call or parsing fails
         """
         system_prompt, user_prompt = self.build_analysis_prompt(violation)
+        system_prompt = self._inject_component_type_context(system_prompt, violation)
 
         # Create Langfuse trace
         trace = self.langfuse.create_trace(
@@ -772,8 +882,10 @@ Use these URLs in evidence_references when relevant:
             duration_ms=int(duration * 1000),
         )
 
-        # Parse response
+        # Parse response and validate
         analysis = self.parse_analysis_response(response)
+        analysis = self._validate_category(analysis, violation)
+        analysis = self._validate_differential(analysis)
         analysis = self._annotate_fix_status(analysis, violation)
 
         # Estimate cost (same as build failures)
