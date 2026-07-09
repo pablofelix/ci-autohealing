@@ -416,11 +416,14 @@ def fetch_exceptions_by_policy(namespace=None):
             exceptions = client.extract_exceptions(policy)
             if exceptions:
                 result[policy_name] = exceptions
-        if result:
+        if len(result) >= 5:
             _exceptions_cache['data'] = result
             _exceptions_cache['ts'] = now
             _write_file_cache(result)
             return result
+        if result:
+            logger.debug("Cluster returned only %d policies — supplementing with GitLab",
+                         len(result))
     except Exception as e:
         logger.debug("Cannot fetch EC policy exceptions from cluster: %s", e)
 
