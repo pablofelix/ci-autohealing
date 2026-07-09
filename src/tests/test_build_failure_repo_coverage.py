@@ -636,22 +636,29 @@ class TestGetResolvedStats:
 
 class TestGetTriageSummary:
     def test_returns_full_summary(self, repo_and_mocks):
+        from datetime import datetime
         repo, _, _, cursor = repo_and_mocks
         # First query: overview stats
         cursor.fetchone.return_value = (100, 5, 80)
-        # Second query: failing components
+        # Second query: failing components (9 cols: component, first_detected_at,
+        # last_updated_at, error_type, jira_key, failure_count, has_logs, has_context,
+        # ai_analyzed)
         cursor.fetchall.return_value = [
-            ('comp-a', date(2024, 6, 1), True, False),
-            ('comp-b', date(2024, 5, 30), False, True),
+            ('comp-a', datetime(2024, 6, 1), datetime(2024, 6, 2), 'build_error', None, 3, True, False, True),
+            ('comp-b', datetime(2024, 5, 30), datetime(2024, 5, 31), None, 'RHOAI-1', 1, False, True, False),
         ]
         result = repo.get_triage_summary('app1')
         assert result['total'] == 100
         assert result['failing'] == 5
         assert result['working'] == 80
         assert len(result['failing_components']) == 2
-        assert result['failing_components'][0]['component'] == 'comp-a'
-        assert result['failing_components'][0]['has_logs'] is True
-        assert result['failing_components'][1]['has_context'] is True
+        fc = result['failing_components']
+        assert fc[0]['component'] == 'comp-a'
+        assert fc[0]['error_type'] == 'build_error'
+        assert fc[0]['has_logs'] is True
+        assert fc[0]['failure_count'] == 3
+        assert fc[1]['has_context'] is True
+        assert fc[1]['jira_key'] == 'RHOAI-1'
 
     def test_no_failing_components(self, repo_and_mocks):
         repo, _, _, cursor = repo_and_mocks

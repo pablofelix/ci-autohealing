@@ -430,18 +430,32 @@ class BuildFailureRepository:
             cursor.execute("""
                 WITH latest_builds AS (
                     SELECT DISTINCT ON (component_name)
-                        component_name, first_detected_at,
+                        component_name, first_detected_at, last_updated_at,
+                        error_type, jira_key,
+                        COUNT(*) OVER (PARTITION BY component_name) as failure_count,
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
-                        (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context
+                        (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context,
+                        (ai_analysis_id IS NOT NULL) as ai_analyzed
                     FROM build_failures
                     WHERE application = %s AND status = 'Failed' AND is_resolved = FALSE
                     ORDER BY component_name, first_detected_at DESC
                 )
-                SELECT component_name, first_detected_at::date, has_logs, has_context
+                SELECT component_name, first_detected_at, last_updated_at,
+                       error_type, jira_key, failure_count, has_logs, has_context, ai_analyzed
                 FROM latest_builds ORDER BY first_detected_at DESC
             """, (application,))
             summary['failing_components'] = [
-                {'component': r[0], 'last_failure': r[1], 'has_logs': r[2], 'has_context': r[3]}
+                {
+                    'component': r[0],
+                    'first_detected_at': r[1],
+                    'last_updated_at': r[2],
+                    'error_type': r[3],
+                    'jira_key': r[4],
+                    'failure_count': r[5],
+                    'has_logs': r[6],
+                    'has_context': r[7],
+                    'ai_analyzed': r[8],
+                }
                 for r in cursor.fetchall()
             ]
             return summary
