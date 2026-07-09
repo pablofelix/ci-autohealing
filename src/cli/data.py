@@ -220,6 +220,30 @@ def get_alerts(application=None):
 
     apply_policy_correction(conforma_violations, exceptions_by_policy)
 
+    from datetime import date as _date
+    schedule = None
+    try:
+        with build_repo.db.connection() as _conn:
+            _cur = _conn.cursor()
+            _cur.execute(
+                "SELECT planning_freeze, feature_freeze, code_freeze, initial_rc, "
+                "release_window_start, release_date, next_release "
+                "FROM release_schedule WHERE application = %s",
+                (app,)
+            )
+            _row = _cur.fetchone()
+        if _row:
+            _fields = ['planning_freeze', 'feature_freeze', 'code_freeze',
+                       'initial_rc', 'release_window_start', 'release_date']
+            schedule = {'application': app}
+            for _i, _f in enumerate(_fields):
+                schedule[_f] = str(_row[_i]) if _row[_i] else None
+                if _row[_i] and hasattr(_row[_i], 'year'):
+                    schedule[f'{_f}_days'] = (_row[_i] - _date.today()).days
+            schedule['next_release'] = _row[6] if _row[6] else None
+    except Exception:
+        pass
+
     now = datetime.utcnow().isoformat()
     return {
         'build_failures': build_failures,
@@ -227,6 +251,7 @@ def get_alerts(application=None):
         'nightly_warnings': [],
         'total_count': len(build_failures) + len(conforma_violations),
         'last_sync': now,
+        'release_schedule': schedule,
     }
 
 
