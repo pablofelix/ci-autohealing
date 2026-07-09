@@ -609,7 +609,7 @@ class BuildFailureAnalyzer:
 
     def _filter_error_lines(self, logs, context_lines=20):
         """Keep only lines matching error keywords plus surrounding context."""
-        from utils.log_filter import filter_error_lines
+        from log_filter import filter_error_lines
         result = filter_error_lines(logs, context_lines)
         return result if result != logs else None
 
@@ -710,7 +710,7 @@ class BuildFailureAnalyzer:
 
         # Targeted knowledge graph context (fails silently if Neo4j unavailable)
         try:
-            from utils.graph_context import build_context
+            from knowledge.graph_context import build_context
             graph_section = build_context(failure)
         except Exception:
             graph_section = ""

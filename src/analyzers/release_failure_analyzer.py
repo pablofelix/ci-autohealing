@@ -1235,7 +1235,7 @@ class ReleaseFailureAnalyzer:
 
         # Targeted knowledge graph context (fails silently if Neo4j unavailable)
         try:
-            from utils.graph_context import release_context
+            from knowledge.graph_context import release_context
             graph_section = release_context(context)
             if graph_section:
                 sections.append(graph_section)
