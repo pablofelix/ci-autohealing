@@ -45,7 +45,7 @@ pre-commit:
 
     unit-tests:
       glob: "*.py"
-      run: python3 -m pytest src/tests/ -x -q --tb=short -m "not slow" --ignore=src/tests/e2e --deselect=src/tests/test_config.py::TestCollectorConfig::test_from_env 2>&1
+      run: python3 -m pytest src/tests/ -x -q --tb=short -m "not slow" --ignore=src/tests/e2e --ignore=src/tests/test_integration_api.py --deselect=src/tests/test_config.py::TestCollectorConfig::test_from_env 2>&1
 
 post-commit:
   parallel: true

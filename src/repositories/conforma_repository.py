@@ -47,12 +47,17 @@ class ConformaRepository:
             return set()
 
     def upsert_violation(self, application, component, scenario,
-                         pr_name, pr_uid, violations, comp_info, is_future=False):
+                         pr_name, pr_uid, violations, comp_info,
+                         is_future=False, trigger_type='push'):
         """Insert or update a Conforma violation. Returns True on success.
 
         Args:
             is_future: True if scenario uses future EC policy (informational),
                       False if current policy (gate-blocking)
+            trigger_type: 'push' | 'scheduled' | 'other'. 'scheduled' means the
+                nightly pipeline ran (includes FIPS check for FBC). Derived from
+                the Snapshot's ``pac.test.appstudio.openshift.io/original-prname``
+                label at collection time.
         """
         try:
             violation_details_json = json.dumps(violations.get('violation_details')) \
@@ -117,14 +122,28 @@ class ConformaRepository:
                     prev = cursor.fetchone()
                     prev_jira_key = prev[0] if prev else None
 
+                    # Resolve previous results — but preserve scheduled (nightly) results
+                    # when a lower-priority push result arrives. The scheduled result
+                    # is authoritative for FIPS and release-readiness; a subsequent push
+                    # build should not erase it.
+                    #
+                    # Resolution rules:
+                    #   incoming=scheduled → resolve ALL (scheduled supersedes everything)
+                    #   incoming=push/other → resolve only push/other rows, keep scheduled
+                    if trigger_type == 'scheduled':
+                        resolve_clause = 'AND is_resolved = FALSE'
+                        resolve_params = (component, application, scenario)
+                    else:
+                        resolve_clause = "AND is_resolved = FALSE AND trigger_type != 'scheduled'"
+                        resolve_params = (component, application, scenario)
                     cursor.execute(
                         """
                         UPDATE conforma_results
                         SET is_resolved = TRUE, resolved_at = NOW(), last_updated_at = NOW()
                         WHERE component_name = %s AND application = %s AND scenario = %s
-                          AND is_resolved = FALSE
-                        """,
-                        (component, application, scenario)
+                        {}
+                        """.format(resolve_clause),
+                        resolve_params
                     )
 
                     cursor.execute(
@@ -135,8 +154,8 @@ class ConformaRepository:
                             status, violations_count, warnings_count, successes_count,
                             violation_summary, violation_details,
                             snapshot_name, container_image, repository_url, commit_sha, commit_url,
-                            jira_key, is_future, blob_refs
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            jira_key, is_future, trigger_type, blob_refs
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (application, component, scenario,
                          pr_name, pr_uid, 'Failed',
@@ -146,7 +165,7 @@ class ConformaRepository:
                          comp_info.get('snapshot_name'), comp_info.get('container_image'),
                          comp_info.get('repository_url'), comp_info.get('commit_sha'),
                          comp_info.get('commit_url'),
-                         prev_jira_key, is_future, json.dumps(blob_refs))
+                         prev_jira_key, is_future, trigger_type, json.dumps(blob_refs))
                     )
                     return True
         except Exception:
@@ -173,6 +192,10 @@ class ConformaRepository:
                 future_clause = ' AND is_future = FALSE'
             elif include_future is True:
                 future_clause = ' AND is_future = TRUE'
+            # ORDER BY puts scheduled results first (CASE 0), then most recent.
+            # DISTINCT ON (component_name, scenario) picks the first per pair —
+            # so if a component+scenario has both scheduled and push rows, we get
+            # the scheduled one. Within the same trigger_type, most recent wins.
             cursor.execute("""
                 SELECT DISTINCT ON (component_name, scenario)
                     component_name, scenario,
@@ -180,10 +203,12 @@ class ConformaRepository:
                     violation_summary,
                     repository_url, commit_sha,
                     first_detected_at, last_updated_at,
-                    ai_analyzed, jira_key, is_future
+                    ai_analyzed, jira_key, is_future, trigger_type
                 FROM conforma_results
                 WHERE application = %s AND is_resolved = FALSE{}
-                ORDER BY component_name, scenario, last_updated_at DESC
+                ORDER BY component_name, scenario,
+                    CASE trigger_type WHEN 'scheduled' THEN 0 ELSE 1 END ASC,
+                    last_updated_at DESC
             """.format(future_clause), (application,))
             cols = [
                 'component_name', 'scenario',
@@ -191,28 +216,30 @@ class ConformaRepository:
                 'violation_summary',
                 'repository_url', 'commit_sha',
                 'first_detected_at', 'last_updated_at',
-                'ai_analyzed', 'jira_key', 'is_future',
+                'ai_analyzed', 'jira_key', 'is_future', 'trigger_type',
             ]
             rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-        # Deduplicate: when a component has both a correct-policy and a wrong-policy
-        # scenario for the same policy context (same is_future value), keep only the
-        # correct one. Key on (component_name, is_future) so that current-policy and
-        # future-policy rows for the same component are preserved as separate entries
-        # when include_future='all' is used.
+        # Deduplicate: when a component has multiple scenarios, keep the best
+        # per (component_name, is_future) key. Preference order:
+        #   1. correct policy + scheduled  (nightly, FIPS runs)
+        #   2. correct policy + push
+        #   3. wrong policy (triage noise — kept only if nothing better exists)
+        # The SQL already surfaced scheduled rows first, so a scheduled+correct
+        # row will beat push+correct when iterating in arrival order.
+        _priority = {'scheduled': 2, 'push': 1, 'other': 0}
+
+        def _row_score(row):
+            wrong = is_wrong_policy_for_artifact(row['component_name'], row['scenario'])
+            trigger = _priority.get(row.get('trigger_type', 'push'), 1)
+            return (0 if wrong else 1, trigger)
+
         seen: dict = {}
         for row in rows:
             comp = row['component_name']
             is_fut = row.get('is_future', False)
             key = (comp, is_fut)
-            wrong = is_wrong_policy_for_artifact(comp, row['scenario'])
-            if key not in seen:
-                seen[key] = row
-            elif wrong:
-                # Incoming row is wrong-policy; prefer what is already stored
-                pass
-            else:
-                # Incoming row is correct-policy; replace the stored wrong-policy one
+            if key not in seen or _row_score(row) > _row_score(seen[key]):
                 seen[key] = row
         return list(seen.values())
 
@@ -261,12 +288,14 @@ class ConformaRepository:
                     repository_url, commit_sha, commit_url,
                     snapshot_name, pipelinerun_name,
                     first_detected_at, last_updated_at,
-                    ai_analyzed, jira_key, blob_refs
+                    ai_analyzed, jira_key, blob_refs, trigger_type
                 FROM conforma_results
                 WHERE component_name = %s
                   AND application = %s
                   AND is_resolved = FALSE
-                ORDER BY last_updated_at DESC
+                ORDER BY
+                    CASE trigger_type WHEN 'scheduled' THEN 0 ELSE 1 END ASC,
+                    last_updated_at DESC
                 LIMIT 10
             """, (component, application))
             cols = [
@@ -276,12 +305,18 @@ class ConformaRepository:
                 'repository_url', 'commit_sha', 'commit_url',
                 'snapshot_name', 'pipelinerun_name',
                 'first_detected_at', 'last_updated_at',
-                'ai_analyzed', 'jira_key', 'blob_refs',
+                'ai_analyzed', 'jira_key', 'blob_refs', 'trigger_type',
             ]
             rows = cursor.fetchall()
             if not rows:
                 return None
-            # Prefer correct-policy row; fall back to most recent if all are wrong-policy
+            # Preference order (applied in priority sequence, first match wins):
+            #   1. scheduled + correct policy  → nightly with FIPS, the authoritative result
+            #   2. push + correct policy        → push build, still relevant
+            #   3. scheduled + wrong policy     → nightly but wrong ITS (very unlikely)
+            #   4. push + wrong policy          → push with wrong ITS (triage noise)
+            # The SQL ORDER BY puts 'scheduled' first, so the loop picks the best
+            # correct-policy row across all trigger types.
             preferred = None
             for row in rows:
                 result = dict(zip(cols, row))

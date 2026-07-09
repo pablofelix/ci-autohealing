@@ -476,7 +476,7 @@ class TestSaveToDb:
             component="comp-a", scenario="conforma-stage",
             pr_name="pr-1", pr_uid="uid-1",
             violations={"violations_count": 3}, comp_info={"image": "img"},
-            is_future=False
+            is_future=False, trigger_type='push'
         )
 
     def test_future_scenario(self, collector):

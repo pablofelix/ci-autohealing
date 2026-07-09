@@ -208,20 +208,47 @@ class ConformaViolationCollector:
         repo_url_fallback = self.get_component_repo_url(component_name)
         return extract_conforma_component_info(pr_data, component_name, repo_url_fallback)
 
-    def save_to_db(self, component, scenario, pr_name, pr_uid, violations, comp_info):
-        """Save violation to DB. Detects future scenarios by -future suffix."""
+    def _resolve_trigger_type(self, snapshot_name):
+        """Look up the Snapshot CR to determine whether this build was scheduled.
+
+        Reads the ``pac.test.appstudio.openshift.io/original-prname`` label:
+          - ends with ``-on-schedule`` → 'scheduled' (nightly; FIPS runs)
+          - ends with ``-on-push``     → 'push'
+          - unreachable / unknown      → 'push'  (safe default)
+
+        One Kubernetes API call per new conforma result — only happens at
+        collection time, not on every display.
+        """
+        if not snapshot_name:
+            return 'push'
         try:
-            # Detect if this is a future-policy scenario (informational, non-blocking)
+            snapshot = self.k8s.get_snapshot(snapshot_name)
+            trigger_type = self.k8s.extract_trigger_type(snapshot)
+            logger.debug("Snapshot %s → trigger_type=%s", snapshot_name, trigger_type)
+            return trigger_type
+        except Exception as exc:
+            logger.debug("Could not resolve trigger_type for %s: %s", snapshot_name, exc)
+            return 'push'
+
+    def save_to_db(self, component, scenario, pr_name, pr_uid, violations, comp_info):
+        """Save violation to DB. Detects future scenarios and scheduled builds."""
+        try:
             is_future = '-future' in scenario
             if is_future:
                 logger.info("Future scenario detected (informational, non-blocking)")
+
+            snapshot_name = comp_info.get('snapshot_name', '')
+            trigger_type = self._resolve_trigger_type(snapshot_name)
+            if trigger_type == 'scheduled':
+                logger.info("Scheduled (nightly) build detected — FIPS check runs")
 
             result = self.conforma_repo.upsert_violation(
                 application=self.config.k8s.application_name,
                 component=component, scenario=scenario,
                 pr_name=pr_name, pr_uid=pr_uid,
                 violations=violations, comp_info=comp_info,
-                is_future=is_future
+                is_future=is_future,
+                trigger_type=trigger_type,
             )
             if result:
                 logger.info("Saved to DB")

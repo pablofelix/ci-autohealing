@@ -536,9 +536,10 @@ class TestApplyPolicyCorrection:
             'filtered_violations': 0, 'details': [],
         }
 
-    def test_removes_noise_violation(self):
+    def test_marks_noise_violation_as_wrong_policy(self):
         """Chart component evaluated against registry-rhoai-prod: all rules are
-        permanently excluded in the correct chart policy -> remove entirely."""
+        permanently excluded in the correct chart policy -> marked as wrong policy,
+        NOT removed (kept visible in alerts with warning indicator)."""
         violations = [{
             'component_name': 'rhai-on-openshift-chart-v3-5',
             'scenario': 'conforma-registry-rhoai-prod-v3-5-single-component',
@@ -549,9 +550,10 @@ class TestApplyPolicyCorrection:
             'registry-rhoai-chart-prod': [_make_exception('cve', permanent=True)],
         }
         result = apply_policy_correction(violations, exc_by_policy)
-        assert result['removed'] == 1
+        assert result['removed'] == 0
         assert result['corrected'] == 1
-        assert len(violations) == 0  # removed in-place
+        assert len(violations) == 1  # still in list — marked, not removed
+        assert violations[0].get('is_wrong_policy') is True
 
     def test_partial_filter(self):
         """Some rules are noise, some are real -> partial filter."""
