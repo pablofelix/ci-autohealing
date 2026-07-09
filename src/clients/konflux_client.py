@@ -24,6 +24,19 @@ ITS_API_GROUP = 'apis/appstudio.redhat.com/v1beta2'
 
 GITLAB_EC_BASE = os.environ.get('GITLAB_EC_POLICY_URL', '')
 
+# ── Snapshot trigger-type detection ──────────────────────────────────────────
+# Pipelines-as-Code labels that identify the pipeline template a build used.
+# Update here if Konflux changes the label name or pipeline-name conventions.
+#
+# The label value is the PipelineRun template name, e.g.:
+#   rhoai-fbc-fragment-v3-5-on-schedule  → scheduled (nightly, FIPS runs)
+#   rhoai-fbc-fragment-v3-5-on-push      → push (no FIPS)
+#
+# See: docs/adr/007-its-scoping-false-positives.md
+_PAC_ORIGINAL_PRNAME_LABEL = 'pac.test.appstudio.openshift.io/original-prname'
+_SCHEDULE_SUFFIX = '-on-schedule'
+_PUSH_SUFFIX = '-on-push'
+
 
 class KonfluxClient:
     """Read-only client for Konflux CRDs via the K8s REST API."""
@@ -175,6 +188,58 @@ class KonfluxClient:
             'is_optional': is_optional,
             'contexts': context_names,
         }
+
+    def get_snapshot(self, snapshot_name, namespace=None):
+        """Fetch a single Snapshot CR by name.
+
+        Returns the raw snapshot dict, or None if not found / unreachable.
+        Used by the conforma collector to determine trigger_type at ingest time.
+        """
+        try:
+            data = self._get(
+                'snapshots/{}'.format(snapshot_name),
+                namespace=namespace or self.namespace,
+            )
+            return data if data and 'metadata' in data else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def extract_trigger_type(snapshot):
+        """Determine the build trigger type from a Snapshot CR.
+
+        Reads the Pipelines-as-Code ``original-prname`` label, which records
+        which pipeline template fired the build:
+          - ``*-on-schedule`` → 'scheduled'  (nightly; FIPS check runs)
+          - ``*-on-push``     → 'push'        (regular commit; FIPS skipped)
+          - anything else     → 'other'
+
+        For FBC fragment components, IC prefers 'scheduled' conforma results
+        when displaying violations, because only the scheduled pipeline runs the
+        FIPS check — the release-authoritative result.
+
+        >>> KonfluxClient.extract_trigger_type({'metadata': {'labels': {
+        ...     'pac.test.appstudio.openshift.io/original-prname':
+        ...         'rhoai-fbc-fragment-v3-5-on-schedule'}}})
+        'scheduled'
+        >>> KonfluxClient.extract_trigger_type({'metadata': {'labels': {
+        ...     'pac.test.appstudio.openshift.io/original-prname':
+        ...         'rhoai-fbc-fragment-v3-5-on-push'}}})
+        'push'
+        >>> KonfluxClient.extract_trigger_type({})
+        'push'
+        """
+        if not snapshot:
+            return 'push'
+        labels = snapshot.get('metadata', {}).get('labels', {})
+        original_prname = labels.get(_PAC_ORIGINAL_PRNAME_LABEL, '')
+        if original_prname.endswith(_SCHEDULE_SUFFIX):
+            return 'scheduled'
+        if original_prname.endswith(_PUSH_SUFFIX):
+            return 'push'
+        # Unknown suffix — fall back to 'push' so we never incorrectly prefer
+        # an unrecognised trigger over a known-good scheduled result.
+        return 'other' if original_prname else 'push'
 
     def get_snapshots(self, app_filter=None, limit=5):
         params = {}

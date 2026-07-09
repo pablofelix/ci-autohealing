@@ -254,6 +254,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
         if len(policies_seen) > 1:
             policy_note = '  ({} policies)'.format(len(policies_seen))
         print(bold('Conforma Failures ({})'.format(len(conforma))) + policy_note + ':')
+        wrong_policy_shown = []
         if conforma:
             print('  {:<4} {:<45} {:>6} {:>6} {:>12}  {}'.format(
                 '#', 'Component', 'Viol', 'Warn', 'Since', 'JIRA'))
@@ -261,13 +262,19 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                 '---', '-' * 45, '------', '------', '-' * 12, '--------'))
             for i, v in enumerate(conforma, 1):
                 comp = v.get('component', '?')
+                is_wrong = v.get('is_wrong_policy', False)
                 if len(comp) > 45:
                     comp = comp[:42] + '...'
                 viol = v.get('violations_count', 0) or 0
                 warn = v.get('warnings_count', 0) or 0
                 first = _format_since(v.get('first_seen', ''))
                 jira = v.get('jira_key') or '-'
-                viol_color = red if viol > 0 else green
+                if is_wrong:
+                    viol_color = yellow
+                    comp = '⚠ ' + comp
+                    wrong_policy_shown.append(v)
+                else:
+                    viol_color = red if viol > 0 else green
                 policy = extract_policy_from_scenario(v.get('scenario', ''))
                 policy_tag = ' [{}]'.format(dim(policy)) if policy and len(policies_seen) > 1 else ''
                 env_tag = v.get('exception_env_tag')
@@ -301,6 +308,14 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                         print('       {} {}'.format(red('↳ missing(P):'), ', '.join(only_p)))
         else:
             print('  {} No conforma violations'.format(green('✓')))
+
+        if wrong_policy_shown:
+            print()
+            print(yellow('  ⚠  {} component(s) above evaluated against wrong ITS policy:'.format(
+                len(wrong_policy_shown))))
+            print(dim('     FBC fragments and Helm chart OCI artifacts are also evaluated against'))
+            print(dim('     the generic registry-rhoai-prod ITS (Konflux limitation: no exclusions).'))
+            print(dim('     These violations are informational only — they do NOT block release.'))
         print()
 
         if nightlies:
@@ -507,6 +522,7 @@ def _print_conforma_table(data, app_name, policy_filter):
             cov_counts['not_covered'] += 1
 
         policy_type = 'future' if is_future else 'current'
+        trigger_type = v.get('trigger_type', 'push')
 
         total_violations += viol
         total_unique += unique
@@ -514,7 +530,7 @@ def _print_conforma_table(data, app_name, policy_filter):
             'comp': display_comp, 'full_comp': comp, 'viol': viol, 'unique': unique,
             'warn': warn, 'ok': ok, 'policy': policy, 'type': policy_type,
             'exc': exc_label, 'since': since, 'jira': jira or '-',
-            'wrong_policy': wrong_policy,
+            'wrong_policy': wrong_policy, 'trigger_type': trigger_type,
         })
 
     rows.sort(key=lambda r: -r['viol'])
@@ -535,6 +551,8 @@ def _print_conforma_table(data, app_name, policy_filter):
         if r['wrong_policy']:
             comp_display = '⚠ ' + comp_display
             wrong_policy_rows.append(r)
+        elif r['trigger_type'] == 'scheduled':
+            comp_display = '🌙 ' + comp_display
         if len(comp_display) > 50:
             comp_display = comp_display[:47] + '...'
         viol_color = yellow if r['wrong_policy'] else (red if r['viol'] > 0 else green)

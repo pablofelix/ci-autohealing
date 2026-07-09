@@ -840,16 +840,17 @@ def apply_policy_correction(violations, exceptions_by_policy):
         real_rules = rules - noise_rules
 
         if not real_rules and rules:
-            to_remove.append(v)
             viol_count = v.get('violations_count', 0) or 0
             filtered_total += viol_count
             corrected += 1
+            v['is_wrong_policy'] = True
+            v['correct_policy_prefix'] = exp_prefix
             details.append({
                 'component': comp,
                 'actual_policy': actual_policy,
                 'correct_policy': exp_prefix + '-prod',
                 'noise_violations': viol_count,
-                'action': 'removed',
+                'action': 'marked',
             })
         elif noise_rules:
             _, all_unique = count_unique_violations(summary)
@@ -871,12 +872,9 @@ def apply_policy_correction(violations, exceptions_by_policy):
                     'action': 'filtered',
                 })
 
-    for v in to_remove:
-        violations.remove(v)
-
     return {
         'corrected': corrected,
-        'removed': len(to_remove),
+        'removed': 0,
         'filtered_violations': filtered_total,
         'details': details,
     }

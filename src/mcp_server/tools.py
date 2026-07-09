@@ -1558,6 +1558,7 @@ def get_conforma_report(
             details['policy_url'] = policy_url(scenario)
             details['category'] = categorize_policy(scenario)
             details['is_wrong_policy'] = is_wrong_policy_for_artifact(comp_name, scenario)
+            details['is_nightly'] = details.get('trigger_type') == 'scheduled'
             uv_count, uv_rules = count_unique_violations(
                 details.get('violation_summary', ''))
             details['unique_violations'] = uv_count
