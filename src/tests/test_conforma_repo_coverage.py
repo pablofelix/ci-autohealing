@@ -277,9 +277,26 @@ class TestGetViolationSummaries:
 
     def test_multiple_rows(self):
         repo, _, _, cursor = _make_repo()
-        cursor.fetchall.return_value = [self._sample_row(), self._sample_row()]
+        # Two rows with different component names -> both returned
+        row_b = list(self._sample_row())
+        row_b[0] = 'comp-b'
+        cursor.fetchall.return_value = [self._sample_row(), tuple(row_b)]
         result = repo.get_violation_summaries('app1')
         assert len(result) == 2
+
+    def test_deduplicates_wrong_policy_scenario(self):
+        # Same component with two scenarios: correct policy preferred over wrong policy
+        repo, _, _, cursor = _make_repo()
+        correct_row = list(self._sample_row())
+        correct_row[1] = 'conforma-fbc-rhoai-prod-v3-5-single-component'
+        correct_row[0] = 'rhoai-fbc-fragment-v3-5'
+        wrong_row = list(self._sample_row())
+        wrong_row[1] = 'conforma-registry-rhoai-prod-v3-5-single-component'
+        wrong_row[0] = 'rhoai-fbc-fragment-v3-5'
+        cursor.fetchall.return_value = [tuple(correct_row), tuple(wrong_row)]
+        result = repo.get_violation_summaries('app1')
+        assert len(result) == 1
+        assert result[0]['scenario'] == 'conforma-fbc-rhoai-prod-v3-5-single-component'
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -300,7 +317,7 @@ class TestGetViolationDetails:
     @patch('repositories.conforma_repository.resolve_blob_fields')
     def test_found(self, mock_resolve):
         repo, _, _, cursor = _make_repo()
-        cursor.fetchone.return_value = self._sample_row()
+        cursor.fetchall.return_value = [self._sample_row()]
         mock_resolve.side_effect = lambda row, **kw: row
         result = repo.get_violation_details('comp-a', 'app1')
         assert result is not None
@@ -308,9 +325,25 @@ class TestGetViolationDetails:
         assert result['pipelinerun_name'] == 'pr-1'
         mock_resolve.assert_called_once()
 
+    @patch('repositories.conforma_repository.resolve_blob_fields')
+    def test_prefers_correct_policy(self, mock_resolve):
+        # FBC with two scenarios: correct policy returned over wrong policy
+        repo, _, _, cursor = _make_repo()
+        wrong_row = list(self._sample_row())
+        wrong_row[0] = 'rhoai-fbc-fragment-v3-5'
+        wrong_row[1] = 'conforma-registry-rhoai-prod-v3-5-single-component'
+        correct_row = list(self._sample_row())
+        correct_row[0] = 'rhoai-fbc-fragment-v3-5'
+        correct_row[1] = 'conforma-fbc-rhoai-prod-v3-5-single-component'
+        # Wrong-policy row is more recent (first) — correct policy should still win
+        cursor.fetchall.return_value = [tuple(wrong_row), tuple(correct_row)]
+        mock_resolve.side_effect = lambda row, **kw: row
+        result = repo.get_violation_details('rhoai-fbc-fragment-v3-5', 'app1')
+        assert result['scenario'] == 'conforma-fbc-rhoai-prod-v3-5-single-component'
+
     def test_not_found(self):
         repo, _, _, cursor = _make_repo()
-        cursor.fetchone.return_value = None
+        cursor.fetchall.return_value = []
         result = repo.get_violation_details('missing', 'app1')
         assert result is None
 
@@ -319,7 +352,7 @@ class TestGetViolationDetails:
         repo, _, _, cursor = _make_repo()
         row = list(self._sample_row())
         row[-1] = '{"violation_details": "blob/key"}'  # blob_refs
-        cursor.fetchone.return_value = tuple(row)
+        cursor.fetchall.return_value = [tuple(row)]
         mock_resolve.side_effect = lambda row, **kw: row
         repo.get_violation_details('comp-a', 'app1')
         call_kwargs = mock_resolve.call_args

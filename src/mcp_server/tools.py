@@ -1541,6 +1541,7 @@ def get_conforma_report(
         enrich_with_coverage,
         extract_policy_from_scenario,
         fetch_exceptions_by_policy,
+        is_wrong_policy_for_artifact,
         policy_url,
     )
     conforma_repo = _conforma_repo()
@@ -1556,6 +1557,7 @@ def get_conforma_report(
             details['policy_name'] = extract_policy_from_scenario(scenario)
             details['policy_url'] = policy_url(scenario)
             details['category'] = categorize_policy(scenario)
+            details['is_wrong_policy'] = is_wrong_policy_for_artifact(comp_name, scenario)
             uv_count, uv_rules = count_unique_violations(
                 details.get('violation_summary', ''))
             details['unique_violations'] = uv_count
@@ -1573,6 +1575,7 @@ def get_conforma_report(
     enrich_with_coverage(violations, exceptions_by_policy)
     by_policy = {}
     coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
+    wrong_policy_components = []
     for v in violations:
         pn = v.get('policy_name', 'unknown')
         by_policy.setdefault(pn, 0)
@@ -1580,9 +1583,11 @@ def get_conforma_report(
         cov = v.get('exception_coverage')
         if cov in coverage_summary:
             coverage_summary[cov] += 1
+        if v.get('is_wrong_policy'):
+            wrong_policy_components.append(v.get('component_name', ''))
     for cat in ('FBC', 'Components', 'Charts'):
         groups.setdefault(cat, {'components': 0, 'unique_violations': 0})
-    return {
+    result = {
         'application': application,
         'total_violations': len(violations),
         'total_unique_violations': total_unique,
@@ -1591,6 +1596,17 @@ def get_conforma_report(
         'coverage_summary': coverage_summary if exceptions_by_policy else None,
         'violations': violations,
     }
+    if wrong_policy_components:
+        result['wrong_policy_note'] = (
+            '{} component(s) are false positives due to a Konflux ITS scoping limitation: '
+            'FBC fragments and Helm chart OCI artifacts are evaluated against the generic '
+            'registry-rhoai-prod policy (context: "component") in addition to their correct '
+            'component-specific ITS. The generic ITS is marked optional and does NOT block '
+            'releases. Affected: {}. '
+            'Fix: MR to releng/konflux-release-data tenants-config/ to scope the generic ITS, '
+            'or wait for Konflux NudgeConfig cross-app support before splitting Applications.'
+        ).format(len(wrong_policy_components), ', '.join(wrong_policy_components))
+    return result
 
 
 # ---------------------------------------------------------------------------

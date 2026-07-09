@@ -456,7 +456,11 @@ def _policy_filter_to_include_future(policy_filter):
 def _print_conforma_table(data, app_name, policy_filter):
     """Print conforma violations as a table with unique counts."""
     from cli.formatting import bold, dim, green, red, yellow
-    from conforma.policy_tools import extract_policy_from_scenario, strip_version_suffix
+    from conforma.policy_tools import (
+        extract_policy_from_scenario,
+        is_wrong_policy_for_artifact,
+        strip_version_suffix,
+    )
 
     cov_counts = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
 
@@ -473,6 +477,7 @@ def _print_conforma_table(data, app_name, policy_filter):
         scenario = v.get('scenario', v.get('error_type', ''))
         jira = v.get('jira_key', '')
         policy = extract_policy_from_scenario(scenario)
+        wrong_policy = is_wrong_policy_for_artifact(comp, scenario)
         is_future = v.get('is_future', False)
         first_seen = v.get('first_detected_at', v.get('first_seen', ''))
         since = _format_since(first_seen)
@@ -506,9 +511,10 @@ def _print_conforma_table(data, app_name, policy_filter):
         total_violations += viol
         total_unique += unique
         rows.append({
-            'comp': display_comp, 'viol': viol, 'unique': unique,
+            'comp': display_comp, 'full_comp': comp, 'viol': viol, 'unique': unique,
             'warn': warn, 'ok': ok, 'policy': policy, 'type': policy_type,
             'exc': exc_label, 'since': since, 'jira': jira or '-',
+            'wrong_policy': wrong_policy,
         })
 
     rows.sort(key=lambda r: -r['viol'])
@@ -523,11 +529,15 @@ def _print_conforma_table(data, app_name, policy_filter):
         '-' * 4, '-' * 50, '-' * 6, '-' * 8, '-' * 4, '-' * 4, '-' * 12, '-' * 7, '-' * 6)
     print(bold(hdr))
     print(dim(sep))
+    wrong_policy_rows = []
     for i, r in enumerate(rows, 1):
         comp_display = r['comp']
+        if r['wrong_policy']:
+            comp_display = '⚠ ' + comp_display
+            wrong_policy_rows.append(r)
         if len(comp_display) > 50:
             comp_display = comp_display[:47] + '...'
-        viol_color = red if r['viol'] > 0 else green
+        viol_color = yellow if r['wrong_policy'] else (red if r['viol'] > 0 else green)
         print(' {:<4} {:<50} {:>6} {:>8} {:>4} {:>4} {:<12} {:>7} {:>6}'.format(
             i, comp_display,
             viol_color(str(r['unique'])), r['viol'],
@@ -544,6 +554,19 @@ def _print_conforma_table(data, app_name, policy_filter):
             parts.append(red('{} uncovered'.format(cov_counts['not_covered'])))
         print()
         print('  Exception coverage: {}'.format(', '.join(parts)))
+
+    if wrong_policy_rows:
+        print()
+        print(yellow('  ⚠  Konflux ITS configuration note ({} component(s) above):'.format(
+            len(wrong_policy_rows))))
+        print(dim('     FBC fragments and Helm chart OCI artifacts are evaluated against'))
+        print(dim('     the generic registry-rhoai-prod ITS (context: "component") in addition'))
+        print(dim('     to their own component-specific ITS with the correct policy. This is a'))
+        print(dim('     Konflux platform limitation: the generic ITS has no exclusion mechanism.'))
+        print(dim('     Affected: ' + ', '.join(strip_version_suffix(r['full_comp']) for r in wrong_policy_rows)))
+        print(dim('     Status: optional ITS — violations do NOT block release.'))
+        print(dim('     Fix: MR to releng/konflux-release-data tenants-config/ (see NudgeConfig'))
+        print(dim('     cross-app roadmap before splitting into separate Applications).'))
 
 
 @get.command('exceptions')
