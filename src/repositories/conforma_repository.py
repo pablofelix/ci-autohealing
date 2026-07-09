@@ -203,7 +203,8 @@ class ConformaRepository:
                     violation_summary,
                     repository_url, commit_sha,
                     first_detected_at, last_updated_at,
-                    ai_analyzed, jira_key, is_future, trigger_type
+                    ai_analyzed, jira_key, is_future, trigger_type,
+                    pipelinerun_name
                 FROM conforma_results
                 WHERE application = %s AND is_resolved = FALSE{}
                 ORDER BY component_name, scenario,
@@ -217,6 +218,7 @@ class ConformaRepository:
                 'repository_url', 'commit_sha',
                 'first_detected_at', 'last_updated_at',
                 'ai_analyzed', 'jira_key', 'is_future', 'trigger_type',
+                'pipelinerun_name',
             ]
             rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
 

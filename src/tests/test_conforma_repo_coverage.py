@@ -243,7 +243,8 @@ class TestGetViolationSummaries:
         return (
             'comp-a', 'scenario-1', 3, 1, 5, 'summary',
             'https://repo', 'abc123',
-            '2026-01-01', '2026-01-02', True, 'JIRA-1', False,
+            '2026-01-01', '2026-01-02', True, 'JIRA-1', False, 'push',
+            'conforma-pr-abc',
         )
 
     def test_current_only_default(self):
