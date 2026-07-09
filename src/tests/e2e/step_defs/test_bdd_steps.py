@@ -180,9 +180,9 @@ def app_has_n_conforma_violations(app, count, context, mock_conforma_repo):
         violations.append({
             'component_name': f'component-{i}',
             'application': app,
-            'scenario': 'oci-trusted-task-v0.1-prod',
+            'scenario': f'conforma-registry-rhoai-prod-{app}-single-component',
             'violations_count': i+1,
-            'violation_summary': f'rule_{i}: {i+1}',
+            'violation_summary': f'✕ [Violation] rule_{i}\n  Reason: test violation {i+1}',
         })
 
     mock_conforma_repo.get_violation_summaries.return_value = violations

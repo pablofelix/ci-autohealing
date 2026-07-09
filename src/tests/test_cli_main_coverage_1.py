@@ -508,6 +508,44 @@ class TestGetConforma:
         args = mock_bash.call_args[0][0]
         assert '--future' in args
 
+    @patch('cli.data._triage_jira_map_safe', return_value={})
+    @patch('cli.mode.ensure_cluster', return_value=True)
+    @patch('cli.db.check_db', return_value=False)
+    @patch('cli.data.get_conforma_violations')
+    def test_positional_app_name(self, mock_violations, mock_db, mock_cluster, mock_jira, runner):
+        """Positional argument should be used as the application name."""
+        mock_violations.return_value = []
+        result = runner.invoke(cli, ['get', 'conforma', 'rhoai-v3-5-ea-2'])
+        assert result.exit_code == 0
+        mock_violations.assert_called_once()
+        assert mock_violations.call_args[1]['application'] == 'rhoai-v3-5-ea-2'
+
+    @patch('cli.data._triage_jira_map_safe', return_value={})
+    @patch('cli.mode.ensure_cluster', return_value=True)
+    @patch('cli.db.check_db', return_value=False)
+    @patch('cli.data.get_conforma_violations')
+    def test_app_flag_overrides_positional(self, mock_violations, mock_db, mock_cluster, mock_jira, runner):
+        """--app flag takes precedence over positional argument."""
+        mock_violations.return_value = []
+        result = runner.invoke(cli, ['get', 'conforma', 'rhoai-v3-5-ea-2', '--app', 'rhoai-v3-5'])
+        assert result.exit_code == 0
+        mock_violations.assert_called_once()
+        assert mock_violations.call_args[1]['application'] == 'rhoai-v3-5'
+
+    @patch('cli.data._triage_jira_map_safe', return_value={})
+    @patch('cli.mode.ensure_cluster', return_value=True)
+    @patch('cli.db.check_db', return_value=False)
+    @patch('cli.data.get_conforma_violations')
+    @patch('cli.main.cfg')
+    def test_no_args_uses_default(self, mock_cfg, mock_violations, mock_db, mock_cluster, mock_jira, runner):
+        """No positional arg or --app uses cfg.APPLICATION_NAME default."""
+        mock_cfg.APPLICATION_NAME = 'rhoai-v3-5'
+        mock_violations.return_value = []
+        result = runner.invoke(cli, ['get', 'conforma'])
+        assert result.exit_code == 0
+        mock_violations.assert_called_once()
+        assert mock_violations.call_args[1]['application'] == 'rhoai-v3-5'
+
 
 # ===================================================================
 # get releases

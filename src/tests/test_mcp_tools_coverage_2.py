@@ -1116,6 +1116,7 @@ class TestGetReleaseReadiness:
     def test_ready(self, mock_build, mock_conforma, mock_freeze, mock_schedule):
         mock_build.return_value.find_failing_component_names.return_value = set()
         mock_conforma.return_value.find_unresolved_component_names.return_value = []
+        mock_conforma.return_value.get_violation_summaries.return_value = []
         mock_freeze.__wrapped__ = MagicMock(return_value=None)
         mock_schedule.__wrapped__ = MagicMock(return_value=None)
 
@@ -1134,6 +1135,18 @@ class TestGetReleaseReadiness:
         mock_conforma.return_value.find_unresolved_component_names.return_value = [
             'comp-a', 'comp-b',
         ]
+        mock_conforma.return_value.get_violation_summaries.return_value = [
+            {
+                'component_name': 'comp-a',
+                'scenario': 'conforma-registry-rhoai-prod-app-single-component',
+                'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+            },
+            {
+                'component_name': 'comp-b',
+                'scenario': 'conforma-registry-rhoai-prod-app-single-component',
+                'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+            },
+        ]
         mock_freeze.__wrapped__ = MagicMock(return_value=None)
         mock_schedule.__wrapped__ = MagicMock(return_value=None)
 
@@ -1150,6 +1163,7 @@ class TestGetReleaseReadiness:
     def test_at_risk_build_failures(self, mock_build, mock_conforma, mock_freeze, mock_schedule):
         mock_build.return_value.find_failing_component_names.return_value = {'comp-x'}
         mock_conforma.return_value.find_unresolved_component_names.return_value = []
+        mock_conforma.return_value.get_violation_summaries.return_value = []
         mock_freeze.__wrapped__ = MagicMock(return_value=None)
         mock_schedule.__wrapped__ = MagicMock(return_value=None)
 
@@ -1165,6 +1179,7 @@ class TestGetReleaseReadiness:
     def test_frozen(self, mock_build, mock_conforma, mock_freeze, mock_schedule):
         mock_build.return_value.find_failing_component_names.return_value = set()
         mock_conforma.return_value.find_unresolved_component_names.return_value = []
+        mock_conforma.return_value.get_violation_summaries.return_value = []
         mock_freeze.__wrapped__ = MagicMock(return_value={
             'end_date': '2026-07-15', 'reason': 'RC freeze',
         })
