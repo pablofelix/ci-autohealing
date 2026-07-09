@@ -304,13 +304,31 @@ def get_readiness(
     unresolved_conforma = conforma_repo.find_unresolved_component_names(application)
     conforma_count = len(unresolved_conforma)
 
+    from conforma.policy_tools import (
+        compute_blocks,
+        compute_exception_coverage_details,
+        extract_violation_rules,
+        fetch_exceptions_by_policy,
+    )
+    summaries = conforma_repo.get_violation_summaries(application)
+    exceptions_by_policy = fetch_exceptions_by_policy()
+    blocking_components = set()
+    for s in summaries:
+        rules = extract_violation_rules(s.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, s.get('scenario', ''), exceptions_by_policy)
+        blocks = compute_blocks(s.get('scenario', ''), cov['stage'], cov['prod'])
+        if blocks not in ('none', ''):
+            blocking_components.add(s['component_name'])
+    blocking_count = len(blocking_components)
+
     freeze = get_active_freeze()
 
     blockers = []
     risks = []
 
-    if conforma_count > 0:
-        blockers.append('{} component(s) with unexcepted conforma violations'.format(conforma_count))
+    if blocking_count > 0:
+        blockers.append('{} component(s) with unexcepted conforma violations'.format(blocking_count))
     if freeze:
         blockers.append("Pipeline frozen until {} ({})".format(freeze['end_date'], freeze['reason']))
     if fail_count > 0:
@@ -337,8 +355,10 @@ def get_readiness(
         'verdict': verdict,
         'build_failures': fail_count,
         'conforma_violations': conforma_count,
+        'conforma_blockers': blocking_count,
         'failing_components': sorted(failing),
         'conforma_components': sorted(unresolved_conforma),
+        'conforma_blocking_components': sorted(blocking_components),
         'freeze': freeze,
         'blockers': blockers,
         'risks': risks,

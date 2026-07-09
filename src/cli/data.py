@@ -153,6 +153,7 @@ def get_alerts(application=None):
             'component': comp_name,
             'status': comp.get('status', 'Failed'),
             'error_type': comp.get('error_type'),
+            'failed_step': comp.get('failed_step', ''),
             'first_seen': str(comp.get('first_detected_at', '')),
             'last_seen': str(comp.get('last_updated_at', '')),
             'occurrence_count': comp.get('failure_count', 1),
@@ -281,12 +282,20 @@ def get_alerts(application=None):
     except Exception:
         pass
 
+    # Release pipeline: latest stage/prod Release CRs (single K8s call).
+    release_pipeline = _fetch_release_pipeline(app, nightly_status)
+
+    # Onboarding: lightweight check from triage DB (no K8s calls).
+    onboarding = _fetch_onboarding_from_triage(app)
+
     now = datetime.utcnow().isoformat()
     return {
         'build_failures': build_failures,
         'conforma_violations': conforma_violations,
         'nightly_status': nightly_status,
         'nightly_warnings': [],
+        'release_pipeline': release_pipeline,
+        'onboarding': onboarding,
         'total_count': len(build_failures) + len(conforma_violations),
         'last_sync': now,
         'release_schedule': schedule,
@@ -709,6 +718,75 @@ def _onboarding_jira_map(components):
     except Exception:
         pass
     return jira_map
+
+
+def _fetch_release_pipeline(application, nightly_status):
+    """Build release pipeline summary: nightly + stage + prod Release CRs.
+
+    Reuses already-fetched nightly_status (zero extra queries for nightly).
+    Makes one K8s call for Release CRs; gracefully returns empty if unavailable.
+    """
+    from cli import config as cfg
+
+    result = {
+        'nightly': nightly_status,
+        'stage': None,
+        'prod': None,
+    }
+    namespace = cfg.NAMESPACE
+    if not namespace:
+        return result
+
+    try:
+        from clients.konflux_client import KonfluxClient
+        from openshift_auth import _ensure_k8s_config
+        _ensure_k8s_config()
+        kfx = KonfluxClient(namespace=namespace)
+        # Extract version token for filtering (rhoai-v3-5 → v3-5)
+        version = application.replace('rhoai-', '') if application else ''
+        releases = kfx.get_releases(limit=30)
+        for rel in releases:
+            info = KonfluxClient.extract_release_status(rel)
+            rp = info.get('release_plan', '')
+            if version and version not in rp:
+                continue
+            target = 'prod' if 'prod' in rp else 'stage'
+            if target == 'stage' and not result['stage']:
+                result['stage'] = info
+            elif target == 'prod' and not result['prod']:
+                result['prod'] = info
+            if result['stage'] and result['prod']:
+                break
+    except Exception:
+        pass
+    return result
+
+
+def _fetch_onboarding_from_triage(application):
+    """Get onboarding items from triage DB (no K8s calls, fast).
+
+    Returns list of triage items whose group_label contains 'onboarding'.
+    Empty list means all components are fully onboarded.
+    """
+    try:
+        from cli.db import get_repo
+        from repositories.triage_repository import TriageRepository
+        items = get_repo(TriageRepository).get_active(application)
+        onboarding_items = []
+        for item in items:
+            group = (item.get('group_label') or '').lower()
+            notes = (item.get('notes') or '').lower()
+            if 'onboarding' in group or 'onboarding' in notes:
+                onboarding_items.append({
+                    'components': item.get('components', []),
+                    'group_label': item.get('group_label', ''),
+                    'jira_key': item.get('jira_key'),
+                    'status': item.get('status', ''),
+                    'root_cause': item.get('root_cause', ''),
+                })
+        return onboarding_items
+    except Exception:
+        return []
 
 
 def get_onboarding_describe(component, application=None, diff=False):

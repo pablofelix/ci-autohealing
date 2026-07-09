@@ -433,6 +433,7 @@ class BuildFailureRepository:
                         component_name, first_detected_at, last_updated_at,
                         error_type, jira_key, trigger_type, pipelinerun_name,
                         COALESCE(konflux_url, '') AS konflux_url,
+                        COALESCE(failed_step_name, '') AS failed_step_name,
                         COUNT(*) OVER (PARTITION BY component_name) as failure_count,
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
                         (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context,
@@ -443,7 +444,8 @@ class BuildFailureRepository:
                 )
                 SELECT component_name, first_detected_at, last_updated_at,
                        error_type, jira_key, failure_count, has_logs, has_context,
-                       ai_analyzed, trigger_type, pipelinerun_name, konflux_url
+                       ai_analyzed, trigger_type, pipelinerun_name, konflux_url,
+                       failed_step_name
                 FROM latest_builds ORDER BY first_detected_at DESC
             """, (application,))
             summary['failing_components'] = [
@@ -461,6 +463,7 @@ class BuildFailureRepository:
                     'is_nightly': (r[9] or 'push') == 'nightly',
                     'pipelinerun_name': r[10] or '',
                     'konflux_url': r[11] or '',
+                    'failed_step': r[12] or '',
                 }
                 for r in cursor.fetchall()
             ]
@@ -674,16 +677,17 @@ class BuildFailureRepository:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT
-                    build_completion_time::date AS build_date,
+                    COALESCE(build_completion_time, first_detected_at)::date AS build_date,
                     pipelinerun_name,
                     component_name,
                     status,
-                    build_completion_time,
+                    COALESCE(build_completion_time, first_detected_at) AS build_completion_time,
                     commit_sha
                 FROM build_failures
                 WHERE application = %s
                   AND trigger_type = 'nightly'
-                  AND build_completion_time > NOW() - (%s || ' days')::INTERVAL
+                  AND COALESCE(build_completion_time, first_detected_at)
+                      > NOW() - (%s || ' days')::INTERVAL
                 ORDER BY build_completion_time DESC
             """, (application, str(days)))
             cols = [d[0] for d in cursor.description]

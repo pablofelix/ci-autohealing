@@ -1132,6 +1132,7 @@ class TestReadinessEndpoint:
         mock_conforma_repo = MagicMock()
         mock_build_repo.find_failing_component_names.return_value = set()
         mock_conforma_repo.find_unresolved_component_names.return_value = []
+        mock_conforma_repo.get_violation_summaries.return_value = []
 
         def repo_factory(cls):
             name = cls.__name__
@@ -1164,6 +1165,18 @@ class TestReadinessEndpoint:
         mock_conforma_repo.find_unresolved_component_names.return_value = [
             'comp-a', 'comp-b',
         ]
+        mock_conforma_repo.get_violation_summaries.return_value = [
+            {
+                'component_name': 'comp-a',
+                'scenario': 'conforma-registry-rhoai-prod-test-app-single-component',
+                'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+            },
+            {
+                'component_name': 'comp-b',
+                'scenario': 'conforma-registry-rhoai-prod-test-app-single-component',
+                'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+            },
+        ]
 
         def repo_factory(cls):
             name = cls.__name__
@@ -1180,3 +1193,4 @@ class TestReadinessEndpoint:
         data = resp.json()
         assert data['verdict'] == 'NOT_READY'
         assert data['conforma_violations'] == 2
+        assert data['conforma_blockers'] == 2

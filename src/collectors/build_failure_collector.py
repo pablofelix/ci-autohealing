@@ -476,7 +476,8 @@ class BuildFailureCollector:
         msg = details.get('commit_message', '')
         _nightly_authors = ('Openshift-AI DevOps', 'github-actions[bot]')
         _nightly_messages = ('Updating the operator repo', 'Updating the catalog.yaml')
-        if author in _nightly_authors and any(m in msg for m in _nightly_messages):
+        is_scheduled = '-on-schedule-' in pr_name
+        if is_scheduled or (author in _nightly_authors and any(m in msg for m in _nightly_messages)):
             details['trigger_type'] = 'nightly'
         elif details.get('pr_number'):
             details['trigger_type'] = 'pull_request'

@@ -870,6 +870,7 @@ def test_get_readiness_ready(
 
     mock_conforma_repo = MagicMock()
     mock_conforma_repo.find_unresolved_component_names.return_value = set()
+    mock_conforma_repo.get_violation_summaries.return_value = []
 
     mock_repo.side_effect = lambda cls: (
         mock_build_repo
@@ -910,6 +911,7 @@ def test_get_readiness_at_risk(
 
     mock_conforma_repo = MagicMock()
     mock_conforma_repo.find_unresolved_component_names.return_value = set()
+    mock_conforma_repo.get_violation_summaries.return_value = []
 
     mock_repo.side_effect = lambda cls: (
         mock_build_repo
@@ -947,6 +949,13 @@ def test_get_readiness_not_ready(
 
     mock_conforma_repo = MagicMock()
     mock_conforma_repo.find_unresolved_component_names.return_value = {"comp1"}
+    mock_conforma_repo.get_violation_summaries.return_value = [
+        {
+            'component_name': 'comp1',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-single-component',
+            'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+        },
+    ]
 
     mock_repo.side_effect = lambda cls: (
         mock_build_repo
@@ -975,7 +984,168 @@ def test_get_readiness_not_ready(
     data = response.json()
     assert data["verdict"] == "NOT_READY"
     assert data["conforma_violations"] == 1
+    assert data["conforma_blockers"] == 1
     assert len(data["blockers"]) == 3  # conforma + freeze + check failure
+
+
+# ===================================================================
+# Readiness: exception-aware conforma counting
+# ===================================================================
+
+
+@patch("api.routes.releases.get_repository")
+@patch("api.routes.releases.get_active_freeze")
+@patch("api.routes.releases.get_schedule")
+@patch("api.routes.releases._run_readiness_checks")
+@patch("api.routes.releases._build_manual_checks")
+@patch("conforma.policy_tools.fetch_exceptions_by_policy")
+def test_readiness_conforma_all_exceptions_covered(
+    mock_exceptions, mock_manual, mock_checks, mock_schedule, mock_freeze, mock_repo, client
+):
+    """Violations fully covered by exceptions should NOT be blockers."""
+    mock_build_repo = MagicMock()
+    mock_build_repo.find_failing_component_names.return_value = set()
+
+    mock_conforma_repo = MagicMock()
+    mock_conforma_repo.find_unresolved_component_names.return_value = {"comp1", "comp2"}
+    mock_conforma_repo.get_violation_summaries.return_value = [
+        {
+            'component_name': 'comp1',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-ea-2-single-component',
+            'violation_summary': '✕ [Violation] deprecated_image_check\n  Reason: deprecated base image',
+        },
+        {
+            'component_name': 'comp2',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-ea-2-single-component',
+            'violation_summary': '✕ [Violation] deprecated_image_check\n  Reason: deprecated base image',
+        },
+    ]
+
+    mock_repo.side_effect = lambda cls: (
+        mock_build_repo
+        if cls.__name__ == "BuildFailureRepository"
+        else mock_conforma_repo
+    )
+
+    mock_exceptions.return_value = {
+        'registry-rhoai-prod': [
+            {'value': 'deprecated_image_check', 'permanent': True,
+             'effectiveUntil': None, 'days_left': None},
+        ],
+    }
+    mock_freeze.return_value = None
+    mock_schedule.return_value = None
+    mock_checks.return_value = []
+    mock_manual.return_value = {"pre_release": [], "post_stage": []}
+
+    response = client.get("/api/v1/applications/rhoai-v3-5-ea-2/readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["conforma_violations"] == 2
+    assert data["conforma_blockers"] == 0
+    assert data["verdict"] == "READY"
+    blocker_texts = ' '.join(data.get("blockers", []))
+    assert "conforma" not in blocker_texts.lower()
+
+
+@patch("api.routes.releases.get_repository")
+@patch("api.routes.releases.get_active_freeze")
+@patch("api.routes.releases.get_schedule")
+@patch("api.routes.releases._run_readiness_checks")
+@patch("api.routes.releases._build_manual_checks")
+@patch("conforma.policy_tools.fetch_exceptions_by_policy")
+def test_readiness_conforma_partial_coverage(
+    mock_exceptions, mock_manual, mock_checks, mock_schedule, mock_freeze, mock_repo, client
+):
+    """Mix of covered and uncovered violations — only uncovered should block."""
+    mock_build_repo = MagicMock()
+    mock_build_repo.find_failing_component_names.return_value = set()
+
+    mock_conforma_repo = MagicMock()
+    mock_conforma_repo.find_unresolved_component_names.return_value = {"comp1", "comp2"}
+    mock_conforma_repo.get_violation_summaries.return_value = [
+        {
+            'component_name': 'comp1',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-ea-2-single-component',
+            'violation_summary': '✕ [Violation] deprecated_image_check\n  Reason: deprecated base image',
+        },
+        {
+            'component_name': 'comp2',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-ea-2-single-component',
+            'violation_summary': '✕ [Violation] source_image.exists\n  Reason: source image missing',
+        },
+    ]
+
+    mock_repo.side_effect = lambda cls: (
+        mock_build_repo
+        if cls.__name__ == "BuildFailureRepository"
+        else mock_conforma_repo
+    )
+
+    mock_exceptions.return_value = {
+        'registry-rhoai-prod': [
+            {'value': 'deprecated_image_check', 'permanent': True,
+             'effectiveUntil': None, 'days_left': None},
+        ],
+    }
+    mock_freeze.return_value = None
+    mock_schedule.return_value = None
+    mock_checks.return_value = []
+    mock_manual.return_value = {"pre_release": [], "post_stage": []}
+
+    response = client.get("/api/v1/applications/rhoai-v3-5-ea-2/readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["conforma_violations"] == 2
+    assert data["conforma_blockers"] == 1
+    assert data["verdict"] == "NOT_READY"
+    assert any("1 component" in b and "conforma" in b.lower() for b in data["blockers"])
+
+
+@patch("api.routes.releases.get_repository")
+@patch("api.routes.releases.get_active_freeze")
+@patch("api.routes.releases.get_schedule")
+@patch("api.routes.releases._run_readiness_checks")
+@patch("api.routes.releases._build_manual_checks")
+@patch("conforma.policy_tools.fetch_exceptions_by_policy")
+def test_readiness_conforma_no_exceptions_available(
+    mock_exceptions, mock_manual, mock_checks, mock_schedule, mock_freeze, mock_repo, client
+):
+    """When no exceptions are available, all violations are blockers (graceful degradation)."""
+    mock_build_repo = MagicMock()
+    mock_build_repo.find_failing_component_names.return_value = set()
+
+    mock_conforma_repo = MagicMock()
+    mock_conforma_repo.find_unresolved_component_names.return_value = {"comp1"}
+    mock_conforma_repo.get_violation_summaries.return_value = [
+        {
+            'component_name': 'comp1',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-ea-2-single-component',
+            'violation_summary': '✕ [Violation] deprecated_image_check\n  Reason: deprecated base image',
+        },
+    ]
+
+    mock_repo.side_effect = lambda cls: (
+        mock_build_repo
+        if cls.__name__ == "BuildFailureRepository"
+        else mock_conforma_repo
+    )
+
+    mock_exceptions.return_value = {}
+    mock_freeze.return_value = None
+    mock_schedule.return_value = None
+    mock_checks.return_value = []
+    mock_manual.return_value = {"pre_release": [], "post_stage": []}
+
+    response = client.get("/api/v1/applications/rhoai-v3-5-ea-2/readiness")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["conforma_violations"] == 1
+    assert data["conforma_blockers"] == 1
+    assert data["verdict"] == "NOT_READY"
 
 
 # Run the tests if this file is executed directly

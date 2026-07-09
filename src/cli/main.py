@@ -118,6 +118,24 @@ def get_component(ctx, name, output_json):
     print()
 
 
+_RELEASE_SUCCESS_PHASES = frozenset({
+    'Released', 'Validated', 'FinalPipelineProcessed',
+})
+_RELEASE_PROGRESS_PHASES = frozenset({
+    'Processed', 'Processing', 'Progressing',
+    'PostDeployed', 'Deploying',
+})
+
+
+def _release_phase_icon(phase, green_fn, yellow_fn, red_fn):
+    """Map Release CR phase to a colored status icon."""
+    if phase in _RELEASE_SUCCESS_PHASES:
+        return green_fn('✅')
+    if phase in _RELEASE_PROGRESS_PHASES:
+        return yellow_fn('⏳')
+    return red_fn('❌')
+
+
 def _format_since(raw):
     """Format a timestamp as '30 Jun 08:04' for display."""
     from datetime import datetime as dt
@@ -217,7 +235,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
         print(bold('Build Failures ({})'.format(len(builds))) + ':')
         if builds:
             print('  {:<4} {:<45} {:<20} {:>12}  {}'.format(
-                '#', 'Component', 'Error/Cause', 'Since', 'JIRA'))
+                '#', 'Component', 'Failed Step', 'Since', 'JIRA'))
             print('  {}  {} {} {}  {}'.format(
                 '---', '-' * 45, '-' * 20, '-' * 12, '--------'))
             nightly_failures = []
@@ -228,7 +246,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                     nightly_failures.append(f.get('component', ''))
                 if len(comp) > 45:
                     comp = comp[:42] + '...'
-                err = f.get('error_type') or f.get('possible_cause') or ''
+                err = f.get('failed_step') or f.get('error_type') or f.get('possible_cause') or ''
                 info = triage_info.get(f.get('component', ''))
                 if not err and info:
                     err = info.get('group_label') or ''
@@ -258,10 +276,15 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
             print('  {} No build failures'.format(green('✓')))
         print()
 
-        # Nightly build status — shows latest nightly FBC build with FIPS results
-        nightly_status = data.get('nightly_status', [])
+        # Release Pipeline: nightly + stage + prod in one glanceable section
+        release_pipeline = data.get('release_pipeline', {})
+        nightly_status = release_pipeline.get('nightly') or data.get('nightly_status', [])
+        stage_release = release_pipeline.get('stage')
+        prod_release = release_pipeline.get('prod')
+
+        print(bold('Release Pipeline:'))
+        # Nightly
         if nightly_status:
-            print(bold('Nightly Build:'))
             for nb in nightly_status:
                 status = nb.get('status', '')
                 icon = green('✅') if status == 'Succeeded' else red('❌')
@@ -269,11 +292,33 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                 sha_tag = '  sha:{}'.format(sha) if sha else ''
                 comp = nb.get('component', '')
                 bdate = nb.get('build_date', '')
-                print('  {} {:<40} {}{}'.format(icon, comp, bdate, sha_tag))
+                print('  {} Nightly  {:<35} {}{}'.format(icon, comp, bdate, sha_tag))
                 kurl = nb.get('konflux_url', '')
                 if kurl:
-                    print(dim('     → {}'.format(kurl)))
-            print()
+                    print(dim('            → {}'.format(kurl)))
+        else:
+            print(dim('  🌙 Nightly  No recent nightly builds (last 2 days)'))
+
+        # Stage release
+        if stage_release:
+            phase = stage_release.get('phase', 'Unknown')
+            s_icon = _release_phase_icon(phase, green, yellow, red)
+            created = stage_release.get('created', '')[:10]
+            print('  {} Stage   {:<35} {}  [{}]'.format(
+                s_icon, stage_release.get('name', '')[:35], created, phase))
+        else:
+            print(dim('  ◌ Stage   No stage releases yet'))
+
+        # Prod release
+        if prod_release:
+            phase = prod_release.get('phase', 'Unknown')
+            p_icon = _release_phase_icon(phase, green, yellow, red)
+            created = prod_release.get('created', '')[:10]
+            print('  {} Prod    {:<35} {}  [{}]'.format(
+                p_icon, prod_release.get('name', '')[:35], created, phase))
+        else:
+            print(dim('  ◌ Prod    No prod releases yet'))
+        print()
 
         from conforma.policy_tools import extract_policy_from_scenario
         policies_seen = set()
@@ -318,9 +363,13 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                     color_fn = yellow if is_partial else green
                     cov_tag = ' {}'.format(color_fn('[{}:{}]'.format(label, env_tag)))
                 nightly_data_tag = dim(' [🌙nightly]') if v.get('is_nightly_data') else ''
-                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}{}'.format(
+                fips_tag = ''
+                vsummary = v.get('violation_summary', '')
+                if 'fbc-fips-check' in vsummary and 'fbc' in v.get('component', '').lower():
+                    fips_tag = yellow(' [FIPS: nightly-only]')
+                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}{}{}'.format(
                     i, comp, viol_color('{:>6}'.format(viol)), warn, first,
-                    jira, policy_tag, cov_tag, nightly_data_tag))
+                    jira, policy_tag, cov_tag, nightly_data_tag, fips_tag))
                 k_url = v.get('konflux_url', '')
                 if k_url:
                     print(dim('       → {}'.format(k_url)))
@@ -360,6 +409,30 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                 print('  {} — {}'.format(w.get('component_name', '?'), w.get('message', '')))
             print()
 
+        # Onboarding — only show if there are active onboarding triage items
+        onboarding = data.get('onboarding', [])
+        if onboarding:
+            total_comps = sum(len(item.get('components', [])) for item in onboarding)
+            print(bold('Onboarding ({} component(s)):'.format(total_comps)))
+            print('  {:<4} {:<45} {:<15} {}'.format(
+                '#', 'Component', 'Status', 'JIRA'))
+            print('  {}  {} {} {}'.format(
+                '---', '-' * 45, '-' * 15, '--------'))
+            idx = 0
+            for item in onboarding:
+                jira = item.get('jira_key') or '-'
+                status = item.get('status', 'active')
+                group = item.get('group_label', '')
+                for comp in item.get('components', []):
+                    idx += 1
+                    comp_display = comp[:45] if len(comp) <= 45 else comp[:42] + '...'
+                    status_color = yellow if status == 'active' else green
+                    print('  {:<4} {:<45} {:<15} {}'.format(
+                        idx, comp_display, status_color(status), jira))
+                    if group:
+                        print(dim('       {}'.format(group)))
+            print()
+
         return
 
     args = ['get', 'alerts']
@@ -383,7 +456,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
 
 
 @get.command('conforma')
-@click.argument('filter', required=False, default='')
+@click.argument('application', required=False, default=None)
 @click.option('--json', 'output_json', is_flag=True, hidden=True)
 @click.option('--app', 'app_name', default=None, help='Query a specific application')
 @click.option('--stage', is_flag=True, help='Show stage policy violations (from reporter)')
@@ -395,7 +468,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
 @click.option('--all', 'policy_filter', flag_value='all',
               help='Both current and future policies')
 @click.pass_context
-def get_conforma(ctx, filter, output_json, app_name, stage, nightly, policy_filter):
+def get_conforma(ctx, application, output_json, app_name, stage, nightly, policy_filter):
     """Conforma test failures."""
     import json as json_mod
 
@@ -411,9 +484,9 @@ def get_conforma(ctx, filter, output_json, app_name, stage, nightly, policy_filt
         reporter_env = 'stage' if stage else None
         reporter_build_type = 'nightly' if nightly else None
         include_future = _policy_filter_to_include_future(policy_filter)
-        effective_app = app_name or cfg.APPLICATION_NAME
+        effective_app = app_name or application or cfg.APPLICATION_NAME
         data = get_conforma_violations(
-            application=app_name,
+            application=effective_app,
             reporter_env=reporter_env, reporter_build_type=reporter_build_type,
             include_future=include_future)
         if isinstance(data, list):
@@ -582,7 +655,7 @@ def _print_conforma_table(data, app_name, policy_filter):
             'konflux_url': v.get('konflux_url', ''),
         })
 
-    rows.sort(key=lambda r: -r['viol'])
+    rows.sort(key=lambda r: (r['type'] != 'current', r['wrong_policy'], -r['viol']))
 
     print(bold('Summary:') + ' {} components failing, {} unique violations ({} per-image)'.format(
         red(str(len(rows))), bold(str(total_unique)), total_violations))
@@ -596,7 +669,12 @@ def _print_conforma_table(data, app_name, policy_filter):
     print(dim(sep))
     wrong_policy_rows = []
     nightly_build_failed_rows = []
+    future_header_printed = False
     for i, r in enumerate(rows, 1):
+        if policy_filter == 'all' and r['type'] == 'future' and not future_header_printed:
+            future_header_printed = True
+            print()
+            print(dim(' ── Future policy (informational, not blocking) ──'))
         comp_display = r['comp']
         nightly_build_failed = r['full_comp'] in failing_nightlies
         if r['wrong_policy']:
