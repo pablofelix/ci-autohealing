@@ -55,7 +55,7 @@ def list_violations(
         env = reporter_env or 'prod'
         build_type = reporter_build_type or 'latest'
         return fetch_reporter_violations(branch, env=env, build_type=build_type)
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         compute_blocks,
         compute_coverage_by_env,
@@ -111,7 +111,7 @@ def get_conforma_report(
             'total_violations': len(violations),
             'violations': violations,
         }
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         compute_blocks,
         compute_coverage_by_env,
@@ -183,7 +183,7 @@ def list_violation_rules(
         env = reporter_env or 'prod'
         build_type = reporter_build_type or 'latest'
         return fetch_reporter_rules(branch, env=env, build_type=build_type)
-    from utils.conforma_utils import count_unique_violations
+    from conforma.policy_tools import count_unique_violations
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     rules_map = {}
@@ -215,7 +215,7 @@ def list_violation_rules(
             response_model=Optional[ConformaViolationDetails])
 def get_violation(component: str, application: str, include_details: bool = True):
     """Full Conforma policy violation details."""
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         compute_blocks,
         compute_violation_coverage,
         count_unique_violations,
@@ -224,7 +224,7 @@ def get_violation(component: str, application: str, include_details: bool = True
         fetch_exceptions_by_policy,
         lookup_exceptions,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_env as _policy_env,
     )
     row = _conforma_repo().get_violation_details(component, application)
@@ -251,7 +251,7 @@ def get_violation(component: str, application: str, include_details: bool = True
                 'uncovered_rules': cov['uncovered_rules'],
                 'matching_exceptions': cov['matching_exceptions'],
             }
-        from utils.conforma_utils import (
+        from conforma.policy_tools import (
             compute_coverage_by_env,
         )
         env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
@@ -309,7 +309,7 @@ def get_exception_lifecycle():
     or expired (past effectiveUntil date). Helps identify exceptions that should
     be cleaned up (expired) or that need urgent root-cause fixes (expiring soon).
     """
-    from utils.conforma_utils import fetch_exceptions_by_policy
+    from conforma.policy_tools import fetch_exceptions_by_policy
 
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     if not exceptions_by_policy:

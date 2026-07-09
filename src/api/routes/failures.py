@@ -212,7 +212,7 @@ def list_alerts(application: str):
     _detect_systemic_patterns(build_failures)
     unmapped = _detect_unmapped_upstream(build_failures)
 
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         compute_blocks,
         compute_exception_coverage_details,
@@ -221,10 +221,10 @@ def list_alerts(application: str):
         extract_violation_rules,
         fetch_exceptions_by_policy,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_env as _policy_env,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_url as _policy_url,
     )
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
