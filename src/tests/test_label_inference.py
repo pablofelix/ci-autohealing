@@ -263,7 +263,7 @@ class TestLabelInferenceService:
         )
         assert result is None
 
-    def test_skips_when_no_pr_found(self):
+    def test_skips_when_no_pr_and_no_failing_sha(self):
         db, _ = _make_db()
         gh = _make_github(pr=None)
         svc = self._make_service(db, gh)
@@ -275,7 +275,7 @@ class TestLabelInferenceService:
             _counts=counts,
         )
         assert result is None
-        assert counts.get('skipped_no_pr') == 1
+        assert counts.get('skipped_no_files') == 1
 
     def test_skips_when_no_files_in_pr(self):
         db, _ = _make_db()
@@ -348,19 +348,19 @@ class TestLabelInferenceService:
 
     def test_backfill_returns_counts(self):
         rows = [
-            (1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1'),
-            (2, 'comp-b', 'app', 'https://github.com/org/repo', 'sha2'),
+            (1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1', None),
+            (2, 'comp-b', 'app', 'https://github.com/org/repo', 'sha2', None),
         ]
         db, cursor = _make_db(rows=rows)
         gh = _make_github(pr=None)
         svc = self._make_service(db, gh)
         counts = svc.backfill(application='app', limit=10)
         assert counts['processed'] == 2
-        assert counts['skipped_no_pr'] == 2
+        assert counts['skipped_no_files'] == 2
         assert counts['labeled'] == 0
 
     def test_backfill_with_files_labels_components(self):
-        rows = [(1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1')]
+        rows = [(1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1', None)]
         db, cursor = _make_db(rows=rows)
         gh = _make_github(
             pr={'number': 3, 'url': 'url'},
@@ -372,7 +372,7 @@ class TestLabelInferenceService:
         assert counts['labeled'] == 1
 
     def test_respects_min_confidence_in_backfill(self):
-        rows = [(1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1')]
+        rows = [(1, 'comp-a', 'app', 'https://github.com/org/repo', 'sha1', None)]
         db, _ = _make_db(rows=rows)
         gh = _make_github(pr={'number': 1, 'url': 'url'}, files=['main.go'])
         svc = self._make_service(db, gh)
@@ -390,3 +390,48 @@ class TestLabelInferenceService:
             repository_url='not-a-valid-url',
         )
         assert result is None
+
+    def test_uses_commit_comparison_when_no_pr(self):
+        db, cursor = _make_db()
+        gh = _make_github(pr=None)
+        gh.compare_commits = lambda owner, repo, base, head: ['go.mod', 'go.sum']
+        svc = self._make_service(db, gh)
+        result = svc.label_one(
+            build_failure_id=1,
+            resolution_commit_sha='fix-sha',
+            repository_url='https://github.com/org/repo',
+            failing_commit_sha='fail-sha',
+        )
+        assert result is not None
+        assert result.failure_category == 'dependency_issue'
+        assert result.label_confidence == 1.0
+
+    def test_commit_comparison_skips_when_no_failing_sha(self):
+        db, _ = _make_db()
+        gh = _make_github(pr=None)
+        svc = self._make_service(db, gh)
+        counts = {}
+        result = svc.label_one(
+            build_failure_id=1,
+            resolution_commit_sha='fix-sha',
+            repository_url='https://github.com/org/repo',
+            failing_commit_sha=None,
+            _counts=counts,
+        )
+        assert result is None
+        assert counts.get('skipped_no_files') == 1
+
+    def test_commit_comparison_not_used_when_same_sha(self):
+        db, _ = _make_db()
+        gh = _make_github(pr=None)
+        compare_called = []
+        gh.compare_commits = lambda *a: compare_called.append(a) or []
+        svc = self._make_service(db, gh)
+        result = svc.label_one(
+            build_failure_id=1,
+            resolution_commit_sha='same-sha',
+            repository_url='https://github.com/org/repo',
+            failing_commit_sha='same-sha',
+        )
+        assert result is None
+        assert compare_called == []

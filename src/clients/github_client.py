@@ -510,6 +510,33 @@ class GitHubClient:
             for pr in resp.json()[:limit]
         ]
 
+    def compare_commits(self, owner, repo, base, head):
+        """Get files changed between two commits using the GitHub compare API.
+
+        Uses GET /repos/{owner}/{repo}/compare/{base}...{head}.
+        More reliable than get_pr_for_commit() when no PR exists (e.g. direct
+        pushes, cherry-picks, or cases where GitHub's commit→PR lookup times out).
+
+        Args:
+            owner: Repository owner.
+            repo: Repository name.
+            base: Base commit SHA (e.g. the failing commit).
+            head: Head commit SHA (e.g. the fixing commit).
+
+        Returns:
+            List of changed filenames, or [] on any error.
+        """
+        resp = self._get('/repos/{}/{}/compare/{}...{}'.format(owner, repo, base, head))
+        if not resp:
+            return []
+        try:
+            return [
+                f['filename'] for f in resp.json().get('files', [])[:200]
+                if f.get('filename')
+            ]
+        except Exception:
+            return []
+
     def check_rate_limit(self):
         """Check remaining API rate limit."""
         resp = self._get('/rate_limit')

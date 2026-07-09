@@ -330,6 +330,9 @@ class StatusSynchronizer:
 
                 self._auto_verdict(component.name, app,
                                    resolution_commit_sha=current.get('commit_sha'))
+                self._auto_label(component.name, app,
+                                 resolution_commit_sha=current.get('commit_sha'),
+                                 repository_url=component.repository_url)
                 self._correlate_skill_runs(component.name, app)
 
             if self.build_repo.record_successful_build(
@@ -383,6 +386,45 @@ class StatusSynchronizer:
             logger.info("Auto-verdict '%s' for %s AI analysis", verdict, component_name)
         except Exception:
             logger.debug("Auto-verdict failed for %s", component_name, exc_info=True)
+
+    def _auto_label(self, component_name, application,
+                    resolution_commit_sha=None, repository_url=None):
+        """Infer ML training label from the fix PR when a build resolves.
+
+        Runs LabelInferenceService.label_one() automatically on resolution so
+        ml_training_labels grows without manual backfill. Fails silently.
+        """
+        if not resolution_commit_sha or not repository_url:
+            return
+        if not getattr(self.config, 'github_token', None):
+            return
+        try:
+            with self.build_repo.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM build_failures
+                    WHERE component_name = %s AND application = %s
+                      AND is_resolved = TRUE
+                    ORDER BY resolved_at DESC LIMIT 1
+                """, (component_name, application))
+                row = cursor.fetchone()
+                if not row:
+                    return
+                build_failure_id = row[0]
+
+            from collectors.verdict_correlator import LabelInferenceService
+            service = LabelInferenceService(self.config, db=self.build_repo.db)
+            inference = service.label_one(
+                build_failure_id=build_failure_id,
+                resolution_commit_sha=resolution_commit_sha,
+                repository_url=repository_url,
+            )
+            if inference:
+                logger.info("Auto-labeled %s as '%s' (confidence=%.2f)",
+                            component_name, inference.failure_category,
+                            inference.label_confidence)
+        except Exception:
+            logger.debug("Auto-label failed for %s", component_name, exc_info=True)
 
     def _correlate_skill_runs(self, component_name, application):
         """Mark recent skill_runs for this component with outcome=build_passed."""
