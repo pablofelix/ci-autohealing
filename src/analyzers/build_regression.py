@@ -3,24 +3,120 @@
 Uses resolved build failures as ground truth to measure analyzer accuracy,
 identify coverage gaps by task name, and suggest improvements.
 
-Ground truth is inferred from two independent sources (neither comes from
-the AI analysis being evaluated):
-  1. failed_task_name — the Tekton task that failed (strong signal, but
-     NULL in ~99% of records)
-  2. error_message — the raw build error text (weaker but available for
-     most builds)
+Two evaluation modes run in parallel:
 
-Evaluations without any ground truth are excluded from the accuracy
-metric and reported separately as 'unverifiable'.
+  1. Heuristic evaluation (always available):
+     Ground truth inferred from failed_task_name and error_message patterns.
+     Produces: accuracy, calibration_score, null_model_accuracy, by_category.
+
+  2. Label-based evaluation (when ml_training_labels are populated):
+     Ground truth from GitHub PR file patterns via LabelInferenceService.
+     Produces: confusion_matrix, macro_f1, per-category precision/recall/f1.
+     Requires running: ic ai label-training-data --backfill
+
+Pure functions at module level handle all metric math; the class handles I/O.
 """
 
 import re
+from collections import Counter
 
 from logger import setup_logger
 from repositories.ai_analysis_repository import AIAnalysisRepository
 from repositories.connection import DatabaseConnection
 
 logger = setup_logger(__name__)
+
+
+# --- Pure functions: ML metric computation ---
+
+def compute_null_model_accuracy(true_labels):
+    """Accuracy of a majority-class classifier (always predicts the most common label).
+
+    Args:
+        true_labels: Iterable of ground truth category strings.
+
+    Returns:
+        float between 0 and 1, or 0.0 if the list is empty.
+    """
+    if not true_labels:
+        return 0.0
+    counts = Counter(true_labels)
+    majority_count = max(counts.values())
+    return majority_count / len(true_labels)
+
+
+def build_confusion_matrix(labeled_failures):
+    """Build a confusion matrix from labeled build failures.
+
+    Args:
+        labeled_failures: List of dicts with 'ml_label' (ground truth)
+            and 'ai_predicted' (AI output).
+
+    Returns:
+        Nested dict: confusion_matrix[true_label][predicted_label] = count.
+    """
+    matrix = {}
+    for row in labeled_failures:
+        true_label = row.get('ml_label', 'unknown')
+        predicted = row.get('ai_predicted', 'unknown')
+        if true_label not in matrix:
+            matrix[true_label] = {}
+        matrix[true_label][predicted] = matrix[true_label].get(predicted, 0) + 1
+    return matrix
+
+
+def compute_per_category_f1(confusion_matrix):
+    """Compute precision, recall, and F1 per category from a confusion matrix.
+
+    Args:
+        confusion_matrix: Dict[true_label, Dict[predicted_label, int]].
+
+    Returns:
+        Dict[category, {'precision': float, 'recall': float, 'f1': float}].
+    """
+    all_categories = set(confusion_matrix.keys())
+    for predicted_dict in confusion_matrix.values():
+        all_categories.update(predicted_dict.keys())
+
+    result = {}
+    for cat in all_categories:
+        tp = confusion_matrix.get(cat, {}).get(cat, 0)
+
+        fp = sum(
+            confusion_matrix.get(true, {}).get(cat, 0)
+            for true in all_categories if true != cat
+        )
+        fn = sum(
+            confusion_matrix.get(cat, {}).get(pred, 0)
+            for pred in (confusion_matrix.get(cat) or {}) if pred != cat
+        )
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        result[cat] = {
+            'precision': round(precision, 3),
+            'recall': round(recall, 3),
+            'f1': round(f1, 3),
+        }
+    return result
+
+
+def compute_macro_f1(per_category_metrics):
+    """Macro-averaged F1: unweighted mean of per-category F1 scores.
+
+    Args:
+        per_category_metrics: Dict from compute_per_category_f1().
+
+    Returns:
+        float between 0 and 1.
+    """
+    if not per_category_metrics:
+        return 0.0
+    f1_scores = [m['f1'] for m in per_category_metrics.values()]
+    return round(sum(f1_scores) / len(f1_scores), 3)
+
 
 TASK_PATTERNS = {
     'buildah': re.compile(r'buildah|build-container', re.I),
@@ -125,6 +221,14 @@ class BuildRegressionTester:
     def get_resolved_with_analysis(self, application=None, limit=50):
         return self.ai_repo.get_resolved_builds_with_analysis(
             application=application, limit=limit
+        )
+
+    def get_labeled_with_analysis(self, application=None,
+                                   min_label_confidence=0.0, limit=200):
+        return self.ai_repo.get_labeled_builds_with_analysis(
+            application=application,
+            min_label_confidence=min_label_confidence,
+            limit=limit,
         )
 
     def _infer_task_group(self, failed_task_name):
@@ -247,7 +351,16 @@ class BuildRegressionTester:
                 })
             return gaps
 
-    def compute_metrics(self, evaluations, coverage_gaps):
+    def compute_metrics(self, evaluations, coverage_gaps, labeled_metrics=None):
+        """Compute aggregate regression metrics.
+
+        Args:
+            evaluations: Output of evaluate_accuracy().
+            coverage_gaps: Output of identify_coverage_gaps().
+            labeled_metrics: Optional output of compute_labeled_metrics().
+                When provided, confusion_matrix/macro_f1/F1 per category are
+                included in the result without post-construction mutation.
+        """
         from analyzers.models import CategoryMetrics, RegressionMetrics
 
         total = len(evaluations)
@@ -284,6 +397,15 @@ class BuildRegressionTester:
                 (m.avg_confidence * (m.total - 1) + e['confidence']) / m.total, 2
             )
 
+        if labeled_metrics:
+            for cat, pm in labeled_metrics['per_category'].items():
+                if cat not in by_category:
+                    by_category[cat] = CategoryMetrics()
+                cm = by_category[cat]
+                cm.precision = pm['precision']
+                cm.recall = pm['recall']
+                cm.f1 = pm['f1']
+
         auto_fix_evals = [e for e in evaluations if e['hours_to_resolve'] is not None]
         auto_fix_correct = sum(1 for e in auto_fix_evals if e['auto_fix_correct'])
         auto_fix_accuracy = auto_fix_correct / len(auto_fix_evals) if auto_fix_evals else 0
@@ -291,6 +413,11 @@ class BuildRegressionTester:
         total_resolved_all = sum(g['total_resolved'] for g in coverage_gaps)
         total_with_ai = sum(g['with_ai'] for g in coverage_gaps)
         gap_groups = [g['task_name'] for g in coverage_gaps if g['coverage_pct'] < 5]
+
+        true_labels = [
+            e['expected_category'] for e in verifiable if e.get('expected_category')
+        ]
+        null_accuracy = compute_null_model_accuracy(true_labels)
 
         improvements = self._suggest_improvements(
             verifiable, unverifiable, coverage_gaps, by_category,
@@ -308,6 +435,10 @@ class BuildRegressionTester:
             improvements=improvements,
             verifiable_count=len(verifiable),
             unverifiable_count=len(unverifiable),
+            null_model_accuracy=round(null_accuracy, 2),
+            confusion_matrix=labeled_metrics['confusion_matrix'] if labeled_metrics else {},
+            macro_f1=labeled_metrics['macro_f1'] if labeled_metrics else 0.0,
+            labeled_count=labeled_metrics['labeled_count'] if labeled_metrics else 0,
         )
 
     def _suggest_improvements(self, verifiable, unverifiable, coverage_gaps, by_category):
@@ -361,7 +492,40 @@ class BuildRegressionTester:
 
         return improvements
 
-    def run(self, application=None, limit=50, verbose=False):
+    def compute_labeled_metrics(self, labeled_failures):
+        """Compute confusion matrix, F1, precision, recall from ML-labeled data.
+
+        Uses ml_training_labels as ground truth — more reliable than heuristic
+        task/error pattern matching, but requires labels to have been generated
+        via `ic ai label-training-data --backfill`.
+
+        Args:
+            labeled_failures: Output of get_labeled_with_analysis().
+
+        Returns:
+            Dict with keys: confusion_matrix, per_category, macro_f1, labeled_count.
+        """
+        if not labeled_failures:
+            return {
+                'confusion_matrix': {},
+                'per_category': {},
+                'macro_f1': 0.0,
+                'labeled_count': 0,
+            }
+
+        matrix = build_confusion_matrix(labeled_failures)
+        per_category = compute_per_category_f1(matrix)
+        macro = compute_macro_f1(per_category)
+
+        return {
+            'confusion_matrix': matrix,
+            'per_category': per_category,
+            'macro_f1': macro,
+            'labeled_count': len(labeled_failures),
+        }
+
+    def run(self, application=None, limit=50, verbose=False,
+            min_label_confidence=0.7):
         logger.info("=" * 70)
         logger.info("Build Failure AI Regression Testing")
         logger.info("=" * 70)
@@ -374,7 +538,22 @@ class BuildRegressionTester:
 
         evaluations = self.evaluate_accuracy(resolved)
         coverage_gaps = self.identify_coverage_gaps(application=application)
-        metrics = self.compute_metrics(evaluations, coverage_gaps)
+
+        labeled = self.get_labeled_with_analysis(
+            application=application,
+            min_label_confidence=min_label_confidence,
+            limit=limit * 4,
+        )
+        labeled_metrics = None
+        if labeled:
+            logger.info("Found %d ML-labeled failures (min_conf=%.2f)",
+                        len(labeled), min_label_confidence)
+            labeled_metrics = self.compute_labeled_metrics(labeled)
+        else:
+            logger.debug("No ML-labeled failures found — skipping labeled evaluation")
+
+        metrics = self.compute_metrics(evaluations, coverage_gaps,
+                                       labeled_metrics=labeled_metrics)
 
         if verbose:
             for e in evaluations:
