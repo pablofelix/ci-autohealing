@@ -9,14 +9,77 @@ Covers:
 """
 
 import base64
+import importlib
 import json
 import os
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+
+# ---------------------------------------------------------------------------
+# Module reload guard
+# ---------------------------------------------------------------------------
+# Other test files (e.g. test_poll_jira_coverage) replace
+# sys.modules['clients.llm_provider'] with a MagicMock at import time and
+# never restore it.  When pytest runs the full suite, our file may be
+# *collected* before the contaminator, but test *execution* happens after
+# contamination is already in place.
+#
+# Fix: a module-scoped autouse fixture reloads the affected modules right
+# before the first test in this file runs, guaranteeing fresh real classes.
+# ---------------------------------------------------------------------------
+
+def _reload_llm_modules():
+    """Reload LLM provider modules to undo any sys.modules contamination.
+
+    Must be called at test-execution time, not at collection time, because
+    the contamination (sys.modules replacement) may happen between collection
+    and execution.
+    """
+    # 1. Restore real llm_provider module (undo MagicMock replacement)
+    llm_mod = sys.modules.get('clients.llm_provider')
+    if isinstance(llm_mod, MagicMock):
+        # The module entry is a MagicMock; delete it so importlib re-imports
+        sys.modules.pop('clients.llm_provider', None)
+    importlib.reload(importlib.import_module('clients.llm_provider'))
+
+    # 2. Reload anthropic_provider so it picks up the real LLMResponse/LLMProvider.
+    #    anthropic_provider imports ``from anthropic import Anthropic`` at module
+    #    level — mock ``anthropic`` during reload so we don't need the real SDK.
+    if 'clients.anthropic_provider' in sys.modules:
+        with patch.dict('sys.modules', {'anthropic': MagicMock()}):
+            importlib.reload(sys.modules['clients.anthropic_provider'])
+
+    # 3. Same for vertex_ai_provider
+    if 'clients.vertex_ai_provider' in sys.modules:
+        with patch.dict('sys.modules', {'anthropic': MagicMock()}):
+            importlib.reload(sys.modules['clients.vertex_ai_provider'])
+
+
+@pytest.fixture(autouse=True, scope='module')
+def _ensure_clean_llm_modules():
+    """Reload LLM modules before any test in this file executes.
+
+    After reloading, re-bind the module-level names (LLMResponse,
+    create_llm_provider) so that tests using them get the real classes
+    instead of stale references captured at collection time.
+    """
+    _reload_llm_modules()
+
+    # Re-bind module-level names from the freshly-reloaded modules.
+    import clients.llm_provider as _fresh
+    this_module = sys.modules[__name__]
+    this_module.LLMResponse = _fresh.LLMResponse
+    this_module.create_llm_provider = _fresh.create_llm_provider
+
+
+# Import after defining the fixture — at collection time these may bind to
+# mocks, but the fixture will reload and re-bind before tests execute.
 from clients.llm_provider import LLMResponse, create_llm_provider
 
 # ---------------------------------------------------------------------------

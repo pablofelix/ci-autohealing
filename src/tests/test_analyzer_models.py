@@ -226,6 +226,268 @@ class TestConfigAnalysisResult:
             assert f.category == cat
 
 
+class TestBuildConfigFinding:
+    def test_valid_finding(self):
+        from analyzers.models import BuildConfigFinding
+        f = BuildConfigFinding(
+            title='Stale nudge for odh-dashboard',
+            severity='warning',
+            category='stale_component',
+            description='Component building from commits 5 days old',
+            recommendation='Fix nudge propagation for this component',
+        )
+        assert f.category == 'stale_component'
+        assert f.fix_action == 'investigation'
+
+    def test_all_categories(self):
+        from analyzers.models import BuildConfigFinding
+        for cat in ['stale_component', 'recurring_transient', 'quota_bottleneck',
+                     'missing_webhook', 'build_chain_broken']:
+            f = BuildConfigFinding(
+                title='Test finding for category',
+                severity='info', category=cat,
+                description='Testing all category values',
+                recommendation='No action needed for test',
+            )
+            assert f.category == cat
+
+    def test_invalid_category(self):
+        from analyzers.models import BuildConfigFinding
+        with pytest.raises((ValueError, TypeError)):
+            BuildConfigFinding(
+                title='Bad category finding',
+                severity='warning', category='not_a_category',
+                description='Should fail validation',
+                recommendation='This should not be created',
+            )
+
+    def test_fix_actions(self):
+        from analyzers.models import BuildConfigFinding
+        for action in ['rebuild', 'nudge_fix', 'webhook_setup',
+                        'quota_request', 'investigation']:
+            f = BuildConfigFinding(
+                title='Test fix action value',
+                severity='info', category='stale_component',
+                description='Testing all fix action values',
+                recommendation='No action needed for test',
+                fix_action=action,
+            )
+            assert f.fix_action == action
+
+    def test_defaults(self):
+        from analyzers.models import BuildConfigFinding
+        f = BuildConfigFinding(
+            title='Defaults test finding',
+            severity='info', category='stale_component',
+            description='Testing default values work',
+            recommendation='No action needed for test',
+        )
+        assert f.can_auto_fix is False
+        assert f.fix_action == 'investigation'
+        assert f.affected_components == []
+
+
+class TestBuildConfigAnalysisResult:
+    def test_valid_result(self):
+        from analyzers.models import BuildConfigAnalysisResult, BuildConfigFinding
+        finding = BuildConfigFinding(
+            title='Stale nudge for component',
+            severity='warning', category='stale_component',
+            description='Component building from old commits',
+            recommendation='Fix nudge propagation',
+        )
+        m = BuildConfigAnalysisResult(
+            findings=[finding],
+            overall_severity='warning',
+            confidence_score=0.85,
+            summary='Build config audit found 1 warning issue',
+        )
+        assert len(m.findings) == 1
+        assert m.overall_severity == 'warning'
+        assert m.auto_rebuild_candidates == []
+
+    def test_confidence_rounding(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        m = BuildConfigAnalysisResult(
+            findings=[], overall_severity='info',
+            confidence_score=0.8567,
+            summary='Build config looks healthy overall',
+        )
+        assert m.confidence_score == 0.86
+
+    def test_confidence_rejects_above_one(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        with pytest.raises((ValueError, TypeError)):
+            BuildConfigAnalysisResult(
+                findings=[], overall_severity='info',
+                confidence_score=1.5,
+                summary='Should fail validation check',
+            )
+
+    def test_confidence_rejects_negative(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        with pytest.raises((ValueError, TypeError)):
+            BuildConfigAnalysisResult(
+                findings=[], overall_severity='info',
+                confidence_score=-0.1,
+                summary='Should fail validation check',
+            )
+
+    def test_placeholder_summary_rejected(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        with pytest.raises((ValueError, TypeError)):
+            BuildConfigAnalysisResult(
+                findings=[], overall_severity='info',
+                confidence_score=0.5,
+                summary='N/A',
+            )
+
+    def test_empty_findings_valid(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        m = BuildConfigAnalysisResult(
+            findings=[], overall_severity='info',
+            confidence_score=0.9,
+            summary='No issues found in build config',
+        )
+        assert m.findings == []
+
+    def test_auto_rebuild_candidates(self):
+        from analyzers.models import BuildConfigAnalysisResult
+        m = BuildConfigAnalysisResult(
+            findings=[], overall_severity='info',
+            confidence_score=0.9,
+            summary='Build config audit completed successfully',
+            auto_rebuild_candidates=['comp-a', 'comp-b'],
+        )
+        assert len(m.auto_rebuild_candidates) == 2
+
+
+class TestReleaseConfigFinding:
+    def test_valid_finding(self):
+        from analyzers.models import ReleaseConfigFinding
+        f = ReleaseConfigFinding(
+            title='Unresolved conforma violation blocks release',
+            severity='critical',
+            category='conforma_blocker',
+            description='Component has unresolved violations with no exception',
+            recommendation='File exception or fix the violation',
+        )
+        assert f.category == 'conforma_blocker'
+        assert f.blocks_release is False
+        assert f.fix_action == 'investigation'
+
+    def test_all_categories(self):
+        from analyzers.models import ReleaseConfigFinding
+        for cat in ['conforma_blocker', 'pcc_cache_stale', 'missing_exception',
+                     'sha_drift', 'nightly_broken']:
+            f = ReleaseConfigFinding(
+                title='Test finding for category',
+                severity='info', category=cat,
+                description='Testing all category values',
+                recommendation='No action needed for test',
+            )
+            assert f.category == cat
+
+    def test_invalid_category(self):
+        from analyzers.models import ReleaseConfigFinding
+        with pytest.raises((ValueError, TypeError)):
+            ReleaseConfigFinding(
+                title='Bad category finding',
+                severity='warning', category='invalid_cat',
+                description='Should fail validation',
+                recommendation='This should not be created',
+            )
+
+    def test_blocks_release_flag(self):
+        from analyzers.models import ReleaseConfigFinding
+        f = ReleaseConfigFinding(
+            title='Critical release blocker finding',
+            severity='critical', category='conforma_blocker',
+            description='This violation will block the release',
+            recommendation='Fix it before the release window',
+            blocks_release=True,
+        )
+        assert f.blocks_release is True
+
+    def test_fix_actions(self):
+        from analyzers.models import ReleaseConfigFinding
+        for action in ['rebuild', 'exception_request', 'pcc_regen',
+                        'config_change', 'investigation']:
+            f = ReleaseConfigFinding(
+                title='Test fix action value',
+                severity='info', category='pcc_cache_stale',
+                description='Testing all fix action values',
+                recommendation='No action needed for test',
+                fix_action=action,
+            )
+            assert f.fix_action == action
+
+
+class TestReleaseConfigAnalysisResult:
+    def test_valid_result(self):
+        from analyzers.models import ReleaseConfigAnalysisResult, ReleaseConfigFinding
+        finding = ReleaseConfigFinding(
+            title='PCC cache is stale',
+            severity='warning', category='pcc_cache_stale',
+            description='PCC not regenerated after last release',
+            recommendation='Trigger PCC regeneration workflow',
+        )
+        m = ReleaseConfigAnalysisResult(
+            findings=[finding],
+            overall_severity='warning',
+            confidence_score=0.8,
+            summary='Release config audit found 1 warning issue',
+        )
+        assert len(m.findings) == 1
+        assert m.release_blockers == []
+
+    def test_confidence_rounding(self):
+        from analyzers.models import ReleaseConfigAnalysisResult
+        m = ReleaseConfigAnalysisResult(
+            findings=[], overall_severity='info',
+            confidence_score=0.7777,
+            summary='Release config looks healthy overall',
+        )
+        assert m.confidence_score == 0.78
+
+    def test_confidence_rejects_above_one(self):
+        from analyzers.models import ReleaseConfigAnalysisResult
+        with pytest.raises((ValueError, TypeError)):
+            ReleaseConfigAnalysisResult(
+                findings=[], overall_severity='info',
+                confidence_score=1.5,
+                summary='Should fail validation check',
+            )
+
+    def test_placeholder_summary_rejected(self):
+        from analyzers.models import ReleaseConfigAnalysisResult
+        with pytest.raises((ValueError, TypeError)):
+            ReleaseConfigAnalysisResult(
+                findings=[], overall_severity='info',
+                confidence_score=0.5,
+                summary='unknown',
+            )
+
+    def test_release_blockers(self):
+        from analyzers.models import ReleaseConfigAnalysisResult
+        m = ReleaseConfigAnalysisResult(
+            findings=[], overall_severity='critical',
+            confidence_score=0.9,
+            summary='Release has critical blockers identified',
+            release_blockers=['comp-a: conforma violation', 'comp-b: SHA drift'],
+        )
+        assert len(m.release_blockers) == 2
+
+    def test_empty_findings_valid(self):
+        from analyzers.models import ReleaseConfigAnalysisResult
+        m = ReleaseConfigAnalysisResult(
+            findings=[], overall_severity='info',
+            confidence_score=0.9,
+            summary='No issues found in release config',
+        )
+        assert m.findings == []
+
+
 class TestRegressionMetrics:
     def test_valid_model(self):
         from analyzers.models import CategoryMetrics, RegressionMetrics

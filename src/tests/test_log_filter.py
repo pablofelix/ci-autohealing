@@ -2,7 +2,7 @@
 
 import unittest
 
-from utils.log_filter import filter_error_lines
+from log_filter import filter_error_lines
 
 
 class TestFilterErrorLines(unittest.TestCase):

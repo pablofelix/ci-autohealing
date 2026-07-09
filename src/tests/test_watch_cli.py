@@ -1,10 +1,28 @@
 """Tests for the ic watch CLI command group."""
 
+import importlib
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
 from cli.main import cli
+
+
+def _restore_real_config():
+    """Get real config module, immune to sys.modules pollution by other tests.
+
+    Some test files (e.g. test_poll_jira_coverage) replace sys.modules['config']
+    with a MagicMock at module level. This makes subsequent ``from config import X``
+    return MagicMock attributes.  We fix it by evicting the mock and re-importing.
+    """
+    import sys
+    import types
+    current = sys.modules.get('config')
+    if current is not None and not isinstance(current, types.ModuleType):
+        del sys.modules['config']
+    import config as _cfg
+    if isinstance(_cfg, types.ModuleType):
+        importlib.reload(_cfg)
 
 
 class TestWatchGroup:
@@ -22,6 +40,9 @@ class TestWatchGroup:
 
 
 class TestWatchStart:
+    def setup_method(self):
+        _restore_real_config()
+
     def test_no_apps_configured_exits_with_error(self):
         runner = CliRunner()
         env = {'WATCH_APPLICATIONS': '', 'APPLICATION_NAME': ''}

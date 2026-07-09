@@ -231,7 +231,7 @@ class BatchAnalysisService:
                     SELECT DISTINCT application FROM (
                         SELECT application FROM build_failures
                         WHERE ai_analyzed = FALSE AND is_resolved = FALSE
-                          AND build_logs IS NOT NULL AND ai_skip_reason IS NULL
+                          AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs') AND ai_skip_reason IS NULL
                         UNION
                         SELECT application FROM conforma_results
                         WHERE ai_analyzed = FALSE AND is_resolved = FALSE

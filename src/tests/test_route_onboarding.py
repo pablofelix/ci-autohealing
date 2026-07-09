@@ -13,16 +13,32 @@ from fastapi.testclient import TestClient
 from api.errors import register_error_handlers
 from api.routes.onboarding import (
     _build_component_status,
-    _check_branch,
-    _check_builds,
-    _check_container_image,
-    _check_last_built,
-    _check_nudges,
-    _check_pac,
-    _check_repo,
     _detect_component_type,
-    _onboarding_score,
     router,
+)
+from onboarding.checks import (
+    check_branch as _check_branch,
+)
+from onboarding.checks import (
+    check_builds as _check_builds,
+)
+from onboarding.checks import (
+    check_container_image as _check_container_image,
+)
+from onboarding.checks import (
+    check_last_built as _check_last_built,
+)
+from onboarding.checks import (
+    check_nudges as _check_nudges,
+)
+from onboarding.checks import (
+    check_pac as _check_pac,
+)
+from onboarding.checks import (
+    check_repo as _check_repo,
+)
+from onboarding.checks import (
+    onboarding_score as _onboarding_score,
 )
 
 

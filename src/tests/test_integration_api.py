@@ -160,7 +160,6 @@ class TestAPIHealth(unittest.TestCase):
         data = self._get('/api/v1/patterns')
         self.assertIsInstance(data, list)
 
-    @unittest.expectedFailure
     def test_nightly_history(self):
         apps = self._get('/api/v1/applications')
         if not apps:

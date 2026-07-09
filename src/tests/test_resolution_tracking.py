@@ -1,8 +1,38 @@
 """Tests for resolution commit SHA tracking and related features."""
 
+import importlib
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Guard against sys.modules pollution from other test files.
+# Some tests replace 'config', 'repositories.connection', etc. with MagicMock
+# at module level. Force-reload the real modules before importing.
+# ---------------------------------------------------------------------------
+def _ensure_real_module(name):
+    # Also restore parent packages (e.g. 'repositories' for 'repositories.connection')
+    parts = name.split('.')
+    for i in range(len(parts)):
+        partial = '.'.join(parts[:i + 1])
+        mod = sys.modules.get(partial)
+        if mod is not None and isinstance(mod, MagicMock):
+            sys.modules.pop(partial, None)
+    mod = sys.modules.get(name)
+    if mod is None or isinstance(mod, MagicMock):
+        sys.modules.pop(name, None)
+        importlib.import_module(name)
+
+
+_ensure_real_module('config')
+_ensure_real_module('repositories.connection')
+
+# Reload status_synchronizer so it picks up the real config/connection modules
+# instead of any MagicMock references it cached during initial import.
+if 'collectors.status_synchronizer' in sys.modules:
+    importlib.reload(sys.modules['collectors.status_synchronizer'])
 
 from collectors.status_synchronizer import StatusSynchronizer
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig

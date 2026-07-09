@@ -116,6 +116,16 @@ def get_overview_stats(application=None):
     return get_repo(BuildFailureRepository).get_overview_stats(app)
 
 
+def get_ai_stats(application=None):
+    app = application or _app()
+    if _use_api():
+        return _api().get(f'/api/v1/applications/{app}/stats') or {}
+    from cli.db import get_repo
+    from repositories.ai_analysis_repository import AIAnalysisRepository
+    ai_repo = get_repo(AIAnalysisRepository)
+    return ai_repo.get_extended_status(app)
+
+
 def get_alerts(application=None):
     app = application or _app()
     if _is_cluster():
@@ -143,7 +153,7 @@ def get_alerts(application=None):
         })
 
     from cli import config as cfg
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         apply_policy_correction,
         categorize_policy,
         compute_blocks,
@@ -153,10 +163,10 @@ def get_alerts(application=None):
         extract_violation_rules,
         fetch_exceptions_by_policy,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_env as _policy_env,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_url as _policy_url,
     )
     exceptions_by_policy = fetch_exceptions_by_policy(cfg.NAMESPACE)
@@ -248,8 +258,7 @@ def get_conforma_violations(application=None, reporter_env=None,
         return alerts.get('conforma_violations', [])
     from cli import config as cfg
     from cli.db import get_repo
-    from repositories.conforma_repository import ConformaRepository
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         apply_policy_correction,
         compute_blocks,
         compute_exception_coverage_details,
@@ -260,9 +269,10 @@ def get_conforma_violations(application=None, reporter_env=None,
         fetch_exceptions_by_policy,
         policy_url,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_env as _penv,
     )
+    from repositories.conforma_repository import ConformaRepository
     conforma_repo = get_repo(ConformaRepository)
     violations = conforma_repo.get_violation_summaries(app, include_future=include_future)
     jira_map = _triage_jira_map(app)
@@ -313,7 +323,7 @@ def get_conforma_rules(application=None, reporter_env=None,
                             params={'reporter_env': reporter_env,
                                     'reporter_build_type': reporter_build_type})
         return result if isinstance(result, list) else []
-    from utils.conforma_utils import count_unique_violations
+    from conforma.policy_tools import count_unique_violations
     violations = get_conforma_violations(application=app, include_future=include_future)
     rules_map = {}
     for v in violations:
@@ -438,6 +448,28 @@ def get_schedule(application=None):
     return None
 
 
+def get_schedule_all():
+    """Get schedule for all watched applications."""
+    import os
+    watch_apps = os.environ.get('WATCH_APPLICATIONS', '').split()
+    if not watch_apps:
+        app = _app()
+        watch_apps = [app] if app else []
+    results = []
+    for app in watch_apps:
+        sched = get_schedule(app)
+        if sched:
+            results.append(sched)
+    return results
+
+
+def sync_schedule_from_product_pages(pp_data):
+    """Sync schedule entries from Product Pages data to the DB."""
+    if _use_api():
+        return _api().post('/api/v1/releases/schedule/sync', data=pp_data)
+    return None
+
+
 def get_release_details(name, application=None, include_artifacts=False):
     app = application or _app()
     if _use_api():
@@ -524,9 +556,85 @@ def remove_watched_application(app):
 
 def get_onboarding_status(application=None):
     app = application or _app()
-    if _use_api():
+    if _is_cluster():
         return _api().get(f'/api/v1/applications/{app}/onboarding')
-    return None
+    return _onboarding_direct(app)
+
+
+def _onboarding_direct(application):
+    """Fetch onboarding status directly from K8s — bypasses the API server."""
+    import os
+    namespace = os.environ.get('NAMESPACE', '')
+    if not namespace:
+        return {'application': application, 'components': [],
+                'error': 'NAMESPACE not set'}
+
+    from clients.kubernetes import KubernetesClient
+    from onboarding.checks import build_component_status
+    from openshift_auth import _ensure_k8s_config
+
+    _ensure_k8s_config()
+    k8s = KubernetesClient(namespace=namespace)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_comp = pool.submit(k8s.list_components, application=application)
+        f_pac = pool.submit(k8s.list_pac_repositories)
+        try:
+            components = f_comp.result(timeout=90)
+            pac_repos = f_pac.result(timeout=90)
+        except Exception as exc:
+            return {'application': application, 'components': [],
+                    'error': f'K8s timeout ({type(exc).__name__}): {exc}'}
+
+    jira_map = _onboarding_jira_map(components)
+
+    results = []
+    for comp in components:
+        status = build_component_status(comp, pac_repos, {})
+        comp_name = comp.get('name', '')
+        jira_info = jira_map.get(comp_name)
+        if jira_info:
+            status['jira_key'] = jira_info['key']
+            status['jira_status'] = jira_info['status']
+            status['jira_url'] = jira_info['url']
+        results.append(status)
+
+    results.sort(key=lambda r: (r['score'], r['component']))
+    complete = sum(1 for r in results if r['overall'] == 'complete')
+    partial = sum(1 for r in results if r['overall'] == 'partial')
+    incomplete = sum(1 for r in results if r['overall'] == 'incomplete')
+
+    return {
+        'application': application,
+        'total': len(results),
+        'complete': complete,
+        'partial': partial,
+        'incomplete': incomplete,
+        'components': results,
+    }
+
+
+def _onboarding_jira_map(components):
+    """Build component→jira map from triage DB (no Jira API calls)."""
+    jira_map = {}
+    try:
+        from cli.db import get_repo
+        from repositories.triage_repository import TriageRepository
+        triage_repo = get_repo(TriageRepository)
+        for comp in components:
+            name = comp.get('name', '')
+            item = triage_repo.find_by_component(
+                name, comp.get('application', ''))
+            if item and item.get('jira_key'):
+                jira_map[name] = {
+                    'key': item['jira_key'],
+                    'status': item.get('status', ''),
+                    'url': f'https://issues.redhat.com/browse/{item["jira_key"]}',
+                }
+    except Exception:
+        pass
+    return jira_map
 
 
 def get_onboarding_describe(component, application=None, diff=False):

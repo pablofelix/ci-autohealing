@@ -1,29 +1,43 @@
 """Tests for the WatchDaemon orchestrator."""
 
 import asyncio
+import importlib
 import unittest
 from unittest.mock import MagicMock, patch
 
-from config import (
-    CollectorConfig,
-    DatabaseConfig,
-    KubernetesConfig,
-    WatcherConfig,
-)
 from watcher.daemon import WatchDaemon, _GoneError
 
 
+def _get_real_config():
+    """Get real config module, immune to sys.modules pollution by other tests.
+
+    Some test files (e.g. test_poll_jira_coverage) replace sys.modules['config']
+    with a MagicMock at module level. This makes subsequent ``from config import X``
+    return MagicMock attributes.  We fix it by evicting the mock and re-importing.
+    """
+    import sys
+    import types
+    current = sys.modules.get('config')
+    if current is not None and not isinstance(current, types.ModuleType):
+        del sys.modules['config']
+    import config as _cfg
+    if isinstance(_cfg, types.ModuleType):
+        importlib.reload(_cfg)
+    return _cfg
+
+
 def _make_config(apps=('test-app',)):
-    return CollectorConfig(
-        db=DatabaseConfig(
+    cfg = _get_real_config()
+    return cfg.CollectorConfig(
+        db=cfg.DatabaseConfig(
             host='localhost', port=5432, user='postgres',
             password='test', database='testdb',
         ),
-        k8s=KubernetesConfig(
+        k8s=cfg.KubernetesConfig(
             namespace='test-ns',
             application_name=apps[0] if apps else '',
         ),
-        watcher=WatcherConfig(
+        watcher=cfg.WatcherConfig(
             applications=apps,
             auto_analyze=False,
             reconcile_interval=3600,
@@ -166,13 +180,17 @@ class TestWatchStream(unittest.TestCase):
 
 class TestWatcherConfig(unittest.TestCase):
 
+    def setUp(self):
+        self._cfg = _get_real_config()
+        self.WatcherConfig = self._cfg.WatcherConfig
+
     def test_from_env_with_applications(self):
         with patch.dict('os.environ', {
             'WATCH_APPLICATIONS': 'app-ea1 app-ea2',
             'WATCH_AUTO_ANALYZE': 'false',
             'WATCH_RECONCILE_INTERVAL': '900',
         }):
-            wc = WatcherConfig.from_env()
+            wc = self.WatcherConfig.from_env()
             self.assertEqual(wc.applications, ('app-ea1', 'app-ea2'))
             self.assertFalse(wc.auto_analyze)
             self.assertEqual(wc.reconcile_interval, 900)
@@ -181,16 +199,16 @@ class TestWatcherConfig(unittest.TestCase):
         with patch.dict('os.environ', {
             'APPLICATION_NAME': 'my-app',
         }, clear=True):
-            wc = WatcherConfig.from_env()
+            wc = self.WatcherConfig.from_env()
             self.assertEqual(wc.applications, ('my-app',))
 
     def test_from_env_empty(self):
         with patch.dict('os.environ', {}, clear=True):
-            wc = WatcherConfig.from_env()
+            wc = self.WatcherConfig.from_env()
             self.assertEqual(wc.applications, ())
 
     def test_defaults(self):
-        wc = WatcherConfig(applications=('app',))
+        wc = self.WatcherConfig(applications=('app',))
         self.assertTrue(wc.auto_analyze)
         self.assertEqual(wc.reconcile_interval, 1800)
         self.assertEqual(wc.jira_poll_interval, 600)

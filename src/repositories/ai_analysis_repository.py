@@ -229,6 +229,7 @@ class AIAnalysisRepository:
                 WHERE application   = %s
                   AND is_resolved   = FALSE
                   AND build_logs    IS NULL
+                  AND NOT (blob_refs ? 'build_logs')
                   AND ai_analyzed   = FALSE
                   AND ai_skip_reason IS NULL
                   AND first_detected_at < NOW() - (%s || ' days')::INTERVAL
@@ -244,8 +245,8 @@ class AIAnalysisRepository:
 
             cursor.execute("""
                 SELECT
-                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND build_logs IS NOT NULL AND ai_skip_reason IS NULL) AS pending,
-                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND build_logs IS NULL  AND ai_skip_reason IS NULL) AS no_logs,
+                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs') AND ai_skip_reason IS NULL) AS pending,
+                    COUNT(*) FILTER (WHERE NOT ai_analyzed AND build_logs IS NULL AND NOT (blob_refs ? 'build_logs') AND ai_skip_reason IS NULL) AS no_logs,
                     COUNT(*) FILTER (WHERE ai_skip_reason IS NOT NULL)                                         AS skipped,
                     COUNT(*) FILTER (WHERE ai_analyzed AND ai_skip_reason IS NULL)                             AS analyzed
                 FROM build_failures
@@ -313,7 +314,7 @@ class AIAnalysisRepository:
             # Build WHERE clause dynamically (all conditions use bf. alias)
             where_conditions = [
                 "bf.is_resolved = FALSE",
-                "bf.build_logs IS NOT NULL",
+                "(bf.build_logs IS NOT NULL OR bf.blob_refs ? 'build_logs')",
                 "bf.ai_skip_reason IS NULL",
             ]
             params = []
@@ -411,7 +412,7 @@ class AIAnalysisRepository:
                     WHERE application = %s
                       AND ai_analyzed = FALSE
                       AND is_resolved = FALSE
-                      AND build_logs IS NOT NULL
+                      AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs')
                       AND ai_skip_reason IS NULL
                 """, (application,))
             else:
@@ -420,7 +421,7 @@ class AIAnalysisRepository:
                     FROM build_failures
                     WHERE ai_analyzed = FALSE
                       AND is_resolved = FALSE
-                      AND build_logs IS NOT NULL
+                      AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs')
                       AND ai_skip_reason IS NULL
                 """)
 
@@ -638,9 +639,9 @@ class AIAnalysisRepository:
             cursor.execute("""
                 SELECT
                     COUNT(*) FILTER (WHERE NOT ai_analyzed AND is_resolved = FALSE
-                                     AND build_logs IS NOT NULL AND ai_skip_reason IS NULL) AS pending,
+                                     AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs') AND ai_skip_reason IS NULL) AS pending,
                     COUNT(*) FILTER (WHERE NOT ai_analyzed AND is_resolved = FALSE
-                                     AND build_logs IS NULL AND ai_skip_reason IS NULL) AS no_logs,
+                                     AND build_logs IS NULL AND NOT (blob_refs ? 'build_logs') AND ai_skip_reason IS NULL) AS no_logs,
                     COUNT(*) FILTER (WHERE ai_skip_reason IS NOT NULL) AS skipped
                 FROM build_failures WHERE application = %s
             """, (application,))

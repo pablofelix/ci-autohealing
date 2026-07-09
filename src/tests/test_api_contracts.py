@@ -243,7 +243,7 @@ class TestFailuresEndpoints:
         mock_schedule.return_value = None
         mock_health.return_value.get_stale_nightly_builds.return_value = []
 
-        with patch('utils.conforma_utils.fetch_exceptions_by_policy', return_value={}):
+        with patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={}):
             resp = client.get('/api/v1/applications/test-app/alerts')
 
         assert resp.status_code == 200
@@ -323,7 +323,7 @@ class TestViolationsEndpoints:
 
         mock_get_repo.side_effect = side_effect
 
-        with patch('utils.conforma_utils.fetch_exceptions_by_policy', return_value={}):
+        with patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={}):
             resp = client.get('/api/v1/applications/test-app/violations')
 
         assert resp.status_code == 200
@@ -331,7 +331,7 @@ class TestViolationsEndpoints:
         data = resp.json()
         assert isinstance(data, list)
 
-    @patch('utils.conforma_utils.fetch_exceptions_by_policy')
+    @patch('conforma.policy_tools.fetch_exceptions_by_policy')
     def test_contract_get_exception_lifecycle(self, mock_fetch, client):
         """GET /exceptions/lifecycle returns ExceptionLifecycleSummary-shaped response."""
         mock_fetch.return_value = {
@@ -590,7 +590,7 @@ class TestListEndpoints:
         ]
         mock_get_repo.return_value = mock_conforma_repo
 
-        with patch('utils.conforma_utils.count_unique_violations',
+        with patch('conforma.policy_tools.count_unique_violations',
                   return_value=(2, [{'rule': 'rule1', 'detail': 'error'},
                                    {'rule': 'rule2', 'detail': 'error'}])):
             resp = client.get('/api/v1/applications/test-app/violations/rules')

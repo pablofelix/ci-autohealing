@@ -8,6 +8,7 @@ shelling out to the oc CLI.
 """
 
 import os
+import threading
 
 import requests
 from kubernetes import client, config
@@ -15,13 +16,17 @@ from kubernetes import client, config
 from shared_config import KUBEARCHIVE_URL as KUBEARCHIVE_FALLBACK_URL
 
 _k8s_loaded = False
+_k8s_lock = threading.Lock()
 
 
 def _ensure_k8s_config():
     global _k8s_loaded
-    if not _k8s_loaded:
-        config.load_kube_config()
-        _k8s_loaded = True
+    if _k8s_loaded:
+        return
+    with _k8s_lock:
+        if not _k8s_loaded:
+            config.load_kube_config()
+            _k8s_loaded = True
 
 
 def is_logged_in():

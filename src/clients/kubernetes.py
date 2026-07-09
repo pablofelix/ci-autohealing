@@ -94,7 +94,7 @@ class KubernetesClient(PipelineRunSource):
             result = api.list_namespaced_custom_object(
                 group='appstudio.redhat.com', version='v1alpha1',
                 namespace=ns, plural='components',
-                _request_timeout=10,
+                _request_timeout=60,
             )
             components = []
             for item in result.get('items', []):
