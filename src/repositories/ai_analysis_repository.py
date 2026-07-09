@@ -1063,6 +1063,112 @@ class AIAnalysisRepository:
 
             return result
 
+    def get_weekly_quality_trend(self, application=None, weeks=12):
+        """Weekly accuracy trend: how AI quality changes over time.
+
+        Returns one row per week (most recent first) with accuracy, verdict
+        counts, confidence, and cost. Weeks with no judged analyses are omitted.
+
+        Args:
+            application: Filter by application name.
+            weeks: Number of past weeks to include.
+
+        Returns:
+            List of dicts: week, judged, correct, partial, incorrect,
+                           accuracy, avg_confidence, cost_usd.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            where_conditions = [
+                "a.analyzed_at > NOW() - make_interval(weeks => %s)",
+                "a.human_verdict IS NOT NULL",
+            ]
+            params = [weeks]
+            if application:
+                where_conditions.append(
+                    "(b.application = %s OR c.application = %s)"
+                )
+                params.extend([application, application])
+
+            cursor.execute("""
+                SELECT
+                    DATE_TRUNC('week', a.analyzed_at)::date AS week,
+                    COUNT(*) AS judged,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                    ROUND(AVG(a.confidence_score), 2) AS avg_confidence,
+                    ROUND(COALESCE(SUM(a.cost_usd), 0)::numeric, 4) AS cost_usd
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE {}
+                GROUP BY DATE_TRUNC('week', a.analyzed_at)
+                ORDER BY week DESC
+            """.format(' AND '.join(where_conditions)), params)
+
+            rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                judged = row[1] or 0
+                correct = row[2] or 0
+                partial = row[3] or 0
+                accuracy = round((correct + partial * 0.5) / judged, 2) if judged else None
+                result.append({
+                    'week': str(row[0]),
+                    'judged': judged,
+                    'correct': correct,
+                    'partial': partial,
+                    'incorrect': row[4] or 0,
+                    'accuracy': accuracy,
+                    'avg_confidence': float(row[5]) if row[5] else None,
+                    'cost_usd': float(row[6]) if row[6] else 0.0,
+                })
+            return result
+
+    def get_cost_per_correct_diagnosis(self, application=None, days=30):
+        """Cost efficiency metric: average cost to produce one correct diagnosis.
+
+        Returns:
+            dict with total_cost, correct_count, cost_per_correct (or None if
+            no correct verdicts in the time window).
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            where_conditions = [
+                "a.analyzed_at > NOW() - make_interval(days => %s)",
+                "a.cost_usd IS NOT NULL",
+            ]
+            params = [days]
+            if application:
+                where_conditions.append(
+                    "(b.application = %s OR c.application = %s)"
+                )
+                params.extend([application, application])
+
+            cursor.execute("""
+                SELECT
+                    ROUND(COALESCE(SUM(a.cost_usd), 0)::numeric, 4) AS total_cost,
+                    COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct_count,
+                    COUNT(*) FILTER (WHERE a.human_verdict IS NOT NULL) AS judged_count
+                FROM ai_analysis a
+                LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                WHERE {}
+            """.format(' AND '.join(where_conditions)), params)
+
+            row = cursor.fetchone()
+            total_cost = float(row[0]) if row[0] else 0.0
+            correct_count = row[1] or 0
+            judged_count = row[2] or 0
+            cost_per_correct = round(total_cost / correct_count, 4) if correct_count else None
+            return {
+                'total_cost': total_cost,
+                'correct_count': correct_count,
+                'judged_count': judged_count,
+                'cost_per_correct': cost_per_correct,
+            }
+
     def get_verdict_stats_by_category(self, analyzer_type='build', days=90):
         """Return verdict stats grouped by failure_category.
 

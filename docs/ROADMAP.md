@@ -160,21 +160,23 @@ Goal: close the loop from detection → diagnosis → fix → verification autom
 Goal: dashboards and trends, not just point-in-time snapshots.
 
 **6a — AI Quality Metrics (see `docs/design/ai-quality-metrics.md`)**
-- [ ] Human feedback loop: verdict on triage resolve (correct/partial/incorrect)
-- [ ] `human_verdict` column in ai_analysis table
-- [ ] classification_accuracy, auto_fix_precision, unsafe_auto_fix_rate
-- [ ] avg_cost_per_analysis, cost_per_correct_diagnosis
-- [ ] API endpoint: `/api/v1/metrics/ai-quality`
-- [ ] Weekly accuracy report command: `ic ai quality`
-- [ ] Confidence calibration analysis
-- [ ] Training data export: `ic ai export-training-data` (for future custom model)
+- [x] Human feedback loop: auto-verdict via VerdictCorrelator when build passes post-analysis
+- [x] `human_verdict` column in ai_analysis table
+- [x] classification_accuracy, auto_fix_accuracy — via `ic ai regression`
+- [x] avg_cost_per_analysis — via `ic dashboard` (cost summary)
+- [x] API endpoint: `/api/v1/metrics/ai-quality`
+- [x] `ic ai quality` command — accuracy from verdicts + by_category breakdown
+- [x] Confidence calibration analysis — `ic ai quality --calibration` + CalibrationService
+- [x] Training data export — Phase 17a: `ic ai label-training-data --backfill`
+- [ ] cost_per_correct_diagnosis metric (cost_usd filtered by correct verdicts)
+- [ ] Weekly accuracy trend report — show how accuracy changes over time
 
 **6a2 — Confidence Calibration & Scientific Error Analysis (requires 6a)**
 - [ ] Calibration curve: when AI says 0.90, how often is it correct? Plot predicted vs actual
 - [ ] Bayesian priors per failure category from historical verdicts
 - [ ] Feature-based scoring: replace subjective LLM float with calculated score from boolean features (has_build_history, sha_mismatch_confirmed, nudging_checked, etc.)
 - [ ] Confidence cap refinement: tune penalties based on actual miss rates per missing source
-- [ ] Calibration dashboard in `ic ai quality --calibration`
+- [x] Calibration dashboard in `ic ai quality --calibration` (`_show_calibration_dashboard`)
 - [ ] Differential diagnosis: prompt LLM to generate 2-3 competing hypotheses ranked by evidence strength before selecting root cause
 - [ ] Evidence hierarchy classification: weight evidence sources (commit diff > build log > config > error message) and score evidence coverage
 - [ ] Fault Tree Analysis: structured decomposition of complex failures into contributing factors (multi-cause failures)
