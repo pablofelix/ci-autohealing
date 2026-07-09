@@ -138,11 +138,15 @@ def get_alerts(application=None):
     build_repo = get_repo(BuildFailureRepository)
     conforma_repo = get_repo(ConformaRepository)
 
+    from repositories.triage_repository import TriageRepository
     triage = build_repo.get_triage_summary(app)
+    triage_jira_build = get_repo(TriageRepository).build_jira_map(app)
     build_failures = []
     for comp in triage.get('failing_components', []):
+        comp_name = comp['component']
+        jira = comp.get('jira_key') or triage_jira_build.get(comp_name)
         build_failures.append({
-            'component': comp['component'],
+            'component': comp_name,
             'status': comp.get('status', 'Failed'),
             'error_type': comp.get('error_type'),
             'first_seen': str(comp.get('first_detected_at', '')),
@@ -150,6 +154,7 @@ def get_alerts(application=None):
             'occurrence_count': comp.get('failure_count', 1),
             'has_logs': comp.get('has_logs', False),
             'has_analysis': comp.get('ai_analyzed', False),
+            'jira_key': jira,
         })
 
     from cli import config as cfg
