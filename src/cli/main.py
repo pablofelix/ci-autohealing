@@ -2515,10 +2515,9 @@ def ai_label_training_data(backfill, app, limit, min_confidence, dry_run, verbos
     print(bold('Results:'))
     print('  Processed:              {}'.format(counts['processed']))
     print('  Labeled{}:             {}'.format(' (would be)' if dry_run else '', counts['labeled']))
-    print('  Skipped (no PR found):  {}'.format(counts['skipped_no_pr']))
-    print('  Skipped (no files):     {}'.format(counts['skipped_no_files']))
-    print('  Skipped (low conf):     {}'.format(counts['skipped_low_confidence']))
-    print('  Errors:                 {}'.format(counts['errors']))
+    print('  Skipped (no files):     {}'.format(counts.get('skipped_no_files', 0)))
+    print('  Skipped (low conf):     {}'.format(counts.get('skipped_low_confidence', 0)))
+    print('  Errors:                 {}'.format(counts.get('errors', 0)))
 
     if counts['labeled']:
         print()
