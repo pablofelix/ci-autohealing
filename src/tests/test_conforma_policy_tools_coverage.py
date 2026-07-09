@@ -617,14 +617,39 @@ class TestFetchExceptionsByPolicy:
         assert result is cached_data
 
     @patch('conforma.policy_tools._read_file_cache')
-    def test_file_cache_hit(self, mock_read):
-        """Stale memory cache + fresh file cache -> use file cache."""
-        file_data = {'registry-rhoai-prod': [{'value': 'file_rule'}]}
+    def test_file_cache_hit_with_sufficient_policies(self, mock_read):
+        """Stale memory cache + fresh file cache with >= 5 policies -> use file cache."""
+        file_data = {
+            'policy-a': [{'value': 'rule1'}],
+            'policy-b': [{'value': 'rule2'}],
+            'policy-c': [{'value': 'rule3'}],
+            'policy-d': [{'value': 'rule4'}],
+            'policy-e': [{'value': 'rule5'}],
+        }
         mock_read.return_value = file_data
 
         result = fetch_exceptions_by_policy()
         assert result == file_data
         mock_read.assert_called_once()
+
+    @patch('conforma.policy_tools._read_file_cache')
+    @patch('conforma.policy_tools.fetch_exceptions_from_gitlab',
+           return_value={'registry-rhoai-prod': [{'value': 'gitlab_rule'}]})
+    def test_file_cache_sparse_falls_through_to_gitlab(self, mock_gitlab, mock_read):
+        """Sparse file cache (< 5 policies) must be ignored and fall through to GitLab."""
+        import conforma.policy_tools as pt
+        pt._exceptions_cache['data'] = None
+        pt._exceptions_cache['ts'] = 0
+        mock_read.return_value = {'only-one-policy': [{'value': 'rule'}]}
+
+        with patch('clients.konflux_client.KonfluxClient') as mock_kc:
+            mock_kc.return_value.get_ec_policies.side_effect = Exception('cluster down')
+            result = fetch_exceptions_by_policy()
+
+        # Must have fallen through to GitLab since file cache had < 5 policies
+        assert 'registry-rhoai-prod' in result, \
+            'Sparse file cache was used instead of falling through to GitLab'
+        mock_gitlab.assert_called_once()
 
     @patch('conforma.policy_tools._write_file_cache')
     @patch('conforma.policy_tools._read_file_cache', return_value=None)

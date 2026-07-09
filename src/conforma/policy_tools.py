@@ -399,10 +399,13 @@ def fetch_exceptions_by_policy(namespace=None):
     if _exceptions_cache['data'] is not None and (now - _exceptions_cache['ts']) < _CACHE_TTL:
         return _exceptions_cache['data']
     cached = _read_file_cache()
-    if cached is not None:
+    if cached is not None and len(cached) >= 5:
         _exceptions_cache['data'] = cached
         _exceptions_cache['ts'] = now
         return cached
+    if cached is not None:
+        logger.debug("File cache has only %d policies — treating as stale, refetching",
+                     len(cached))
     try:
         from clients.konflux_client import KonfluxClient
         tenant_ns = _resolve_tenant_namespace(namespace)
