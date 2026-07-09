@@ -2,141 +2,17 @@
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
 from fastapi import APIRouter
 
 from api.validators import validate_application_name
+from onboarding.checks import build_component_status as _build_component_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["onboarding"])
-
-
-def _check_repo(comp: dict) -> dict:
-    url = comp.get('repository_url', '')
-    if not url:
-        return {'status': 'FAIL', 'detail': 'No repository URL configured',
-                'fix': 'Set spec.source.git.url on the Component CR'}
-    return {'status': 'PASS', 'detail': url}
-
-
-def _check_branch(comp: dict) -> dict:
-    branch = comp.get('branch', '')
-    if not branch:
-        return {'status': 'FAIL', 'detail': 'No branch configured',
-                'fix': 'Set spec.source.git.revision on the Component CR'}
-    return {'status': 'PASS', 'detail': branch}
-
-
-def _check_container_image(comp: dict) -> dict:
-    image = comp.get('container_image', '')
-    if not image:
-        return {'status': 'FAIL', 'detail': 'No container image configured',
-                'fix': 'Set spec.containerImage on the Component CR'}
-    return {'status': 'PASS', 'detail': image}
-
-
-def _check_pac(comp: dict, pac_repos: list) -> dict:
-    repo_url = comp.get('repository_url', '')
-    if not repo_url:
-        return {'status': 'SKIP', 'detail': 'No repository URL to match'}
-    for pac in pac_repos:
-        if pac.get('url', '') == repo_url:
-            return {'status': 'PASS', 'detail': 'PaC Repository CR found'}
-    return {'status': 'WARN', 'detail': 'No PaC Repository CR found for this repo',
-            'fix': 'Create a PipelinesAsCode Repository CR or enable PaC via Konflux UI'}
-
-
-def _check_builds(comp: dict, recent_pipelineruns: dict) -> dict:
-    name = comp.get('name', '')
-    runs = recent_pipelineruns.get(name, [])
-    if not runs:
-        commit = comp.get('last_built_commit', '')
-        if commit:
-            return {'status': 'PASS', 'detail': f'Built (commit {commit[:12]})'}
-        return {'status': 'FAIL', 'detail': 'No builds found',
-                'fix': 'Trigger an initial build via push or manual PipelineRun'}
-    latest = runs[0]
-    status = latest.get('status', 'unknown')
-    if status == 'succeeded':
-        return {'status': 'PASS', 'detail': 'Latest build succeeded'}
-    if status == 'running':
-        return {'status': 'WARN', 'detail': 'Build currently running'}
-    return {'status': 'FAIL', 'detail': f'Latest build {status}',
-            'fix': 'Check PipelineRun logs for errors'}
-
-
-def _check_nudges(comp: dict) -> dict:
-    nudges = comp.get('nudges', [])
-    if nudges:
-        return {'status': 'PASS', 'detail': f'{len(nudges)} nudge(s) configured'}
-    return {'status': 'INFO', 'detail': 'No nudges configured (optional for leaf components)'}
-
-
-def _check_last_built(comp: dict) -> dict:
-    commit = comp.get('last_built_commit', '')
-    if commit:
-        return {'status': 'PASS', 'detail': f'Last built commit: {commit[:12]}'}
-    return {'status': 'WARN', 'detail': 'No successful build recorded in status',
-            'fix': 'Component needs at least one successful build'}
-
-
-def _onboarding_score(checks: dict) -> int:
-    """0-100 score based on check results."""
-    weights = {
-        'repository': 20,
-        'branch': 15,
-        'container_image': 15,
-        'pac': 15,
-        'builds': 20,
-        'last_built': 10,
-        'nudges': 5,
-    }
-    score = 0
-    for key, weight in weights.items():
-        check = checks.get(key, {})
-        status = check.get('status', 'FAIL')
-        if status == 'PASS':
-            score += weight
-        elif status in ('WARN', 'INFO'):
-            score += weight // 2
-    return score
-
-
-def _build_component_status(comp: dict, pac_repos: list,
-                            recent_pipelineruns: dict) -> dict:
-    checks = {
-        'repository': _check_repo(comp),
-        'branch': _check_branch(comp),
-        'container_image': _check_container_image(comp),
-        'pac': _check_pac(comp, pac_repos),
-        'builds': _check_builds(comp, recent_pipelineruns),
-        'last_built': _check_last_built(comp),
-        'nudges': _check_nudges(comp),
-    }
-    score = _onboarding_score(checks)
-
-    failing = [k for k, v in checks.items() if v.get('status') == 'FAIL']
-    warnings = [k for k, v in checks.items() if v.get('status') == 'WARN']
-
-    if not failing and not warnings:
-        overall = 'complete'
-    elif not failing:
-        overall = 'partial'
-    else:
-        overall = 'incomplete'
-
-    return {
-        'component': comp.get('name', ''),
-        'application': comp.get('application', ''),
-        'overall': overall,
-        'score': score,
-        'checks': checks,
-        'failing': failing,
-        'warnings': warnings,
-    }
 
 
 def _detect_component_type(comp: dict) -> str:
@@ -420,7 +296,7 @@ def get_component_onboarding(application: str, component: str,
     _enrich_with_jira(result, component)
 
     if diff:
-        from utils.onboarding_jira import build_diff_data
+        from onboarding.jira_analysis import build_diff_data
         automation = result.get('automation_steps', [])
         result['diff'] = build_diff_data(result.get('steps', []), automation)
 
@@ -429,7 +305,7 @@ def get_component_onboarding(application: str, component: str,
 
 def _enrich_with_jira(result: dict, component: str) -> None:
     """Add Jira ticket data, automation steps, and heuristic analysis."""
-    from utils.onboarding_jira import (
+    from onboarding.jira_analysis import (
         analyze_bot_comments,
         build_onboarding_report,
         compute_heuristic_analysis,
@@ -512,25 +388,36 @@ def _enrich_with_jira(result: dict, component: str) -> None:
             result['odh_bot_error_analysis'] = odh_bot
 
 
-@router.get("/applications/{application}/onboarding")
-def get_onboarding_status(application: str) -> Dict[str, Any]:
-    """Get onboarding status for all components in an application."""
-    validate_application_name(application)
-
+def _get_onboarding_sync(application: str) -> Dict[str, Any]:
+    """Synchronous onboarding logic — run in a thread to avoid blocking the event loop."""
     namespace = os.environ.get('NAMESPACE', '')
     if not namespace:
         return {'application': application, 'components': [],
                 'error': 'NAMESPACE not set — cannot query cluster'}
 
     from clients.kubernetes import KubernetesClient
+    from openshift_auth import _ensure_k8s_config
+    _ensure_k8s_config()
 
     k8s = KubernetesClient(namespace=namespace)
-    components = k8s.list_components(application=application)
-    pac_repos = k8s.list_pac_repositories()
+
+    components = []
+    pac_repos = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_comp = pool.submit(k8s.list_components, application=application)
+        f_pac = pool.submit(k8s.list_pac_repositories)
+        try:
+            components = f_comp.result(timeout=90)
+            pac_repos = f_pac.result(timeout=90)
+        except Exception as exc:
+            logger.warning("K8s fetch failed (%s): %s", type(exc).__name__, exc)
+            return {'application': application, 'components': [],
+                    'error': f'K8s timeout ({type(exc).__name__}): {exc}'}
 
     jira_map = _build_jira_map(components)
 
-    def _process_one(comp):
+    results = []
+    for comp in components:
         status = _build_component_status(comp, pac_repos, {})
         comp_name = comp.get('name', '')
         jira_info = jira_map.get(comp_name)
@@ -538,18 +425,7 @@ def get_onboarding_status(application: str) -> Dict[str, Any]:
             status['jira_key'] = jira_info['key']
             status['jira_status'] = jira_info['status']
             status['jira_url'] = jira_info['url']
-        return status
-
-    results = []
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_process_one, c): c for c in components}
-        for future in as_completed(futures, timeout=30):
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                comp = futures[future]
-                logger.warning("Onboarding check failed for %s: %s",
-                               comp.get('name', '?'), exc)
+        results.append(status)
 
     results.sort(key=lambda r: (r['score'], r['component']))
 
@@ -565,6 +441,15 @@ def get_onboarding_status(application: str) -> Dict[str, Any]:
         'incomplete': incomplete,
         'components': results,
     }
+
+
+@router.get("/applications/{application}/onboarding")
+async def get_onboarding_status(application: str) -> Dict[str, Any]:
+    """Get onboarding status for all components in an application."""
+    import asyncio
+    validate_application_name(application)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_onboarding_sync, application)
 
 
 def _build_jira_map(components: list) -> dict:

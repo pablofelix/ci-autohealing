@@ -182,6 +182,29 @@ def sync_schedule(entries: List[ScheduleSync]) -> Dict[str, Any]:
     return {'synced': synced, 'count': len(synced), 'source': 'product_pages'}
 
 
+@router.get("/product-pages/schedule/{entity_id}")
+def get_pp_schedule(entity_id: int) -> List[Dict[str, Any]]:
+    """Proxy to Product Pages browse_schedule MCP tool."""
+    import json
+    import subprocess
+
+    token = os.environ.get('PRODUCT_PAGES_PROD_TOKEN', '')
+    url = f'https://productpages.redhat.com/api/v2/releases/{entity_id}/schedule/tasks/'
+
+    try:
+        result = subprocess.run(
+            ['curl', '-sf', '--max-time', '15', url,
+             '-H', f'Authorization: Token {token}',
+             '-H', 'Accept: application/json'],
+            capture_output=True, text=True, timeout=20)
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout)
+    except Exception as exc:
+        logger.warning("Product Pages fetch failed: %s", exc)
+
+    raise HTTPException(status_code=502, detail="Product Pages unavailable")
+
+
 @router.get("/applications/{application}/stale")
 def get_stale(application: str) -> Dict[str, Any]:
     """Components with untriggered commits (branch HEAD ahead of last build)."""

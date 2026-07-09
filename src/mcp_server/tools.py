@@ -175,14 +175,14 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
 
     conforma_violations = []
     triage_jira = _triage_repo().build_jira_map(application)
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         compute_exception_coverage_details,
         count_unique_violations,
         extract_violation_rules,
         fetch_exceptions_by_policy,
     )
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         policy_url as _policy_url,
     )
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
@@ -382,7 +382,7 @@ def get_failure(
     konflux = row.get('konflux_url') or _konflux_url(row.get('pipelinerun_name', ''))
     logs = None
     if include_logs:
-        from utils.log_filter import filter_error_lines
+        from log_filter import filter_error_lines
         raw_logs = row.get('build_logs')
         logs = filter_error_lines(raw_logs) if raw_logs else None
     context = row.get('commit_context') if include_commit_context else None
@@ -421,7 +421,7 @@ def get_violation(
         application: Which version to query
         include_details: Include violation_details JSONB
     """
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         compute_violation_coverage,
         count_unique_violations,
         extract_policy_from_scenario,
@@ -956,8 +956,7 @@ def get_conforma_categories(
             'groups': groups,
             'categories': {},
         }
-    from repositories.conforma_repository import ConformaRepository
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         compute_violation_coverage,
         count_unique_violations,
@@ -966,6 +965,7 @@ def get_conforma_categories(
         fetch_exceptions_by_policy,
         lookup_exceptions,
     )
+    from repositories.conforma_repository import ConformaRepository
     repo = ConformaRepository(_db_connection())
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     comps = repo.find_unresolved_component_names(application)
@@ -1056,8 +1056,8 @@ def get_conforma_rules(
             'total_rules': len(rules),
             'rules': rules,
         }
+    from conforma.policy_tools import count_unique_violations
     from repositories.conforma_repository import ConformaRepository
-    from utils.conforma_utils import count_unique_violations
     repo = ConformaRepository(_db_connection())
     violations = repo.get_violation_summaries(application)
     rules_map = {}
@@ -1535,7 +1535,7 @@ def get_conforma_report(
             'total_violations': len(violations),
             'violations': violations,
         }
-    from utils.conforma_utils import (
+    from conforma.policy_tools import (
         categorize_policy,
         count_unique_violations,
         enrich_with_coverage,
@@ -1932,7 +1932,7 @@ def export_markdown(
     if violation:
         lines = [f"## Conforma Violation: {violation['component_name']}"]
         lines.append(f"\n**Scenario:** {violation['scenario']}")
-        from utils.conforma_utils import count_unique_violations as _cuv
+        from conforma.policy_tools import count_unique_violations as _cuv
         _uvc, _uvr = _cuv(violation.get('violation_summary', ''))
         if _uvc:
             lines.append(f"**Violations:** {_uvc} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings")
@@ -2080,7 +2080,7 @@ def export_slack(
         konflux = _konflux_url(violation.get('pipelinerun_name', ''))
         text = f":warning: *Conforma Violation: {violation['component_name']}*\n"
         text += f"Scenario: {violation['scenario']}\n"
-        from utils.conforma_utils import count_unique_violations as _cuv2
+        from conforma.policy_tools import count_unique_violations as _cuv2
         _uvc2, _ = _cuv2(violation.get('violation_summary', ''))
         if _uvc2:
             text += f"Violations: {_uvc2} unique ({violation['violations_count']} per-image) | Warnings: {violation['warnings_count']}\n"
@@ -2587,7 +2587,7 @@ def _format_conforma_jira(violation: Dict[str, Any], analysis: Optional[Dict[str
     lines.append(f"|Component|{comp}|")
     lines.append("|Status|Policy Violation|")
     lines.append(f"|Scenario|{violation['scenario']}|")
-    from utils.conforma_utils import count_unique_violations as _cuv3
+    from conforma.policy_tools import count_unique_violations as _cuv3
     _uvc3, _ = _cuv3(violation.get('violation_summary', ''))
     if _uvc3:
         lines.append(f"|Violations|{_uvc3} unique violations ({violation['violations_count']} per-image), {violation['warnings_count']} warnings|")
@@ -3029,6 +3029,82 @@ def get_config_analysis(
         'summary': analysis.get('summary'),
         'findings': analysis.get('findings', []),
         'auto_rebuild_candidates': analysis.get('auto_rebuild_candidates', []),
+        'cost_usd': result.get('cost_usd', 0),
+        'model': result.get('model', ''),
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_build_config_analysis(
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Run build pipeline configuration analysis using AI.
+
+    Audits stale components, recurring transient failures, webhook issues,
+    build chain problems, and quota bottlenecks. Identifies auto-rebuild
+    candidates. Requires LLM_PROVIDER to be configured.
+
+    Args:
+        application: Application name to analyze
+    """
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        return {'error': 'LLM not configured. Set LLM_PROVIDER env var.'}
+
+    from analyzers.build_config_analyzer import BuildConfigAnalyzer
+    db = _db_connection()
+    analyzer = BuildConfigAnalyzer(config, db=db)
+    result = analyzer.run(application=application)
+    if not result.get('analyzed'):
+        return {'error': 'Analysis could not complete'}
+    analysis = result['analysis']
+    return {
+        'findings_count': len(analysis.get('findings', [])),
+        'overall_severity': analysis.get('overall_severity'),
+        'confidence': analysis.get('confidence_score'),
+        'summary': analysis.get('summary'),
+        'findings': analysis.get('findings', []),
+        'auto_rebuild_candidates': analysis.get('auto_rebuild_candidates', []),
+        'cost_usd': result.get('cost_usd', 0),
+        'model': result.get('model', ''),
+    }
+
+
+@mcp.tool()
+@async_tool
+def get_release_config_analysis(
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Run release configuration analysis using AI.
+
+    Audits conforma blockers, PCC cache freshness, exception coverage,
+    snapshot SHA drift, and nightly build health. Identifies release
+    blockers. Requires LLM_PROVIDER to be configured.
+
+    Args:
+        application: Application name to analyze
+    """
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        return {'error': 'LLM not configured. Set LLM_PROVIDER env var.'}
+
+    from analyzers.release_config_analyzer import ReleaseConfigAnalyzer
+    db = _db_connection()
+    analyzer = ReleaseConfigAnalyzer(config, db=db)
+    result = analyzer.run(application=application)
+    if not result.get('analyzed'):
+        return {'error': 'Analysis could not complete'}
+    analysis = result['analysis']
+    return {
+        'findings_count': len(analysis.get('findings', [])),
+        'overall_severity': analysis.get('overall_severity'),
+        'confidence': analysis.get('confidence_score'),
+        'summary': analysis.get('summary'),
+        'findings': analysis.get('findings', []),
+        'release_blockers': analysis.get('release_blockers', []),
         'cost_usd': result.get('cost_usd', 0),
         'model': result.get('model', ''),
     }
