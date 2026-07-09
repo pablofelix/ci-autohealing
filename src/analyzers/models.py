@@ -114,6 +114,15 @@ class AnalysisResult(BaseModel):
         return v.strip()
 
 
+class DifferentialHypothesis(BaseModel):
+    """A competing hypothesis in the differential diagnosis."""
+    hypothesis: str = Field(..., min_length=5)
+    category: str = Field(...)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    supporting_evidence: List[str] = Field(default_factory=list)
+    contradicting_evidence: List[str] = Field(default_factory=list)
+
+
 class ConformaAnalysisResult(BaseModel):
     """Validated analysis output from LLM for Conforma policy violations."""
 
@@ -183,6 +192,11 @@ class ConformaAnalysisResult(BaseModel):
     source_transparency: Optional[SourceTransparency] = Field(
         default=None,
         description="What sources were used, what was unavailable, and analysis limitations"
+    )
+
+    differential_diagnosis: List[DifferentialHypothesis] = Field(
+        default_factory=list,
+        description="2-3 competing hypotheses ranked by evidence. First = primary diagnosis."
     )
 
     @field_validator('confidence_score')
@@ -429,6 +443,132 @@ class ScenariosAnalysisResult(BaseModel):
         return round(v, 2)
 
     @field_validator('findings', 'recommendations')
+    @classmethod
+    def validate_not_placeholder(cls, v):
+        placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
+        if v.lower().strip() in placeholders:
+            raise ValueError(f"Invalid placeholder value: {v}")
+        return v.strip()
+
+
+class BuildConfigFinding(BaseModel):
+    """A single finding from the build pipeline configuration audit."""
+
+    title: str = Field(..., min_length=5, description="Short finding title")
+    severity: Literal['critical', 'warning', 'info']
+    category: Literal[
+        'stale_component', 'recurring_transient', 'quota_bottleneck',
+        'missing_webhook', 'build_chain_broken',
+    ]
+    description: str = Field(..., min_length=10, description="Detailed description")
+    recommendation: str = Field(..., min_length=10, description="What to do about it")
+    affected_components: List[str] = Field(
+        default_factory=list,
+        description="Components affected by this finding"
+    )
+    can_auto_fix: bool = Field(
+        default=False,
+        description="Whether this can be fixed automatically (e.g., rebuild)"
+    )
+    fix_action: Literal[
+        'rebuild', 'nudge_fix', 'webhook_setup',
+        'quota_request', 'investigation',
+    ] = Field(
+        default='investigation',
+        description="Type of fix action needed"
+    )
+
+
+class BuildConfigAnalysisResult(BaseModel):
+    """Validated output from the build pipeline configuration analyzer."""
+
+    findings: List[BuildConfigFinding] = Field(
+        default_factory=list,
+        description="List of build configuration issues found"
+    )
+    overall_severity: Literal['critical', 'warning', 'info'] = Field(
+        ..., description="Worst severity among findings"
+    )
+    confidence_score: float = Field(
+        ..., ge=0.0, le=1.0, description="Confidence in analysis (0-1)"
+    )
+    summary: str = Field(
+        ..., min_length=10, description="Overall build health summary"
+    )
+    auto_rebuild_candidates: List[str] = Field(
+        default_factory=list,
+        description="Components that would likely be fixed by a rebuild"
+    )
+
+    @field_validator('confidence_score')
+    @classmethod
+    def round_confidence(cls, v):
+        return round(v, 2)
+
+    @field_validator('summary')
+    @classmethod
+    def validate_not_placeholder(cls, v):
+        placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
+        if v.lower().strip() in placeholders:
+            raise ValueError(f"Invalid placeholder value: {v}")
+        return v.strip()
+
+
+class ReleaseConfigFinding(BaseModel):
+    """A single finding from the release configuration audit."""
+
+    title: str = Field(..., min_length=5, description="Short finding title")
+    severity: Literal['critical', 'warning', 'info']
+    category: Literal[
+        'conforma_blocker', 'pcc_cache_stale', 'missing_exception',
+        'sha_drift', 'nightly_broken',
+    ]
+    description: str = Field(..., min_length=10, description="Detailed description")
+    recommendation: str = Field(..., min_length=10, description="What to do about it")
+    affected_components: List[str] = Field(
+        default_factory=list,
+        description="Components affected by this finding"
+    )
+    blocks_release: bool = Field(
+        default=False,
+        description="Whether this finding blocks the release"
+    )
+    fix_action: Literal[
+        'rebuild', 'exception_request', 'pcc_regen',
+        'config_change', 'investigation',
+    ] = Field(
+        default='investigation',
+        description="Type of fix action needed"
+    )
+
+
+class ReleaseConfigAnalysisResult(BaseModel):
+    """Validated output from the release configuration analyzer."""
+
+    findings: List[ReleaseConfigFinding] = Field(
+        default_factory=list,
+        description="List of release configuration issues found"
+    )
+    overall_severity: Literal['critical', 'warning', 'info'] = Field(
+        ..., description="Worst severity among findings"
+    )
+    confidence_score: float = Field(
+        ..., ge=0.0, le=1.0, description="Confidence in analysis (0-1)"
+    )
+    summary: str = Field(
+        ..., min_length=10, description="Overall release readiness summary"
+    )
+    release_blockers: List[str] = Field(
+        default_factory=list,
+        description="Components or issues that block the release"
+    )
+
+    @field_validator('confidence_score')
+    @classmethod
+    def round_confidence(cls, v):
+        return round(v, 2)
+
+    @field_validator('summary')
     @classmethod
     def validate_not_placeholder(cls, v):
         placeholders = ['n/a', 'none', 'unknown', 'todo', 'tbd']
