@@ -2385,10 +2385,20 @@ def ai_status():
 @click.option('--limit', type=int, default=50, help='Max items to evaluate')
 @click.option('--verbose', '-v', is_flag=True, help='Show per-item details')
 @click.option('--use-llm', is_flag=True, help='Re-run LLM on completed data (slow)')
-def ai_regression(domain, app, limit, verbose, use_llm):
+@click.option('--confusion', is_flag=True,
+              help='Print confusion matrix (build domain only, requires ML labels)')
+@click.option('--min-label-confidence', type=float, default=0.7,
+              help='Min ML label confidence for labeled evaluation (default 0.7)')
+def ai_regression(domain, app, limit, verbose, use_llm, confusion, min_label_confidence):
     """Regression test AI analyzer against resolved data.
 
     DOMAIN is 'conforma' (default), 'build', 'release', or 'onboarding'.
+
+    For the build domain, additional metrics are available when ML training
+    labels exist (run ic ai label-training-data --backfill first):
+    - F1/precision/recall per category
+    - Null model baseline comparison
+    - Confusion matrix (--confusion flag)
     """
     from cli.formatting import cyan, yellow
 
@@ -2397,7 +2407,8 @@ def ai_regression(domain, app, limit, verbose, use_llm):
         return
 
     if domain == 'build':
-        _ai_regression_build(app, limit, verbose)
+        _ai_regression_build(app, limit, verbose, confusion=confusion,
+                             min_label_confidence=min_label_confidence)
         return
 
     if domain == 'release':
@@ -2495,9 +2506,9 @@ def ai_label_training_data(backfill, app, limit, min_confidence, dry_run, verbos
             print(cyan("Run 'ic ai regression build' to evaluate classifier readiness"))
 
 
-def _print_regression_report(title, result):
+def _print_regression_report(title, result, show_confusion=False):
     """Shared formatting for regression test results."""
-    from cli.formatting import bold, green, red, section_header
+    from cli.formatting import bold, cyan, green, red, section_header
     section_header(title)
     print()
     m = result['metrics']
@@ -2506,13 +2517,25 @@ def _print_regression_report(title, result):
     print('  With AI analysis:      {} ({}%)'.format(
         m['with_ai_analysis'], m['ai_coverage_pct']))
     print('  Evaluated this run:    {}'.format(result['evaluations_count']))
+    if m.get('labeled_count'):
+        print('  ML-labeled failures:   {}'.format(m['labeled_count']))
     print()
     print(bold('Accuracy:'))
     print('  Category accuracy:     {}%'.format(int(m['accuracy'] * 100)))
+    if m.get('null_model_accuracy', 0) > 0:
+        null_pct = int(m['null_model_accuracy'] * 100)
+        delta = int(m['accuracy'] * 100) - null_pct
+        delta_str = (green('+{}%'.format(delta)) if delta >= 0
+                     else red('{}%'.format(delta)))
+        print('  Null model baseline:   {}%  (delta vs baseline: {})'.format(
+            null_pct, delta_str))
+    if m.get('macro_f1', 0) > 0:
+        print('  Macro F1 (ML labels):  {:.1f}%'.format(m['macro_f1'] * 100))
     print('  Calibration score:     {}'.format(m['calibration_score']))
     print('  Auto-fix accuracy:     {}%'.format(int(m['auto_fix_accuracy'] * 100)))
     print()
     if m.get('by_category'):
+        has_f1 = any(cm.get('f1', 0) > 0 for cm in m['by_category'].values())
         print(bold('By Category:'))
         for cat, cm in sorted(m['by_category'].items(),
                               key=lambda x: x[1].get('total', 0), reverse=True):
@@ -2521,8 +2544,28 @@ def _print_regression_report(title, result):
             pct = correct * 100 // max(total, 1)
             conf = cm.get('avg_confidence', 0)
             status = green('{}%'.format(pct)) if pct >= 80 else red('{}%'.format(pct))
-            print('  {:<30} {:>3} evals  {} acc  {:.0f}% conf'.format(
-                cat, total, status, conf * 100))
+            line = '  {:<30} {:>3} evals  {} acc  {:.0f}% conf'.format(
+                cat, total, status, conf * 100)
+            if has_f1 and cm.get('f1', 0) > 0:
+                line += '  F1={:.2f} P={:.2f} R={:.2f}'.format(
+                    cm.get('f1', 0), cm.get('precision', 0), cm.get('recall', 0))
+            print(line)
+        print()
+    if show_confusion and m.get('confusion_matrix'):
+        print(bold('Confusion Matrix (rows=true, cols=predicted):'))
+        matrix = m['confusion_matrix']
+        all_cats = sorted(set(list(matrix.keys()) +
+                              [p for row in matrix.values() for p in row]))
+        header = '  {:<25}'.format('true \\ predicted')
+        for cat in all_cats:
+            header += ' {:>6}'.format(cat[:6])
+        print(header)
+        for true_cat in sorted(matrix.keys()):
+            row_str = '  {:<25}'.format(true_cat[:25])
+            for pred_cat in all_cats:
+                count = matrix.get(true_cat, {}).get(pred_cat, 0)
+                row_str += ' {:>6}'.format(count if count else '-')
+            print(row_str)
         print()
     if m.get('coverage_gaps'):
         print(bold('Coverage Gaps (< 5% AI coverage):'))
@@ -2534,9 +2577,14 @@ def _print_regression_report(title, result):
         for i, imp in enumerate(m['improvements'], 1):
             print('  {}. {}'.format(i, imp))
         print()
+    if not m.get('labeled_count') and not m.get('confusion_matrix'):
+        print(cyan('Tip: run ic ai label-training-data --backfill to enable '
+                   'F1/precision/recall metrics'))
+        print()
 
 
-def _ai_regression_build(app, limit, verbose):
+def _ai_regression_build(app, limit, verbose, confusion=False,
+                          min_label_confidence=0.7):
     """Regression test the build failure analyzer."""
     from cli.db import require_db
     from cli.formatting import cyan, yellow
@@ -2547,12 +2595,16 @@ def _ai_regression_build(app, limit, verbose):
     from analyzers.build_regression import BuildRegressionTester
     tester = BuildRegressionTester(config)
     application = app or cfg.APPLICATION_NAME
-    result = tester.run(application=application, limit=limit, verbose=verbose)
+    result = tester.run(
+        application=application, limit=limit, verbose=verbose,
+        min_label_confidence=min_label_confidence,
+    )
     if not result.get('analyzed'):
         print(yellow('No resolved build failures with AI analysis found'))
         print(cyan("Run 'ic ai analyze' on more components to build history"))
         return
-    _print_regression_report('Build Failure AI Regression Report', result)
+    _print_regression_report('Build Failure AI Regression Report', result,
+                              show_confusion=confusion)
 
 
 def _ai_regression_release(limit, verbose):

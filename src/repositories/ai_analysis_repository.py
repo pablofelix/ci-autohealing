@@ -1230,6 +1230,61 @@ class AIAnalysisRepository:
             ]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
+    def get_labeled_builds_with_analysis(self, application=None,
+                                         min_label_confidence=0.0, limit=200):
+        """Get resolved build failures with both AI analysis and ML training labels.
+
+        Uses LATERAL to take only the most recent AI analysis per failure, preventing
+        fan-out when a failure was re-analyzed multiple times.
+
+        Args:
+            application: Filter by application name.
+            min_label_confidence: Exclude labels below this confidence threshold.
+            limit: Maximum rows to return.
+
+        Returns:
+            List of dicts with ai_predicted, ml_label, label_confidence, ai_confidence.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            where_conditions = [
+                'bf.is_resolved = TRUE',
+                'ml.label_confidence >= %s',
+            ]
+            params = [min_label_confidence]
+            if application:
+                where_conditions.append('bf.application = %s')
+                params.append(application)
+            params.append(limit)
+
+            cursor.execute("""
+                SELECT
+                    bf.component_name,
+                    a.failure_category   AS ai_predicted,
+                    ml.failure_category  AS ml_label,
+                    a.confidence_score   AS ai_confidence,
+                    ml.label_confidence,
+                    ml.label_source
+                FROM build_failures bf
+                JOIN LATERAL (
+                    SELECT failure_category, confidence_score
+                    FROM ai_analysis
+                    WHERE build_failure_id = bf.id
+                    ORDER BY analyzed_at DESC
+                    LIMIT 1
+                ) a ON TRUE
+                JOIN ml_training_labels ml ON ml.build_failure_id = bf.id
+                WHERE {}
+                ORDER BY ml.label_confidence DESC
+                LIMIT %s
+            """.format(' AND '.join(where_conditions)), params)
+
+            cols = [
+                'component_name', 'ai_predicted', 'ml_label',
+                'ai_confidence', 'label_confidence', 'label_source',
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
     def get_release_analyses(self, limit=50):
         """Get all release analyses for regression testing."""
         with self.db.connection() as conn:

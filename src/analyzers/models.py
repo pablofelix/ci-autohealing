@@ -584,6 +584,9 @@ class CategoryMetrics(BaseModel):
     incorrect: int = 0
     total: int = 0
     avg_confidence: float = 0.0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
 
 
 class RegressionMetrics(BaseModel):
@@ -628,6 +631,22 @@ class RegressionMetrics(BaseModel):
     unverifiable_count: int = Field(
         default=0, ge=0,
         description="Evaluations without ground truth (excluded from accuracy)"
+    )
+    null_model_accuracy: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Accuracy of a majority-class baseline (lower bound for meaningful models)"
+    )
+    macro_f1: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Macro-averaged F1 across all categories (from ML label evaluation)"
+    )
+    labeled_count: int = Field(
+        default=0, ge=0,
+        description="Failures evaluated against ml_training_labels ground truth"
+    )
+    confusion_matrix: Dict[str, Dict[str, int]] = Field(
+        default_factory=dict,
+        description="confusion_matrix[true_label][predicted_label] = count"
     )
 
 
