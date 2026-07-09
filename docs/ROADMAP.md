@@ -519,18 +519,18 @@ LLM-powered audit of build pipeline and release configuration, similar to `Confi
 
 | Feature | Surface | Status |
 |---------|---------|--------|
-| `BuildConfigAnalyzer` — audit build pipeline configuration | `src/analyzers/build_config_analyzer.py` | planned |
-| Detect stale components (no build triggered despite new commits) | Analyzer | planned |
-| Detect misconfigured nudging (component in nudging.yaml but builds failing) | Analyzer | planned |
-| Detect quota issues (build stuck in pending > 30 min) | Analyzer | planned |
-| Detect recurring transient failures (same component, same error, rebuild fixes) | Analyzer | planned |
-| Auto-rebuild candidates for builds (transient failures: OOM, network, registry) | Analyzer | planned |
-| `ReleaseConfigAnalyzer` — audit release configuration | `src/analyzers/release_config_analyzer.py` | planned |
-| Detect release blockers from conforma violations (map violations → release gate) | Analyzer | planned |
-| Detect PCC cache staleness (stale advisories blocking release) | Analyzer | planned |
-| Detect missing conforma exceptions before release window | Analyzer | planned |
-| CLI: `ic ai analyze-config --type build` / `--type release` | CLI | planned |
-| MCP: `get_build_config_analysis()` / `get_release_config_analysis()` | MCP tool | planned |
+| `BuildConfigAnalyzer` — audit build pipeline configuration | `src/analyzers/build_config_analyzer.py` | done |
+| Detect stale components (no build triggered despite new commits) | Analyzer | done |
+| Detect misconfigured nudging (component in nudging.yaml but builds failing) | Analyzer | done |
+| Detect quota issues (build stuck in pending > 30 min) | Analyzer | done |
+| Detect recurring transient failures (same component, same error, rebuild fixes) | Analyzer | done |
+| Auto-rebuild candidates for builds (transient failures: OOM, network, registry) | Analyzer | done |
+| `ReleaseConfigAnalyzer` — audit release configuration | `src/analyzers/release_config_analyzer.py` | done |
+| Detect release blockers from conforma violations (map violations → release gate) | Analyzer | done |
+| Detect PCC cache staleness (stale advisories blocking release) | Analyzer | done |
+| Detect missing conforma exceptions before release window | Analyzer | done |
+| CLI: `ic ai analyze-config --type build` / `--type release` | CLI | done |
+| MCP: `get_build_config_analysis()` / `get_release_config_analysis()` | MCP tool | done |
 
 **Build config findings categories:**
 - `stale_component`: component building from old commits (nudge not working)
@@ -563,6 +563,116 @@ Extend `ic ai regression` to support all failure types from a single command.
 3. Build config analyzer (directly actionable — finds auto-rebuild candidates)
 4. Release config analyzer (directly actionable — finds release blockers early)
 5. Unified CLI and weekly quality report
+
+---
+
+## Phase 17: Custom Failure Classifier
+
+Goal: train a lightweight classifier on RHOAI-specific historical data to pre-screen failures before sending them to the LLM. LLM becomes a fallback for novel/ambiguous cases only, reducing cost and improving accuracy on well-known patterns.
+
+**Architecture (cascade classifier):**
+```
+Resolved failure (PR diff + error metadata)
+    ↓
+Feature extractor (boolean + numeric features from PR diff)
+    ↓
+sklearn RandomForest  ← handles known patterns cheaply (~80% of cases)
+    ↓  confidence < 0.7?
+    ↓  YES → Claude (LLM) as fallback for novel cases
+    ↓  NO  → return classification directly
+```
+
+**Why auto-labeling works here:** when a build failure is resolved, `resolution_commit_sha` is captured automatically. From that SHA, `get_pr_for_commit()` finds the GitHub PR. Changed files map directly to `failure_category` (go.mod → dependency_issue, Dockerfile → build_config, .tekton/ → config_error). No manual labeling needed.
+
+**Log filter boundary — critical invariant:**
+> `filter_error_lines()` in `log_filter.py` exists for ONE purpose: reduce LLM token cost before sending logs to Claude. The analyzer reads from MinIO (full log), filters, then sends to Claude. This function must NOT be changed or reused for ML purposes. The ML pipeline has its own separate extractor (`extract_root_cause_lines()`) that also reads from MinIO but applies a different, more aggressive strategy optimized for embedding/feature extraction, not LLM comprehension.
+
+```
+MinIO (full raw log — never touched)
+    ├── build_failure_analyzer.py → filter_error_lines() → Claude    [LLM context, unchanged]
+    ├── mcp_server/tools.py       → filter_error_lines() → MCP tool  [LLM context, unchanged]
+    └── classifiers/log_extractor.py → extract_root_cause_lines()    [ML only, new, separate]
+```
+
+### 17a — Auto-Label Pipeline
+
+Extend `verdict_correlator.py` + `github_client.py` to produce training labels from resolved PRs.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `infer_label_from_pr(pr_files)` — map changed files to `failure_category` | `collectors/verdict_correlator.py` | planned |
+| `label_confidence` score: high = single clear file type, low = mixed/unknown | `verdict_correlator.py` | planned |
+| DB migration: add `ground_truth_category`, `label_source`, `label_confidence` to `ai_analysis` | migration | planned |
+| Backfill: run auto-labeler on all resolved failures with `resolution_commit_sha` | `ic ai label-training-data --backfill` | planned |
+| `ic ai export-training-data --type build [--min-confidence 0.7]` | CLI | planned |
+
+**File → category mapping:**
+- `go.mod`, `go.sum`, `requirements.txt`, `pyproject.toml`, `package.json` → `dependency_issue`
+- `Dockerfile`/`Containerfile` with base image change → `base_image_update`
+- `Dockerfile`/`Containerfile` other changes → `build_config`
+- `.tekton/*.yaml` → `config_error`
+- only `*_test.go`, `test_*.py` → `test_failure`
+- source code only → `build_error`
+- `hack/`, `Makefile`, build scripts → `build_error`
+- mixed (config + code, or >2 categories) → `label_confidence=low`
+
+### 17b — ML Log Extractor (separate from LLM filter)
+
+A new extractor for the ML pipeline that reads full logs from MinIO. Must never be used in the analyzer or MCP tools — those use `filter_error_lines()` which stays unchanged.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `extract_root_cause_lines(logs, max_lines=10)` — dedup, keep first unique error lines only | `src/classifiers/log_extractor.py` | planned |
+| Strip cascading errors (same pattern repeated) and noise (timestamps, SHAs, Docker layers) | `log_extractor.py` | planned |
+| `read_full_log_from_blob(failure)` — read from MinIO/BlobStore bypassing any filter | `log_extractor.py` | planned |
+| Clearly documented: this module is ML-only, not for LLM context | docstring + comment | planned |
+
+**Why a separate module:** `filter_error_lines()` keeps 20 lines of context per error match — right for Claude which needs surrounding context to understand the failure. For embeddings, context is noise; you want only the 5-10 unique root cause lines. Different consumers, different strategies, separate code.
+
+### 17c — Regression Tester Metrics Improvements
+
+Current regression testers report fuzzy accuracy only. Add proper classification metrics.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| F1 score per `failure_category` (precision + recall breakdown) | All regression testers | planned |
+| Null model baseline: accuracy of majority-class classifier as lower bound | Regression testers | planned |
+| `label_confidence` filter: evaluate only on high-confidence auto-labels | Regression testers | planned |
+| Confusion matrix: `ic ai regression build --confusion` | CLI | planned |
+| Delta vs baseline: "LLM alone: 77%, classifier+LLM: X%" comparison | `ic ai quality` | planned |
+
+### 17d — Feature Extractor + sklearn Classifier
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| `FailureFeatures` frozen dataclass: boolean + numeric features per failure | `src/classifiers/features.py` | planned |
+| `extract_build_features(failure_dict)` → `FailureFeatures` (from PR diff, not log) | `src/classifiers/features.py` | planned |
+| Key features: `has_go_mod_change`, `has_dockerfile_change`, `has_tekton_change`, `error_contains_oom`, `error_contains_network`, `build_history_pass_rate`, `times_rebuilt_same_error` | features | planned |
+| `BuildClassifier`: sklearn RandomForest, `.joblib` serialization | `src/classifiers/build_classifier.py` | planned |
+| `ic ai train-classifier --type build [--min-samples 50]` | CLI | planned |
+| `ic ai classifier status` — model accuracy, training date, sample count | CLI | planned |
+| Cascade integration in `BuildFailureAnalyzer`: run classifier first, LLM if confidence < 0.7 | `analyzers/build_failure_analyzer.py` | planned |
+
+### 17e — Embeddings upgrade (only if 17d plateaus)
+
+Only proceed if sklearn accuracy from PR-diff features plateaus below 80% and dataset has grown to N > 1000.
+
+| Feature | Surface | Status |
+|---------|---------|--------|
+| Use `extract_root_cause_lines()` (from 17b) as text input | `log_extractor.py` | conditional |
+| Embed filtered log lines via embeddings API (no PyTorch, no fine-tuning) | `src/classifiers/embeddings.py` | conditional |
+| Train sklearn LogisticRegression on embeddings instead of boolean features | `build_classifier.py` | conditional |
+| Benchmark: embeddings vs boolean features on same labeled dataset | `ic ai classifier benchmark` | conditional |
+
+**Not PyTorch:** with N < 5000 (realistic ceiling for RHOAI), a fine-tuned transformer adds infrastructure cost and training complexity without accuracy gains over embeddings + sklearn. Revisit only if dataset reaches 10k+ examples.
+
+**Implementation order:**
+1. `infer_label_from_pr()` in `verdict_correlator.py` — no preconditions
+2. DB migration + backfill + `ic ai export-training-data`
+3. `extract_root_cause_lines()` in `src/classifiers/log_extractor.py` — separate from LLM filter
+4. Regression tester metrics (F1, confusion matrix)
+5. `FailureFeatures` + `BuildClassifier` + cascade integration
+6. Embeddings upgrade only if step 5 is insufficient
 
 ---
 
