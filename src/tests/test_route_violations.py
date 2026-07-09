@@ -25,23 +25,23 @@ def client():
 
 # Shared mock returns for conforma_utils lazy imports
 CONFORMA_UTILS_PATCHES = {
-    "utils.conforma_utils.categorize_policy": "Components",
-    "utils.conforma_utils.compute_blocks": "release",
-    "utils.conforma_utils.compute_coverage_by_env": {},
-    "utils.conforma_utils.count_unique_violations": (3, [{"rule": "test_rule", "detail": ""}]),
-    "utils.conforma_utils.extract_policy_from_scenario": "test-policy",
-    "utils.conforma_utils.extract_violation_rules": ["rule1"],
-    "utils.conforma_utils.fetch_exceptions_by_policy": {},
-    "utils.conforma_utils.policy_env": "stage",
-    "utils.conforma_utils.enrich_with_coverage": None,
-    "utils.conforma_utils.compute_violation_coverage": {
+    "conforma.policy_tools.categorize_policy": "Components",
+    "conforma.policy_tools.compute_blocks": "release",
+    "conforma.policy_tools.compute_coverage_by_env": {},
+    "conforma.policy_tools.count_unique_violations": (3, [{"rule": "test_rule", "detail": ""}]),
+    "conforma.policy_tools.extract_policy_from_scenario": "test-policy",
+    "conforma.policy_tools.extract_violation_rules": ["rule1"],
+    "conforma.policy_tools.fetch_exceptions_by_policy": {},
+    "conforma.policy_tools.policy_env": "stage",
+    "conforma.policy_tools.enrich_with_coverage": None,
+    "conforma.policy_tools.compute_violation_coverage": {
         "coverage": "not_covered",
         "covered_rules": [],
         "uncovered_rules": ["rule1"],
         "matching_exceptions": [],
     },
-    "utils.conforma_utils.lookup_exceptions": [],
-    "utils.conforma_utils.compute_exception_coverage_details": {
+    "conforma.policy_tools.lookup_exceptions": [],
+    "conforma.policy_tools.compute_exception_coverage_details": {
         "coverage": "not_covered",
         "stage": None,
         "prod": None,
@@ -51,7 +51,7 @@ CONFORMA_UTILS_PATCHES = {
         "uncovered_rules_stage": [],
         "uncovered_rules_prod": [],
     },
-    "utils.conforma_utils.policy_url": None,
+    "conforma.policy_tools.policy_url": None,
 }
 
 
@@ -254,7 +254,7 @@ def test_list_violation_rules_happy_path(client):
     ]
     with patch("api.validators.validate_application_name", side_effect=lambda x: x), \
          patch("api.routes.violations._conforma_repo") as mock_repo, \
-         patch("utils.conforma_utils.count_unique_violations",
+         patch("conforma.policy_tools.count_unique_violations",
                return_value=(2, [{"rule": "rule1", "detail": ""}, {"rule": "rule2", "detail": ""}])):
         mock_repo.return_value.get_violation_summaries.return_value = violations
 
@@ -289,7 +289,7 @@ def test_list_violation_rules_with_reporter(client):
 def test_list_violation_rules_empty(client):
     with patch("api.validators.validate_application_name", side_effect=lambda x: x), \
          patch("api.routes.violations._conforma_repo") as mock_repo, \
-         patch("utils.conforma_utils.count_unique_violations",
+         patch("conforma.policy_tools.count_unique_violations",
                return_value=(0, [])):
         mock_repo.return_value.get_violation_summaries.return_value = []
 
@@ -353,7 +353,7 @@ def test_get_violation_not_found(client):
 # ---------------------------------------------------------------------------
 
 def test_exception_lifecycle_no_exceptions(client):
-    with patch("utils.conforma_utils.fetch_exceptions_by_policy", return_value={}):
+    with patch("conforma.policy_tools.fetch_exceptions_by_policy", return_value={}):
         resp = client.get("/api/v1/exceptions/lifecycle")
 
     assert resp.status_code == 200
@@ -378,7 +378,7 @@ def test_exception_lifecycle_mixed(client):
              "effectiveUntil": "2026-07-31"},
         ],
     }
-    with patch("utils.conforma_utils.fetch_exceptions_by_policy",
+    with patch("conforma.policy_tools.fetch_exceptions_by_policy",
                return_value=exceptions_by_policy):
         resp = client.get("/api/v1/exceptions/lifecycle")
 
@@ -400,7 +400,7 @@ def test_exception_lifecycle_all_permanent(client):
             {"value": "rule-perm", "permanent": True, "days_left": None},
         ],
     }
-    with patch("utils.conforma_utils.fetch_exceptions_by_policy",
+    with patch("conforma.policy_tools.fetch_exceptions_by_policy",
                return_value=exceptions_by_policy):
         resp = client.get("/api/v1/exceptions/lifecycle")
 

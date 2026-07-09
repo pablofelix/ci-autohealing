@@ -313,7 +313,7 @@ class TestGetFailure:
         }
         mock_build.return_value.get_failure_details.return_value = row
 
-        with patch('utils.log_filter.filter_error_lines', return_value='ERROR: something failed'):
+        with patch('log_filter.filter_error_lines', return_value='ERROR: something failed'):
             from mcp_server.tools import get_failure
             result = _run(get_failure, 'my-comp', include_logs=True, include_commit_context=True)
 
@@ -383,16 +383,16 @@ class TestGetViolation:
         }
         mock_conforma.return_value.get_violation_details.return_value = row
 
-        with patch('utils.conforma_utils.fetch_exceptions_by_policy', return_value={}), \
-             patch('utils.conforma_utils.extract_policy_from_scenario', return_value='stage'), \
-             patch('utils.conforma_utils.policy_url', return_value='http://policy'), \
-             patch('utils.conforma_utils.count_unique_violations', return_value=(2, [
+        with patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={}), \
+             patch('conforma.policy_tools.extract_policy_from_scenario', return_value='stage'), \
+             patch('conforma.policy_tools.policy_url', return_value='http://policy'), \
+             patch('conforma.policy_tools.count_unique_violations', return_value=(2, [
                  {'rule': 'hermetic_task.hermetic', 'detail': ''},
                  {'rule': 'trusted_task.trusted', 'detail': ''},
              ])), \
-             patch('utils.conforma_utils.extract_violation_rules', return_value=[]), \
-             patch('utils.conforma_utils.compute_violation_coverage', return_value=None), \
-             patch('utils.conforma_utils.lookup_exceptions', return_value=[]):
+             patch('conforma.policy_tools.extract_violation_rules', return_value=[]), \
+             patch('conforma.policy_tools.compute_violation_coverage', return_value=None), \
+             patch('conforma.policy_tools.lookup_exceptions', return_value=[]):
             from mcp_server.tools import get_violation
             result = _run(get_violation, 'comp-a')
 

@@ -422,7 +422,7 @@ def request_triage_summary(app, client, context):
 def request_violations(app, client, context):
     """Request violations list."""
     with patch('api.routes.violations.get_repository') as mock_get_repo, \
-         patch('utils.conforma_utils.fetch_exceptions_by_policy') as mock_exceptions:
+         patch('conforma.policy_tools.fetch_exceptions_by_policy') as mock_exceptions:
         if 'mock_conforma_repo' in context:
             mock_get_repo.return_value = context['mock_conforma_repo']
         mock_exceptions.return_value = {}
@@ -434,15 +434,15 @@ def request_violations(app, client, context):
 def request_violation_details(component, app, client, context):
     """Request violation details for a component."""
     with patch('api.routes.violations.get_repository') as mock_get_repo, \
-         patch('utils.conforma_utils.fetch_exceptions_by_policy') as mock_exceptions, \
-         patch('utils.conforma_utils.extract_policy_from_scenario') as mock_extract, \
-         patch('utils.conforma_utils.extract_violation_rules') as mock_rules, \
-         patch('utils.conforma_utils.lookup_exceptions') as mock_lookup, \
-         patch('utils.conforma_utils.compute_violation_coverage') as mock_coverage, \
-         patch('utils.conforma_utils.compute_blocks') as mock_blocks, \
-         patch('utils.conforma_utils.count_unique_violations') as mock_count, \
-         patch('utils.conforma_utils.compute_coverage_by_env') as mock_cov_env, \
-         patch('utils.conforma_utils.policy_env') as mock_policy_env:
+         patch('conforma.policy_tools.fetch_exceptions_by_policy') as mock_exceptions, \
+         patch('conforma.policy_tools.extract_policy_from_scenario') as mock_extract, \
+         patch('conforma.policy_tools.extract_violation_rules') as mock_rules, \
+         patch('conforma.policy_tools.lookup_exceptions') as mock_lookup, \
+         patch('conforma.policy_tools.compute_violation_coverage') as mock_coverage, \
+         patch('conforma.policy_tools.compute_blocks') as mock_blocks, \
+         patch('conforma.policy_tools.count_unique_violations') as mock_count, \
+         patch('conforma.policy_tools.compute_coverage_by_env') as mock_cov_env, \
+         patch('conforma.policy_tools.policy_env') as mock_policy_env:
         if 'mock_conforma_repo' in context:
             mock_get_repo.return_value = context['mock_conforma_repo']
         mock_exceptions.return_value = {}
@@ -466,7 +466,7 @@ def request_violation_details(component, app, client, context):
 @when('I request the exception lifecycle')
 def request_exception_lifecycle(client, context):
     """Request exception lifecycle."""
-    with patch('utils.conforma_utils.fetch_exceptions_by_policy') as mock_exceptions:
+    with patch('conforma.policy_tools.fetch_exceptions_by_policy') as mock_exceptions:
         # Mock some exceptions data
         mock_exceptions.return_value = {
             'oci-trusted-task-v0.1-prod': [
@@ -488,7 +488,7 @@ def request_exception_lifecycle(client, context):
 def request_violation_rules(app, client, context):
     """Request violation rules."""
     with patch('api.routes.violations.get_repository') as mock_get_repo, \
-         patch('utils.conforma_utils.fetch_exceptions_by_policy') as mock_exceptions:
+         patch('conforma.policy_tools.fetch_exceptions_by_policy') as mock_exceptions:
         if 'mock_conforma_repo' in context:
             mock_get_repo.return_value = context['mock_conforma_repo']
         mock_exceptions.return_value = {}

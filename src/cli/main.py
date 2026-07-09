@@ -168,8 +168,8 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
         nightlies = data.get('nightly_warnings', [])
 
         if stage or prod:
-            from utils.conforma_utils import extract_policy_from_scenario as _extract_policy
-            from utils.conforma_utils import policy_env as _policy_env
+            from conforma.policy_tools import extract_policy_from_scenario as _extract_policy
+            from conforma.policy_tools import policy_env as _policy_env
             filtered = []
             for v in conforma:
                 env = _policy_env(_extract_policy(v.get('scenario', '')))
@@ -244,7 +244,7 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
             print('  {} No build failures'.format(green('✓')))
         print()
 
-        from utils.conforma_utils import extract_policy_from_scenario
+        from conforma.policy_tools import extract_policy_from_scenario
         policies_seen = set()
         for v in conforma:
             p = extract_policy_from_scenario(v.get('scenario', ''))
@@ -456,7 +456,7 @@ def _policy_filter_to_include_future(policy_filter):
 def _print_conforma_table(data, app_name, policy_filter):
     """Print conforma violations as a table with unique counts."""
     from cli.formatting import bold, dim, green, red, yellow
-    from utils.conforma_utils import extract_policy_from_scenario, strip_version_suffix
+    from conforma.policy_tools import extract_policy_from_scenario, strip_version_suffix
 
     cov_counts = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
 
@@ -569,7 +569,7 @@ def get_exceptions(ctx, output_json):
             print('  No exceptions found')
             print()
             return
-        from utils.conforma_utils import policy_env as _policy_env
+        from conforma.policy_tools import policy_env as _policy_env
         print('  {:<40} {:<6} {:<12} {}'.format('Rule', 'Env', 'Expires', 'Policy'))
         print('  {}  {} {} {}'.format('-' * 40, '-' * 6, '-' * 12, '-' * 30))
         for exc in sorted(exceptions, key=lambda e: (e.get('source_policy', ''), e.get('value', ''))):
@@ -2293,11 +2293,11 @@ def ai_batch(args):
 @ai.command('status')
 def ai_status():
     """Show AI analysis summary."""
-    from cli.mode import ensure_cluster
-    if ensure_cluster():
-        from cli.data import get_overview_stats
+    from cli.mode import has_api
+    if has_api():
+        from cli.data import get_ai_stats
         from cli.formatting import bold, cyan, green, section_header
-        data = get_overview_stats()
+        data = get_ai_stats()
         section_header('AI Analysis Status')
         print()
         bf = data.get('build_failures', {})
@@ -2418,6 +2418,81 @@ def ai_regression(domain, app, limit, verbose, use_llm):
         print(cyan("Run 'ic ai analyze' on more components to build history"))
         return
     _print_regression_report('Conforma AI Regression Report', result)
+
+
+@ai.command('label-training-data')
+@click.option('--backfill', is_flag=True, help='Label all resolved failures with a fix commit SHA')
+@click.option('--app', help='Filter by application')
+@click.option('--limit', type=int, default=100, help='Max failures to process (default 100)')
+@click.option('--min-confidence', type=float, default=0.0,
+              help='Only persist labels at or above this confidence (0.0–1.0)')
+@click.option('--dry-run', is_flag=True, help='Show what would be labeled without writing')
+@click.option('--verbose', '-v', is_flag=True, help='Print per-item label details')
+def ai_label_training_data(backfill, app, limit, min_confidence, dry_run, verbose):
+    """Infer ML training labels from GitHub PRs that fixed build failures.
+
+    Uses resolution_commit_sha stored when each failure was resolved, finds
+    the PR via GitHub API, then classifies changed files into a failure_category
+    label. Labels are stored in ml_training_labels for classifier training.
+
+    Example:
+
+      ic ai label-training-data --backfill
+
+      ic ai label-training-data --backfill --dry-run --verbose
+
+      ic ai label-training-data --backfill --min-confidence 0.8
+    """
+    from cli.db import require_db
+    from cli.formatting import bold, cyan, green, red, section_header, yellow
+
+    if not backfill:
+        print(yellow('Specify --backfill to label resolved failures'))
+        print(cyan('  ic ai label-training-data --backfill'))
+        return
+
+    if not require_db():
+        return
+
+    from collectors.verdict_correlator import LabelInferenceService
+    from config import CollectorConfig
+
+    config = CollectorConfig.from_env()
+    if not getattr(config, 'github_token', None):
+        print(red('GITHUB_TOKEN not set — cannot fetch PR files'))
+        return
+
+    application = app or cfg.APPLICATION_NAME
+    section_header('ML Training Label Backfill{}'.format(' (DRY RUN)' if dry_run else ''))
+    print()
+    print('  Application:     {}'.format(application))
+    print('  Limit:           {}'.format(limit))
+    print('  Min confidence:  {}'.format(min_confidence))
+    print()
+
+    service = LabelInferenceService(config)
+    counts = service.backfill(
+        application=application,
+        limit=limit,
+        min_confidence=min_confidence,
+        dry_run=dry_run,
+    )
+
+    print(bold('Results:'))
+    print('  Processed:              {}'.format(counts['processed']))
+    print('  Labeled{}:             {}'.format(' (would be)' if dry_run else '', counts['labeled']))
+    print('  Skipped (no PR found):  {}'.format(counts['skipped_no_pr']))
+    print('  Skipped (no files):     {}'.format(counts['skipped_no_files']))
+    print('  Skipped (low conf):     {}'.format(counts['skipped_low_confidence']))
+    print('  Errors:                 {}'.format(counts['errors']))
+
+    if counts['labeled']:
+        print()
+        if dry_run:
+            print(yellow('Dry run — no labels written. Remove --dry-run to persist.'))
+        else:
+            print(green('{} labels written to ml_training_labels'.format(counts['labeled'])))
+            print(cyan("Run 'ic ai regression build' to evaluate classifier readiness"))
 
 
 def _print_regression_report(title, result):
@@ -2551,7 +2626,10 @@ def _ai_regression_onboarding(app, limit, verbose, use_llm):
 
 @ai.command('analyze-config')
 @click.option('--app', help='Application name')
-def ai_analyze_config(app):
+@click.option('--type', 'analysis_type',
+              type=click.Choice(['conforma', 'build', 'release']),
+              default='conforma', help='Type of config analysis')
+def ai_analyze_config(app, analysis_type):
     """Analyze Konflux configuration for issues and auto-rebuild candidates."""
     from cli.db import require_db
     from cli.formatting import bold, cyan, green, red, section_header, yellow
@@ -2563,10 +2641,17 @@ def ai_analyze_config(app):
         print(red('No LLM provider configured'))
         print(cyan('  Set LLM_PROVIDER + ANTHROPIC_VERTEX_PROJECT_ID'))
         return
-    from analyzers.config_analyzer import ConfigAnalyzer
     application = app or cfg.APPLICATION_NAME
     try:
-        analyzer = ConfigAnalyzer(config)
+        if analysis_type == 'build':
+            from analyzers.build_config_analyzer import BuildConfigAnalyzer
+            analyzer = BuildConfigAnalyzer(config)
+        elif analysis_type == 'release':
+            from analyzers.release_config_analyzer import ReleaseConfigAnalyzer
+            analyzer = ReleaseConfigAnalyzer(config)
+        else:
+            from analyzers.config_analyzer import ConfigAnalyzer
+            analyzer = ConfigAnalyzer(config)
         result = analyzer.run(application=application)
     except Exception as e:
         print(red('Analysis failed: {}'.format(e)))
@@ -2575,7 +2660,13 @@ def ai_analyze_config(app):
         print(yellow('Analysis could not run'))
         return
     analysis = result['analysis']
-    section_header('Konflux Configuration Analysis — {}'.format(application))
+    type_labels = {
+        'conforma': 'Conforma Configuration',
+        'build': 'Build Pipeline Configuration',
+        'release': 'Release Configuration',
+    }
+    section_header('{} Analysis — {}'.format(
+        type_labels.get(analysis_type, 'Configuration'), application))
     print()
     print(bold('Overall severity: ') + (
         red(analysis['overall_severity'].upper())
@@ -2615,6 +2706,12 @@ def ai_analyze_config(app):
         print(bold('Auto-rebuild Candidates:'))
         for comp in candidates:
             print(green('  ic rebuild {}'.format(comp)))
+        print()
+    blockers = analysis.get('release_blockers', [])
+    if blockers:
+        print(red(bold('Release Blockers ({})'.format(len(blockers)))))
+        for b in blockers:
+            print(red('  ✗ {}'.format(b)))
         print()
     print('Cost: ${:.4f} ({})'.format(
         result.get('cost_usd', 0), result.get('model', '')))
@@ -3561,6 +3658,287 @@ def nightly_history(ctx, application, days, output_json):
         print()
 
 
+@cli.group(invoke_without_command=True)
+@click.option('--json', 'output_json', is_flag=True, hidden=True)
+@click.pass_context
+def schedule(ctx, output_json):
+    """Release schedule: milestones, countdowns, urgency across all apps."""
+    import json as json_mod
+
+    from cli.data import get_schedule_all
+    from cli.formatting import bold, cyan, dim, green, red, section_header, yellow
+
+    if ctx.invoked_subcommand is not None:
+        return
+
+    output_json = output_json or (ctx.obj.get('json') if ctx.obj else False)
+    schedules = get_schedule_all()
+
+    if output_json:
+        print(json_mod.dumps(schedules, indent=2, default=str))
+        return
+
+    if not schedules:
+        print(yellow('No release schedule data. Run: ic schedule sync'))
+        return
+
+    section_header('Release Schedule')
+    print()
+
+
+    for sched in sorted(schedules, key=lambda s: s.get('release_date') or '9999'):
+        app = sched.get('application', '?')
+        milestones = [
+            ('Feature Freeze', 'feature_freeze'),
+            ('Code Freeze', 'code_freeze'),
+            ('Initial RC', 'initial_rc'),
+            ('Release Window', 'release_window_start'),
+            ('GA Release', 'release_date'),
+        ]
+
+        release_str = sched.get('release_date', '')[:10] if sched.get('release_date') else '?'
+        release_days = sched.get('release_date_days')
+        if release_days is not None:
+            r_color = red if release_days <= 7 else yellow if release_days <= 14 else green
+            print(bold('{:<30}'.format(app)) + '  GA: {} ({})'.format(
+                release_str, r_color('{}d'.format(release_days))))
+        else:
+            print(bold('{:<30}'.format(app)) + '  GA: {}'.format(release_str))
+
+        next_milestone = None
+        for label, key in milestones:
+            val = sched.get(key)
+            days = sched.get('{}_days'.format(key))
+            if not val:
+                continue
+            date_str = val[:10]
+            if days is None:
+                continue
+            if days < 0:
+                status = dim('done')
+            elif days == 0:
+                status = red('TODAY')
+                if not next_milestone:
+                    next_milestone = label
+            elif days <= 3:
+                status = red('{}d'.format(days))
+                if not next_milestone:
+                    next_milestone = label
+            elif days <= 7:
+                status = yellow('{}d'.format(days))
+                if not next_milestone:
+                    next_milestone = label
+            elif days <= 14:
+                status = cyan('{}d'.format(days))
+                if not next_milestone:
+                    next_milestone = label
+            else:
+                status = green('{}d'.format(days))
+                if not next_milestone:
+                    next_milestone = label
+            print('  {:<20} {}  {}'.format(label, date_str, status))
+
+        if next_milestone:
+            next_key = [k for l, k in milestones if l == next_milestone][0]
+            next_days = sched.get('{}_days'.format(next_key), 0)
+            if next_days is not None and next_days >= 0:
+                if next_days <= 3:
+                    urgency = red('CRITICAL — create Blockers')
+                elif next_days <= 7:
+                    urgency = yellow('HIGH — create Majors, escalate to Blocker if unresolved 1d')
+                elif next_days <= 14:
+                    urgency = cyan('MEDIUM — track and triage')
+                else:
+                    urgency = green('NORMAL')
+                print('  {:<20} {}'.format('Jira Priority:', urgency))
+        print()
+
+    print(dim('Source: release_schedule DB (last synced from Product Pages)'))
+    print(dim('Sync:   ic schedule sync'))
+    print()
+
+
+@schedule.command('sync')
+@click.pass_context
+def schedule_sync(ctx):
+    """Sync release schedule from Product Pages into the local DB."""
+    from cli.formatting import bold, green, red, yellow
+
+    print(bold('Syncing release schedule from Product Pages...'))
+    print()
+
+    app_map = {
+        'rhoai-v3-5-ea-1': {
+            'pp_name': 'rhai 3.5',
+            'pp_entity_id': 3358,
+            'phase_prefix': '3.5 EA1',
+        },
+        'rhoai-v3-5-ea-2': {
+            'pp_name': 'rhai 3.5',
+            'pp_entity_id': 3358,
+            'phase_prefix': '3.5 EA2',
+        },
+        'rhoai-v3-5': {
+            'pp_name': 'rhai 3.5',
+            'pp_entity_id': 3358,
+            'phase_prefix': '3.5 GA',
+        },
+    }
+
+    watch_apps = os.environ.get('WATCH_APPLICATIONS', '').split()
+    if not watch_apps:
+        watch_apps = [cfg.APPLICATION_NAME]
+
+    entity_ids = set()
+    for app in watch_apps:
+        info = app_map.get(app)
+        if info:
+            entity_ids.add(info['pp_entity_id'])
+
+    from cli.data import sync_schedule_from_product_pages
+
+    all_tasks = _fetch_pp_tasks(entity_ids, green, yellow)
+
+    if all_tasks:
+        entries = []
+        for app in watch_apps:
+            info = app_map.get(app)
+            if not info:
+                print(yellow('  Skipping {} — no Product Pages mapping'.format(app)))
+                continue
+
+            prefix = info['phase_prefix']
+            dates = _extract_dates_from_pp(all_tasks, prefix)
+            if not dates.get('release_date'):
+                print(yellow('  Skipping {} — no GA date found for "{}"'.format(app, prefix)))
+                continue
+
+            next_rel = None
+            if app == 'rhoai-v3-5-ea-1':
+                next_rel = 'rhoai-v3-5-ea-2'
+            elif app == 'rhoai-v3-5-ea-2':
+                next_rel = 'rhoai-v3-5'
+            elif app == 'rhoai-v3-5':
+                next_rel = 'rhoai-v3-6-ea-1'
+
+            entry = {
+                'application': app,
+                'planning_freeze': dates.get('planning_freeze'),
+                'feature_freeze': dates.get('feature_freeze'),
+                'code_freeze': dates.get('code_freeze'),
+                'initial_rc': dates.get('initial_rc'),
+                'release_window_start': dates.get('release_window_start'),
+                'release_date': dates.get('release_date'),
+                'next_release': next_rel,
+                'source': 'product_pages',
+            }
+            entries.append(entry)
+            print(green('  {} — GA: {}, Code Freeze: {}'.format(
+                app, dates.get('release_date', '?'), dates.get('code_freeze', '?'))))
+
+        if entries:
+            result = sync_schedule_from_product_pages(entries)
+            if result:
+                print()
+                print(bold('Synced {} application(s)'.format(result.get('count', len(entries)))))
+            else:
+                print(red('  Sync failed — is the API running?'))
+    else:
+        _sync_from_cached_pp(watch_apps, app_map, sync_schedule_from_product_pages,
+                             green, yellow, red, bold)
+    print()
+
+
+def _fetch_pp_tasks(entity_ids, green, yellow):
+    """Fetch tasks from Product Pages MCP or API."""
+    import subprocess
+    all_tasks = []
+    for eid in entity_ids:
+        try:
+            result = subprocess.run(
+                ['curl', '-sf', '--max-time', '15',
+                 'http://localhost:8000/api/v1/product-pages/schedule/{}'.format(eid)],
+                capture_output=True, text=True, timeout=20)
+            if result.returncode == 0 and result.stdout.strip():
+                import json
+                data = json.loads(result.stdout)
+                tasks = data if isinstance(data, list) else data.get('result', [])
+                all_tasks.extend(tasks)
+                print(green('  Fetched {} tasks from Product Pages (entity {})'.format(
+                    len(tasks), eid)))
+                continue
+        except Exception:
+            pass
+        print(yellow('  Product Pages API not available for entity {}, using cache'.format(eid)))
+    return all_tasks
+
+
+def _extract_dates_from_pp(tasks, phase_prefix):
+    """Extract milestone dates from Product Pages tasks for a given phase prefix."""
+    dates = {}
+    for t in tasks:
+        name = t.get('name', '')
+        if phase_prefix not in name:
+            continue
+        name_lower = name.lower()
+        finish = t.get('date_finish')
+        if not finish:
+            continue
+        if 'planning freeze' in name_lower:
+            dates['planning_freeze'] = finish
+        elif 'feature freeze' in name_lower:
+            dates['feature_freeze'] = finish
+        elif 'code freeze' in name_lower and 'rhoai' in name_lower:
+            dates['code_freeze'] = finish
+        elif 'initial rc' in name_lower and 'rhoai' in name_lower:
+            dates['initial_rc'] = finish
+        elif 'release window' in name_lower and 'rhoai' in name_lower:
+            dates['release_window_start'] = finish
+        elif 'rhoai release' in name_lower and 'rhelai' not in name_lower:
+            flags = t.get('flags', [])
+            if 'ga' in flags or 'roadmap' in flags:
+                dates['release_date'] = finish
+    return dates
+
+
+def _sync_from_cached_pp(watch_apps, app_map, sync_fn, green, yellow, red, bold):
+    """Fallback: sync from hardcoded Product Pages data when MCP unavailable."""
+    cached = {
+        'rhoai-v3-5-ea-1': {
+            'planning_freeze': '2026-05-01', 'code_freeze': '2026-05-15',
+            'initial_rc': '2026-05-21', 'release_window_start': '2026-06-16',
+            'release_date': '2026-06-18', 'next_release': 'rhoai-v3-5-ea-2',
+        },
+        'rhoai-v3-5-ea-2': {
+            'planning_freeze': '2026-05-15', 'code_freeze': '2026-06-19',
+            'initial_rc': '2026-06-25', 'release_window_start': '2026-07-14',
+            'release_date': '2026-07-16', 'next_release': 'rhoai-v3-5',
+        },
+        'rhoai-v3-5': {
+            'planning_freeze': '2026-06-24', 'feature_freeze': '2026-07-17',
+            'code_freeze': '2026-07-24', 'initial_rc': '2026-07-30',
+            'release_window_start': '2026-08-18', 'release_date': '2026-08-20',
+            'next_release': 'rhoai-v3-6-ea-1',
+        },
+    }
+    entries = []
+    for app in watch_apps:
+        data = cached.get(app)
+        if data:
+            entry = {'application': app, 'source': 'product_pages_cached'}
+            entry.update(data)
+            entries.append(entry)
+            print(green('  {} — GA: {} (cached)'.format(app, data.get('release_date', '?'))))
+    if entries:
+        result = sync_fn(entries)
+        if result:
+            print()
+            print(bold('Synced {} application(s) from cached data'.format(
+                result.get('count', len(entries)))))
+        else:
+            print(red('  Sync failed — is the API running?'))
+
+
 @cli.command()
 @click.argument('image_ref')
 @click.pass_context
@@ -4077,7 +4455,7 @@ def conforma_categories(stage, nightly, args):
     if use_reporter or ensure_cluster():
         from cli.data import get_conforma_violations
         from cli.formatting import bold, section_header
-        from utils.conforma_utils import categorize_policy, count_unique_violations
+        from conforma.policy_tools import categorize_policy, count_unique_violations
         reporter_env = 'stage' if stage else None
         reporter_build_type = 'nightly' if nightly else None
         data = get_conforma_violations(
@@ -4145,7 +4523,7 @@ def conforma_rules(app_name, stage, nightly, policy_filter):
         if not rules:
             print('\n  No violations found.\n')
             return
-        from utils.conforma_utils import strip_version_suffix
+        from conforma.policy_tools import strip_version_suffix
         all_comps = set()
         for r in rules:
             all_comps.update(r.get('components', []))

@@ -10,6 +10,22 @@ from repositories.build_failure_repository import BuildFailureRepository
 from repositories.connection import DatabaseConnection
 
 
+@pytest.fixture(autouse=True)
+def _block_real_psycopg2():
+    """Prevent any real psycopg2 connection attempt in every test.
+
+    Patches both the module-path reference used by production code and the
+    top-level ``psycopg2.connect`` so that no matter what import order the
+    full test suite uses, a real TCP connection is never attempted.  Each
+    test that needs to inspect the mock still receives its own via the
+    per-function ``@patch`` decorator.
+    """
+    sentinel = MagicMock(name="blocked-psycopg2-connect")
+    with patch("repositories.connection.psycopg2.connect", sentinel), \
+         patch("psycopg2.connect", sentinel):
+        yield sentinel
+
+
 @pytest.fixture
 def db():
     return DatabaseConnection(DatabaseConfig(

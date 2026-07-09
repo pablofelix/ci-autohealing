@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from config import CollectorConfig, DatabaseConfig, KubernetesConfig
 
@@ -121,23 +122,36 @@ KUBEARCHIVE_API_URL=https://test-api.example.com
             f.write(env_content)
             env_file = f.name
 
+        # Clear env vars that load_dotenv won't override, plus vars that
+        # prior tests or the project .env may have leaked into os.environ.
+        env_keys_to_clear = [
+            'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_PASSWORD', 'DB_NAME',
+            'NAMESPACE', 'APPLICATION_NAME', 'COMPONENTS_FILE',
+            'KUBEARCHIVE_API_URL', 'LLM_PROVIDER', 'ANTHROPIC_VERTEX_PROJECT_ID',
+            'GITHUB_TOKEN', 'JIRA_EMAIL', 'JIRA_TOKEN',
+            'WATCH_APPLICATIONS', 'WATCH_DISABLE',
+        ]
+        clean_env = {k: v for k, v in os.environ.items()
+                     if k not in env_keys_to_clear}
+
         try:
-            config = CollectorConfig.from_env(Path(env_file))
+            with patch.dict(os.environ, clean_env, clear=True):
+                config = CollectorConfig.from_env(Path(env_file))
 
-            # Check database config
-            self.assertEqual(config.db.host, "testhost")
-            self.assertEqual(config.db.port, 5555)
-            self.assertEqual(config.db.user, "testuser")
-            self.assertEqual(config.db.password, "testpass")
-            self.assertEqual(config.db.database, "testdb")
+                # Check database config
+                self.assertEqual(config.db.host, "testhost")
+                self.assertEqual(config.db.port, 5555)
+                self.assertEqual(config.db.user, "testuser")
+                self.assertEqual(config.db.password, "testpass")
+                self.assertEqual(config.db.database, "testdb")
 
-            # Check Kubernetes config
-            self.assertEqual(config.k8s.namespace, "test-namespace")
-            self.assertEqual(config.k8s.application_name, "test-app")
-            self.assertEqual(config.k8s.kubearchive_api_url, "https://test-api.example.com")
+                # Check Kubernetes config
+                self.assertEqual(config.k8s.namespace, "test-namespace")
+                self.assertEqual(config.k8s.application_name, "test-app")
+                self.assertEqual(config.k8s.kubearchive_api_url, "https://test-api.example.com")
 
-            # Check components file
-            self.assertEqual(config.components_file, Path("/tmp/test-components.txt"))
+                # Check components file
+                self.assertEqual(config.components_file, Path("/tmp/test-components.txt"))
         finally:
             os.unlink(env_file)
 

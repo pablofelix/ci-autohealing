@@ -1,5 +1,6 @@
 """Tests for repository layer: factory, connection, and representative repos."""
 
+import importlib
 import os
 import sys
 from contextlib import contextmanager
@@ -8,6 +9,33 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+
+# ---------------------------------------------------------------------------
+# Guard against sys.modules pollution from other test files.
+# Some tests (e.g. test_enrichment_orchestrator_coverage, test_poll_jira_coverage)
+# replace 'repositories.connection' (and even 'repositories') with a MagicMock
+# at module level, which breaks @patch('repositories.connection.psycopg2') for
+# subsequent tests.  Force-reload the real modules so patches work correctly.
+# ---------------------------------------------------------------------------
+def _ensure_real_module(name):
+    """If *name* was replaced by a MagicMock in sys.modules, reload the real one."""
+    # Also restore parent packages (e.g. 'repositories' for 'repositories.connection')
+    parts = name.split('.')
+    for i in range(len(parts)):
+        partial = '.'.join(parts[:i + 1])
+        mod = sys.modules.get(partial)
+        if mod is not None and isinstance(mod, MagicMock):
+            sys.modules.pop(partial, None)
+    # Now import (or re-import) the module
+    mod = sys.modules.get(name)
+    if mod is None or isinstance(mod, MagicMock):
+        sys.modules.pop(name, None)
+        importlib.import_module(name)
+
+
+_ensure_real_module('repositories.connection')
+_ensure_real_module('repositories.repository_factory')
 
 
 def _mock_db():

@@ -501,7 +501,7 @@ def test_list_alerts_minimal(
     mock_list_blockers.return_value = MagicMock(critical_signals=[])
 
     with (patch("api.validators.validate_application_name", side_effect=lambda x: x),
-          patch("utils.conforma_utils.fetch_exceptions_by_policy", return_value={})):
+          patch("conforma.policy_tools.fetch_exceptions_by_policy", return_value={})):
         resp = client.get("/api/v1/applications/rhoai-v2-19/alerts")
 
     assert resp.status_code == 200

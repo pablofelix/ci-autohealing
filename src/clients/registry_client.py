@@ -215,7 +215,7 @@ class RegistryClient:
                         f = tar.extractfile(member)
                         if f:
                             return f.read().decode('utf-8', errors='replace')
-        except (tarfile.TarError, OSError) as e:
+        except (tarfile.TarError, OSError, EOFError) as e:
             logger.debug("Failed to extract tarball: %s", e)
         return ''
 

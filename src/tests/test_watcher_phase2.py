@@ -5,6 +5,7 @@ daemon conditional task creation, and Jira polling loop.
 """
 
 import asyncio
+import importlib
 import os
 import tempfile
 import unittest
@@ -13,21 +14,39 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from cli.main import cli
-from config import ALL_WATCHERS, CollectorConfig, DatabaseConfig, KubernetesConfig, WatcherConfig
 from watcher.daemon import WatchDaemon
 
 
+def _get_real_config():
+    """Get real config module, immune to sys.modules pollution by other tests.
+
+    Some test files (e.g. test_poll_jira_coverage) replace sys.modules['config']
+    with a MagicMock at module level. This makes subsequent ``from config import X``
+    return MagicMock attributes.  We fix it by evicting the mock and re-importing.
+    """
+    import sys
+    import types
+    current = sys.modules.get('config')
+    if current is not None and not isinstance(current, types.ModuleType):
+        del sys.modules['config']
+    import config as _cfg
+    if isinstance(_cfg, types.ModuleType):
+        importlib.reload(_cfg)
+    return _cfg
+
+
 def _make_config(apps=('test-app',), disabled=frozenset()):
-    return CollectorConfig(
-        db=DatabaseConfig(
+    cfg = _get_real_config()
+    return cfg.CollectorConfig(
+        db=cfg.DatabaseConfig(
             host='localhost', port=5432, user='postgres',
             password='test', database='testdb',
         ),
-        k8s=KubernetesConfig(
+        k8s=cfg.KubernetesConfig(
             namespace='test-ns',
             application_name=apps[0] if apps else '',
         ),
-        watcher=WatcherConfig(
+        watcher=cfg.WatcherConfig(
             applications=apps,
             disabled=disabled,
             auto_analyze=False,
@@ -40,13 +59,18 @@ def _make_config(apps=('test-app',), disabled=frozenset()):
 
 class TestWatcherConfigDisable(unittest.TestCase):
 
+    def setUp(self):
+        self._cfg = _get_real_config()
+        self.WatcherConfig = self._cfg.WatcherConfig
+        self.ALL_WATCHERS = self._cfg.ALL_WATCHERS
+
     def test_is_enabled_default(self):
-        wc = WatcherConfig(applications=('app',))
-        for name in ALL_WATCHERS:
+        wc = self.WatcherConfig(applications=('app',))
+        for name in self.ALL_WATCHERS:
             self.assertTrue(wc.is_enabled(name))
 
     def test_is_enabled_with_disabled(self):
-        wc = WatcherConfig(applications=('app',), disabled=frozenset({'jira', 'conforma'}))
+        wc = self.WatcherConfig(applications=('app',), disabled=frozenset({'jira', 'conforma'}))
         self.assertTrue(wc.is_enabled('builds'))
         self.assertTrue(wc.is_enabled('tests'))
         self.assertTrue(wc.is_enabled('components'))
@@ -58,7 +82,7 @@ class TestWatcherConfigDisable(unittest.TestCase):
             'WATCH_APPLICATIONS': 'app-1',
             'WATCH_DISABLE': 'jira conforma',
         }):
-            wc = WatcherConfig.from_env()
+            wc = self.WatcherConfig.from_env()
             self.assertFalse(wc.is_enabled('jira'))
             self.assertFalse(wc.is_enabled('conforma'))
             self.assertTrue(wc.is_enabled('builds'))
@@ -67,11 +91,11 @@ class TestWatcherConfigDisable(unittest.TestCase):
         with patch.dict('os.environ', {
             'WATCH_APPLICATIONS': 'app-1',
         }, clear=True):
-            wc = WatcherConfig.from_env()
+            wc = self.WatcherConfig.from_env()
             self.assertEqual(wc.disabled, frozenset())
 
     def test_all_watchers_constant(self):
-        self.assertEqual(ALL_WATCHERS, ('builds', 'tests', 'conforma', 'jira', 'components'))
+        self.assertEqual(self.ALL_WATCHERS, ('builds', 'tests', 'conforma', 'jira', 'components'))
 
 
 class TestDaemonConditionalTasks(unittest.TestCase):
@@ -186,7 +210,9 @@ class TestJiraPollLoop(unittest.TestCase):
     def test_jira_poll_calls_poller(self):
         from dataclasses import replace
 
-        from config import JiraConfig, LLMConfig
+        cfg = _get_real_config()
+        JiraConfig = cfg.JiraConfig
+        LLMConfig = cfg.LLMConfig
         config = _make_config()
         config = replace(
             config,
@@ -209,6 +235,7 @@ class TestJiraPollLoop(unittest.TestCase):
 class TestCLIWatchList(unittest.TestCase):
 
     def setUp(self):
+        _get_real_config()  # Restore real config module in sys.modules
         os.environ['IC_MODE'] = 'local'
 
     def tearDown(self):
@@ -301,6 +328,7 @@ class TestCLIWatchAddRemove(unittest.TestCase):
 class TestCLIWatchEnableDisable(unittest.TestCase):
 
     def setUp(self):
+        _get_real_config()  # Restore real config module in sys.modules
         os.environ['IC_MODE'] = 'local'
         self.tmpdir = tempfile.mkdtemp()
         self.env_file = os.path.join(self.tmpdir, '.env')
