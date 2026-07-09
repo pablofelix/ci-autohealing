@@ -2848,58 +2848,127 @@ def ai_stats(fixes):
 
 @ai.command('quality')
 @click.option('--calibration', is_flag=True, help='Show calibration analysis')
-def ai_quality(calibration):
-    """AI analysis quality metrics — accuracy from verdicts."""
+@click.option('--trend', is_flag=True, help='Show weekly accuracy trend (last 12 weeks)')
+@click.option('--days', type=int, default=30, help='Days window for metrics (default 30)')
+def ai_quality(calibration, trend, days):
+    """AI analysis quality metrics — accuracy from verdicts.
+
+    Shows accuracy, verdict breakdown, and cost efficiency from human verdicts.
+    Verdicts are recorded automatically when builds pass after AI analysis,
+    or manually via: ic triage resolve <id> --verdict correct|partial|incorrect
+
+    Examples:
+
+      ic ai quality
+
+      ic ai quality --trend
+
+      ic ai quality --calibration
+    """
     from cli.formatting import bold, cyan, green, red, section_header, yellow
     from cli.mode import is_cluster
 
     if is_cluster():
         from cli.api_client import get_client
         data = get_client().get('/api/v1/metrics/ai-quality',
-                                params={'application': cfg.APPLICATION_NAME})
+                                params={'application': cfg.APPLICATION_NAME,
+                                        'days': days})
     else:
         from cli.db import get_repo, require_db
         from repositories.ai_analysis_repository import AIAnalysisRepository
         if not require_db():
             return
         ai_repo = get_repo(AIAnalysisRepository)
-        data = ai_repo.get_quality_metrics(cfg.APPLICATION_NAME)
+        data = ai_repo.get_quality_metrics(cfg.APPLICATION_NAME, days=days)
 
     if not data or not data.get('total_with_verdict'):
-        print('  No verdicts recorded yet.')
+        print('  No verdicts recorded yet (last {} days).'.format(days))
         print('  Verdicts are recorded automatically when builds pass after AI analysis,')
         print('  or manually via: ic triage resolve <id> --verdict correct|partial|incorrect')
+    else:
+        section_header('AI Quality Metrics (last {} days)'.format(days))
+        print()
+        total = data['total_with_verdict']
+        acc = data.get('accuracy')
+        acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
+        color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
+
+        print('  Accuracy:     {}'.format(color(acc_str)))
+        print('  Verdicts:     {} total'.format(bold(str(total))))
+        print('    Correct:    {}'.format(green(str(data['correct']))))
+        print('    Partial:    {}'.format(yellow(str(data['partial']))))
+        print('    Incorrect:  {}'.format(red(str(data['incorrect']))))
+        if data.get('avg_confidence_correct') is not None:
+            print('  Avg conf (correct):   {}%'.format(
+                int(data['avg_confidence_correct'] * 100)))
+        if data.get('avg_confidence_incorrect') is not None:
+            print('  Avg conf (incorrect): {}%'.format(
+                int(data['avg_confidence_incorrect'] * 100)))
+
+        if not is_cluster():
+            cost_data = ai_repo.get_cost_per_correct_diagnosis(
+                cfg.APPLICATION_NAME, days=days)
+            if cost_data['total_cost'] > 0:
+                print('  Total cost:           ${}'.format(cost_data['total_cost']))
+                if cost_data['cost_per_correct'] is not None:
+                    print('  Cost/correct diagnosis: ${}'.format(
+                        cost_data['cost_per_correct']))
+
+        if data.get('by_category'):
+            print()
+            print('  {}'.format(bold('By Category:')))
+            for cat, stats in data['by_category'].items():
+                cat_acc = (
+                    (stats['correct'] + stats['partial'] * 0.5) / stats['total']
+                    if stats['total'] else 0
+                )
+                print('    {:<30} {}/{} ({}%)'.format(
+                    cyan(cat), stats['correct'], stats['total'], int(cat_acc * 100)))
+
+        if calibration and not is_cluster():
+            _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow,
+                                        section_header)
+
+    if trend and not is_cluster():
+        if 'ai_repo' not in dir():
+            from cli.db import get_repo, require_db
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            if not require_db():
+                return
+            ai_repo = get_repo(AIAnalysisRepository)
+        _show_quality_trend(ai_repo, bold, cyan, green, red, yellow, section_header)
+
+    print()
+
+
+def _show_quality_trend(ai_repo, bold, cyan, green, red, yellow, section_header):
+    """Display weekly accuracy trend for the last 12 weeks."""
+    section_header('Weekly Accuracy Trend (last 12 weeks)')
+    print()
+    rows = ai_repo.get_weekly_quality_trend(weeks=12)
+    if not rows:
+        print('  No verdict data found in the last 12 weeks.')
+        print()
         return
 
-    section_header('AI Quality Metrics')
-    print()
-    total = data['total_with_verdict']
-    acc = data.get('accuracy')
-    acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
-    color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
-
-    print('  Accuracy:     {}'.format(color(acc_str)))
-    print('  Verdicts:     {} total'.format(bold(str(total))))
-    print('    Correct:    {}'.format(green(str(data['correct']))))
-    print('    Partial:    {}'.format(yellow(str(data['partial']))))
-    print('    Incorrect:  {}'.format(red(str(data['incorrect']))))
-    if data.get('avg_confidence_correct') is not None:
-        print('  Avg conf (correct):   {}%'.format(
-            int(data['avg_confidence_correct'] * 100)))
-    if data.get('avg_confidence_incorrect') is not None:
-        print('  Avg conf (incorrect): {}%'.format(
-            int(data['avg_confidence_incorrect'] * 100)))
-
-    if data.get('by_category'):
-        print()
-        print('  {}'.format(bold('By Category:')))
-        for cat, stats in data['by_category'].items():
-            cat_acc = (stats['correct'] + stats['partial'] * 0.5) / stats['total'] if stats['total'] else 0
-            print('    {:<30} {}/{} ({}%)'.format(
-                cyan(cat), stats['correct'], stats['total'], int(cat_acc * 100)))
-
-    if calibration and not is_cluster():
-        _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow, section_header)
+    header = '  {:<12}  {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>7}'.format(
+        'Week', 'Judged', 'Correct', 'Partial', 'Wrong', 'Acc %', 'Cost $')
+    print(bold(header))
+    print('  ' + '-' * 66)
+    for row in rows:
+        acc = row['accuracy']
+        acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
+        color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
+        cost_str = '${:.4f}'.format(row['cost_usd']) if row['cost_usd'] else '-'
+        print('  {:<12}  {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>7}'.format(
+            row['week'],
+            row['judged'],
+            row['correct'],
+            row['partial'],
+            row['incorrect'],
+            color(acc_str),
+            cost_str,
+        ))
     print()
 
 
