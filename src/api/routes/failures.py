@@ -190,13 +190,16 @@ def list_alerts(application: str):
     from api.validators import validate_application_name
     application = validate_application_name(application)
     triage = _build_repo().get_triage_summary(application)
+    triage_jira_build = _triage_repo().build_jira_map(application)
     build_failures = []
     for comp in triage.get('failing_components', []):
         fs = comp.get('first_detected_at', datetime.utcnow())
         ls = comp.get('last_updated_at', datetime.utcnow())
         age_h, is_new, status_chg = _compute_age_signals(fs, ls)
+        comp_name = comp['component']
+        jira = comp.get('jira_key') or triage_jira_build.get(comp_name)
         build_failures.append(FailureSummary(
-            component=comp['component'],
+            component=comp_name,
             status=comp.get('status', 'Failed'),
             error_type=comp.get('error_type'),
             first_seen=fs,
@@ -207,6 +210,7 @@ def list_alerts(application: str):
             age_hours=age_h,
             is_new=is_new,
             status_changed=status_chg,
+            jira_key=jira,
         ))
 
     _detect_systemic_patterns(build_failures)
