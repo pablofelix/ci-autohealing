@@ -155,6 +155,7 @@ def get_alerts(application=None):
             'has_logs': comp.get('has_logs', False),
             'has_analysis': comp.get('ai_analyzed', False),
             'jira_key': jira,
+            'is_nightly': comp.get('is_nightly', False),
         })
 
     from cli import config as cfg

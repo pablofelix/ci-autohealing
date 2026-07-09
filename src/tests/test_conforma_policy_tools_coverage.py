@@ -631,19 +631,27 @@ class TestFetchExceptionsByPolicy:
     @patch('conforma.policy_tools._resolve_tenant_namespace', return_value='rhoai-tenant')
     def test_cluster_fetch(self, mock_ns, mock_read, mock_write):
         """No cache -> fetch from cluster via KonfluxClient."""
+        import conforma.policy_tools as pt
         mock_client = MagicMock()
+        # Return enough policies to exceed the caching threshold (>=5)
         mock_client.get_ec_policies.return_value = [
             {'metadata': {'name': 'registry-rhoai-prod'}, 'spec': {}},
+            {'metadata': {'name': 'fbc-rhoai-prod'}, 'spec': {}},
+            {'metadata': {'name': 'registry-rhoai-chart-prod'}, 'spec': {}},
+            {'metadata': {'name': 'registry-rhoai-stage'}, 'spec': {}},
+            {'metadata': {'name': 'fbc-rhoai-stage'}, 'spec': {}},
         ]
         mock_client.extract_exceptions.return_value = [
             {'value': 'hermetic_task.hermetic', 'permanent': True},
         ]
+        # Reset memory cache so the function reaches the cluster call
+        pt._exceptions_cache['data'] = None
+        pt._exceptions_cache['ts'] = 0
 
-        with patch('conforma.policy_tools.KonfluxClient', return_value=mock_client) \
-                if hasattr(sys.modules.get('conforma.policy_tools', None), 'KonfluxClient') \
-                else patch.dict('sys.modules', {'clients.konflux_client': MagicMock()}):
-            with patch('clients.konflux_client.KonfluxClient', return_value=mock_client):
-                result = fetch_exceptions_by_policy(namespace='rhoai-tenant')
+        # KonfluxClient is imported inside fetch_exceptions_by_policy, so patch
+        # the class in the source module rather than the policy_tools namespace.
+        with patch('clients.konflux_client.KonfluxClient', return_value=mock_client):
+            result = fetch_exceptions_by_policy(namespace='rhoai-tenant')
 
         assert 'registry-rhoai-prod' in result
         mock_write.assert_called_once()

@@ -34,10 +34,9 @@ class UpdateRequest(BaseModel):
     group_label: Optional[str] = None
     status: Optional[str] = None
 
-    class Config:
-        json_schema_extra = {
-            "description": "slack_thread_url appends to the list (does not replace)"
-        }
+    model_config = {"json_schema_extra": {
+        "description": "slack_thread_url appends to the list (does not replace)"
+    }}
 
 
 class ResolveRequest(BaseModel):
@@ -119,7 +118,7 @@ def update_triage_item(application: str, item_id: int, req: UpdateRequest) -> Di
     if not existing:
         raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
 
-    updates = {k: v for k, v in req.dict().items()
+    updates = {k: v for k, v in req.model_dump().items()
                if v is not None and k != 'slack_thread_url'}
     if not updates and not req.slack_thread_url:
         raise HTTPException(status_code=400, detail="No updates provided")

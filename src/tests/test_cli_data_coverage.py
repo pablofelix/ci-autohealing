@@ -1291,3 +1291,189 @@ class TestOnboarding:
     @patch('cli.data._app', return_value='app')
     def test_describe_no_api(self, _app_mock, _use):
         assert get_onboarding_describe('comp-a') is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression tests for ic get alerts display fields
+# These tests capture the specific fields that have silently broken in the
+# past and should be caught immediately if they break again.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGetAlertsRegressions:
+    """Regression guards for fields that have silently broken in ic get alerts."""
+
+    def _make_repos(self, mock_get_repo, failing_comps=None, summaries=None):
+        from repositories.build_failure_repository import BuildFailureRepository
+        from repositories.conforma_repository import ConformaRepository
+        from repositories.triage_repository import TriageRepository
+
+        build_repo = MagicMock(spec=BuildFailureRepository)
+        conforma_repo = MagicMock(spec=ConformaRepository)
+        triage_repo = MagicMock(spec=TriageRepository)
+        build_repo.db = MagicMock()
+
+        def repo_factory(cls):
+            if cls.__name__ == 'BuildFailureRepository':
+                return build_repo
+            if cls.__name__ == 'ConformaRepository':
+                return conforma_repo
+            if cls.__name__ == 'TriageRepository':
+                return triage_repo
+            return MagicMock()
+
+        mock_get_repo.side_effect = repo_factory
+        build_repo.get_triage_summary.return_value = {
+            'failing_components': failing_comps or []
+        }
+        conforma_repo.get_violation_summaries.return_value = summaries or []
+        triage_repo.build_jira_map.return_value = {}
+        return build_repo, conforma_repo, triage_repo
+
+    @patch('cli.data._is_cluster', return_value=False)
+    @patch('cli.data._app', return_value='rhoai-v3-5')
+    @patch('cli.db.get_repo')
+    @patch('cli.data._triage_jira_map', return_value={})
+    @patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={})
+    @patch('conforma.policy_tools.apply_policy_correction')
+    def test_build_failure_enrichment_fields_present(
+            self, _apc, _exc, _jira, mock_get_repo, _app_mock, _cluster):
+        """Regression: get_triage_summary must return error_type, first_detected_at,
+        jira_key so the alerts display can show them. These were missing before
+        the fix in get_triage_summary()."""
+        from datetime import datetime
+        build_repo, _, _ = self._make_repos(mock_get_repo, failing_comps=[{
+            'component': 'odh-vllm-cpu-v3-5',
+            'error_type': 'Test Failure',
+            'first_detected_at': datetime(2026, 7, 9, 10, 0),
+            'last_updated_at': datetime(2026, 7, 9, 11, 0),
+            'jira_key': 'RHOAIENG-99999',
+            'failure_count': 3,
+            'has_logs': True,
+            'has_context': False,
+            'ai_analyzed': True,
+        }])
+        result = get_alerts()
+        builds = result['build_failures']
+        assert len(builds) == 1
+        bf = builds[0]
+        assert bf['error_type'] == 'Test Failure', \
+            'error_type missing from build failure — check get_triage_summary enrichment'
+        assert bf['jira_key'] == 'RHOAIENG-99999', \
+            'jira_key missing from build failure'
+        assert bf['first_seen'] != '', \
+            'first_seen missing — check first_detected_at in get_triage_summary'
+
+    @patch('cli.data._is_cluster', return_value=False)
+    @patch('cli.data._app', return_value='rhoai-v3-5')
+    @patch('cli.db.get_repo')
+    @patch('cli.data._triage_jira_map', return_value={})
+    @patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={})
+    @patch('conforma.policy_tools.apply_policy_correction')
+    def test_release_schedule_included_with_days(
+            self, _apc, _exc, _jira, mock_get_repo, _app_mock, _cluster):
+        """Regression: release_schedule must be in get_alerts() output with
+        code_freeze_days so the release countdown shows in ic get alerts."""
+        from datetime import date, timedelta
+        build_repo, _, _ = self._make_repos(mock_get_repo)
+        # Inject a release_schedule row into the mock DB
+        future = date.today() + timedelta(days=15)
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.fetchone.return_value = (None, None, future, None, None, None, None)
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cur
+        build_repo.db.connection.return_value = conn
+
+        result = get_alerts()
+        sched = result.get('release_schedule')
+        assert sched is not None, \
+            'release_schedule missing from get_alerts() output — check data.py local path'
+        assert 'code_freeze_days' in sched, \
+            'code_freeze_days missing — check release_schedule _days computation'
+        assert sched['code_freeze_days'] == 15, \
+            f'code_freeze_days should be 15, got {sched.get("code_freeze_days")}'
+
+    @patch('cli.data._is_cluster', return_value=False)
+    @patch('cli.data._app', return_value='rhoai-v3-5')
+    @patch('cli.db.get_repo')
+    @patch('cli.data._triage_jira_map', return_value={})
+    @patch('conforma.policy_tools.fetch_exceptions_by_policy', return_value={
+        'registry-rhoai-prod': [{'type': 'Exception', 'rules': ['rpm_repos.ids_known']}]
+    })
+    @patch('conforma.policy_tools.apply_policy_correction')
+    @patch('conforma.policy_tools.extract_violation_rules', return_value={'rpm_repos.ids_known'})
+    @patch('conforma.policy_tools.compute_exception_coverage_details',
+           return_value={
+               'coverage': 'fully_covered', 'stage': 'fully_covered', 'prod': 'not_covered',
+               'env_tag': 'S', 'policy_url_stage': 'https://gitlab.example.com/stage',
+               'policy_url_prod': '', 'covered_rules_stage': ['rpm_repos.ids_known'],
+               'covered_rules_prod': [], 'uncovered_rules_stage': [],
+               'uncovered_rules_prod': ['rpm_repos.ids_known'],
+           })
+    @patch('conforma.policy_tools.count_unique_violations', return_value=(1, []))
+    @patch('conforma.policy_tools.categorize_policy', return_value='Components')
+    @patch('conforma.policy_tools.policy_url', return_value='https://gitlab.example.com')
+    @patch('conforma.policy_tools.policy_env', return_value='prod')
+    @patch('conforma.policy_tools.extract_policy_from_scenario',
+           return_value='registry-rhoai-prod')
+    @patch('conforma.policy_tools.compute_blocks', return_value='prod')
+    def test_conforma_exception_env_tag_present(
+            self, _cb, _ep, _pe, _pu, _cp, _cuv, _cecd, _evr,
+            _apc, _exc, _jira, mock_get_repo, _app_mock, _cluster):
+        """Regression: exception_env_tag must flow from compute_exception_coverage_details
+        through get_alerts() to the display. This was broken when fetch_exceptions_by_policy
+        returned sparse cluster data that had no matching policies."""
+        build_repo, _, _ = self._make_repos(mock_get_repo, summaries=[{
+            'component_name': 'odh-latency-predictor-test-v3-5',
+            'scenario': 'conforma-registry-rhoai-prod-v3-5-single-component',
+            'violation_summary': '✕ [Violation] rpm_repos.ids_known\n',
+            'violations_count': 1,
+            'warnings_count': 5,
+            'first_detected_at': None,
+            'last_updated_at': None,
+            'jira_key': None,
+            'ai_analyzed': False,
+        }])
+        result = get_alerts()
+        conforma = result['conforma_violations']
+        assert len(conforma) == 1
+        v = conforma[0]
+        assert v['exception_env_tag'] == 'S', \
+            'exception_env_tag missing — check that compute_exception_coverage_details ' \
+            'result is included in the conforma violation dict'
+        assert v['policy_url_stage'] == 'https://gitlab.example.com/stage', \
+            'policy_url_stage missing — stage policy link will not show in ic get alerts'
+
+    @patch('conforma.policy_tools._read_file_cache', return_value=None)
+    @patch('conforma.policy_tools.fetch_exceptions_from_gitlab',
+           return_value={'registry-rhoai-prod': [{'type': 'Exception'}]})
+    def test_fetch_exceptions_falls_back_to_gitlab_when_cluster_sparse(
+            self, mock_gitlab, _cache):
+        """Regression: when cluster returns < 5 policies, must fall back to GitLab.
+        This was the root cause of missing [EXC:S] tags — NAMESPACE=rhoai-tenant
+        caused the cluster to return 1 policy which got cached, blocking GitLab."""
+        from unittest.mock import MagicMock
+        from unittest.mock import patch as _patch
+
+        import conforma.policy_tools as pt
+        from conforma.policy_tools import fetch_exceptions_by_policy
+
+        # Reset memory cache so we hit the live fetch path
+        pt._exceptions_cache['data'] = None
+        pt._exceptions_cache['ts'] = 0
+
+        sparse_client = MagicMock()
+        sparse_client.get_ec_policies.return_value = [
+            {'metadata': {'name': 'only-one-policy'}}
+        ]
+        sparse_client.extract_exceptions.return_value = [{'type': 'Exception'}]
+
+        with _patch('clients.konflux_client.KonfluxClient', return_value=sparse_client):
+            result = fetch_exceptions_by_policy('rhoai-tenant')
+
+        # Should have fallen back to GitLab (which returns registry-rhoai-prod)
+        assert 'registry-rhoai-prod' in result, \
+            'fetch_exceptions_by_policy did not fall back to GitLab when cluster ' \
+            'returned only 1 policy — [EXC:S] tags will not show in ic get alerts'
+        mock_gitlab.assert_called_once()
