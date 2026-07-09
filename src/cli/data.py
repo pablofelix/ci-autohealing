@@ -141,10 +141,14 @@ def get_alerts(application=None):
     from repositories.triage_repository import TriageRepository
     triage = build_repo.get_triage_summary(app)
     triage_jira_build = get_repo(TriageRepository).build_jira_map(app)
+    from shared_config import make_konflux_pipelinerun_url
     build_failures = []
     for comp in triage.get('failing_components', []):
         comp_name = comp['component']
         jira = comp.get('jira_key') or triage_jira_build.get(comp_name)
+        # Prefer stored URL, fall back to generating from pipelinerun_name
+        kurl = comp.get('konflux_url') or make_konflux_pipelinerun_url(
+            comp.get('pipelinerun_name', ''))
         build_failures.append({
             'component': comp_name,
             'status': comp.get('status', 'Failed'),
@@ -156,6 +160,7 @@ def get_alerts(application=None):
             'has_analysis': comp.get('ai_analyzed', False),
             'jira_key': jira,
             'is_nightly': comp.get('is_nightly', False),
+            'konflux_url': kurl,
         })
 
     from cli import config as cfg
@@ -168,6 +173,7 @@ def get_alerts(application=None):
         extract_policy_from_scenario,
         extract_violation_rules,
         fetch_exceptions_by_policy,
+        is_wrong_policy_for_artifact,
     )
     from conforma.policy_tools import (
         policy_env as _policy_env,
@@ -187,6 +193,9 @@ def get_alerts(application=None):
         cov = compute_exception_coverage_details(
             rules, scenario, exceptions_by_policy)
         uv_count, _ = count_unique_violations(s.get('violation_summary', ''))
+        # Generate Konflux UI link from pipelinerun_name (pure, no extra query)
+        pr_name = s.get('pipelinerun_name', '')
+        kurl = make_konflux_pipelinerun_url(pr_name)
         conforma_violations.append({
             'component': comp_name,
             'component_name': comp_name,
@@ -217,6 +226,14 @@ def get_alerts(application=None):
             'covered_rules_prod': cov['covered_rules_prod'],
             'uncovered_rules_stage': cov['uncovered_rules_stage'],
             'uncovered_rules_prod': cov['uncovered_rules_prod'],
+            'trigger_type': s.get('trigger_type', 'push'),
+            'is_nightly_data': s.get('trigger_type') == 'scheduled',
+            # Explicitly set is_wrong_policy using the pure detection function,
+            # independent of whether policy exceptions exist for the artifact type.
+            # apply_policy_correction() only sets it when exceptions ARE registered;
+            # this ensures charts/FBC are always marked correctly.
+            'is_wrong_policy': is_wrong_policy_for_artifact(comp_name, scenario),
+            'konflux_url': kurl,
         })
 
     apply_policy_correction(conforma_violations, exceptions_by_policy)
@@ -245,10 +262,30 @@ def get_alerts(application=None):
     except Exception:
         pass
 
+    # Nightly status — most recent nightly build per FBC component.
+    # Single query, no extra cost. Used to show the nightly FIPS results.
+    nightly_status = []
+    try:
+        history = build_repo.get_nightly_history(app, days=2)
+        for b in history.get('nightly_builds', [])[:3]:
+            pr_name = b.get('pipelinerun_name', '')
+            kurl = make_konflux_pipelinerun_url(pr_name)
+            nightly_status.append({
+                'component': b.get('component_name', ''),
+                'status': b.get('status', ''),
+                'build_date': str(b.get('build_date', '')),
+                'commit_sha': (b.get('commit_sha') or '')[:7],
+                'pipelinerun_name': pr_name,
+                'konflux_url': kurl,
+            })
+    except Exception:
+        pass
+
     now = datetime.utcnow().isoformat()
     return {
         'build_failures': build_failures,
         'conforma_violations': conforma_violations,
+        'nightly_status': nightly_status,
         'nightly_warnings': [],
         'total_count': len(build_failures) + len(conforma_violations),
         'last_sync': now,
@@ -298,12 +335,14 @@ def get_conforma_violations(application=None, reporter_env=None,
         extract_policy_from_scenario,
         extract_violation_rules,
         fetch_exceptions_by_policy,
+        is_wrong_policy_for_artifact,
         policy_url,
     )
     from conforma.policy_tools import (
         policy_env as _penv,
     )
     from repositories.conforma_repository import ConformaRepository
+    from shared_config import make_konflux_pipelinerun_url as _mk_kurl
     conforma_repo = get_repo(ConformaRepository)
     violations = conforma_repo.get_violation_summaries(app, include_future=include_future)
     jira_map = _triage_jira_map(app)
@@ -331,6 +370,10 @@ def get_conforma_violations(application=None, reporter_env=None,
             v.get('violation_summary', ''))
         v['unique_violations'] = unique_count if v.get('violation_summary') else None
         v['unique_rules'] = unique_rules
+        # Enrich with is_wrong_policy and Konflux UI link (pure, no extra query)
+        comp_name = v.get('component_name', '')
+        v['is_wrong_policy'] = is_wrong_policy_for_artifact(comp_name, scenario)
+        v['konflux_url'] = _mk_kurl(v.get('pipelinerun_name', ''))
     enrich_with_coverage(violations, exceptions_by_policy)
     apply_policy_correction(violations, exceptions_by_policy)
     return violations

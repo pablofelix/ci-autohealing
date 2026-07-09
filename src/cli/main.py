@@ -245,6 +245,9 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                 nightly_tag = yellow(' 🌙') if is_nightly_fail else ''
                 print('  {:<4} {:<45} {:<20} {:>12}  {}{}{}'.format(
                     i, comp, err, first, jira, analyzed, nightly_tag))
+                kurl = f.get('konflux_url', '')
+                if kurl:
+                    print(dim('       → {}'.format(kurl)))
             if nightly_failures:
                 print()
                 print(yellow('  🌙 {} nightly build(s) failing (release-critical):'.format(
@@ -254,6 +257,23 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
         else:
             print('  {} No build failures'.format(green('✓')))
         print()
+
+        # Nightly build status — shows latest nightly FBC build with FIPS results
+        nightly_status = data.get('nightly_status', [])
+        if nightly_status:
+            print(bold('Nightly Build:'))
+            for nb in nightly_status:
+                status = nb.get('status', '')
+                icon = green('✅') if status == 'Succeeded' else red('❌')
+                sha = nb.get('commit_sha', '')
+                sha_tag = '  sha:{}'.format(sha) if sha else ''
+                comp = nb.get('component', '')
+                bdate = nb.get('build_date', '')
+                print('  {} {:<40} {}{}'.format(icon, comp, bdate, sha_tag))
+                kurl = nb.get('konflux_url', '')
+                if kurl:
+                    print(dim('     → {}'.format(kurl)))
+            print()
 
         from conforma.policy_tools import extract_policy_from_scenario
         policies_seen = set()
@@ -297,8 +317,13 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                     label = 'PARTIAL' if is_partial else 'EXC'
                     color_fn = yellow if is_partial else green
                     cov_tag = ' {}'.format(color_fn('[{}:{}]'.format(label, env_tag)))
-                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}'.format(
-                    i, comp, viol_color('{:>6}'.format(viol)), warn, first, jira, policy_tag, cov_tag))
+                nightly_data_tag = dim(' [🌙nightly]') if v.get('is_nightly_data') else ''
+                print('  {:<4} {:<45} {} {:>6} {:>12}  {}{}{}{}'.format(
+                    i, comp, viol_color('{:>6}'.format(viol)), warn, first,
+                    jira, policy_tag, cov_tag, nightly_data_tag))
+                k_url = v.get('konflux_url', '')
+                if k_url:
+                    print(dim('       → {}'.format(k_url)))
                 p_url_s = v.get('policy_url_stage')
                 p_url_p = v.get('policy_url_prod')
                 if p_url_s:
@@ -554,6 +579,7 @@ def _print_conforma_table(data, app_name, policy_filter):
             'warn': warn, 'ok': ok, 'policy': policy, 'type': policy_type,
             'exc': exc_label, 'since': since, 'jira': jira or '-',
             'wrong_policy': wrong_policy, 'trigger_type': trigger_type,
+            'konflux_url': v.get('konflux_url', ''),
         })
 
     rows.sort(key=lambda r: -r['viol'])
@@ -590,6 +616,8 @@ def _print_conforma_table(data, app_name, policy_filter):
             bold(r['jira']) if r['jira'] != '-' else '-'))
         if nightly_build_failed and not r['wrong_policy']:
             print(dim('       🌙 nightly build failed — conforma data from push build (no FIPS check)'))
+        if r.get('konflux_url') and not r['wrong_policy']:
+            print(dim('       → {}'.format(r['konflux_url'])))
 
     if any(cov_counts.values()):
         parts = []

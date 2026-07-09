@@ -431,7 +431,8 @@ class BuildFailureRepository:
                 WITH latest_builds AS (
                     SELECT DISTINCT ON (component_name)
                         component_name, first_detected_at, last_updated_at,
-                        error_type, jira_key, trigger_type,
+                        error_type, jira_key, trigger_type, pipelinerun_name,
+                        COALESCE(konflux_url, '') AS konflux_url,
                         COUNT(*) OVER (PARTITION BY component_name) as failure_count,
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
                         (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context,
@@ -442,7 +443,7 @@ class BuildFailureRepository:
                 )
                 SELECT component_name, first_detected_at, last_updated_at,
                        error_type, jira_key, failure_count, has_logs, has_context,
-                       ai_analyzed, trigger_type
+                       ai_analyzed, trigger_type, pipelinerun_name, konflux_url
                 FROM latest_builds ORDER BY first_detected_at DESC
             """, (application,))
             summary['failing_components'] = [
@@ -458,6 +459,8 @@ class BuildFailureRepository:
                     'ai_analyzed': r[8],
                     'trigger_type': r[9] or 'push',
                     'is_nightly': (r[9] or 'push') == 'nightly',
+                    'pipelinerun_name': r[10] or '',
+                    'konflux_url': r[11] or '',
                 }
                 for r in cursor.fetchall()
             ]
