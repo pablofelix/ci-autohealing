@@ -62,9 +62,9 @@ tasks:
       - python3 -m pytest src/tests/ --cov --cov-report=term -q --tb=no
 
   coverage-check:
-    desc: Fail if coverage below threshold (default 40%)
+    desc: Fail if coverage below threshold (default 85%)
     cmds:
-      - python3 -m pytest src/tests/ --cov --cov-fail-under={{.COV_MIN | default "40"}} -q --tb=no
+      - python3 -m pytest src/tests/ --cov --cov-fail-under={{.COV_MIN | default "85"}} -q --tb=no
 
   test-watchdog:
     desc: Start file-watching test daemon

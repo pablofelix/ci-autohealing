@@ -114,11 +114,24 @@ done
 
 # ─── CODE SMELLS ───────────────────────────────────────────────
 
-# 10. Forbidden module names (STYLE.md: no utils/, helpers/, common/)
+# 10. Forbidden directory names (STYLE.md: no utils/, helpers/, common/, misc/)
 for f in $STAGED; do
+    if echo "$f" | grep -qE '/(utils|helpers|common|misc)/'; then
+        err "$f — File inside forbidden directory (STYLE.md line 217: no utils/, helpers/, common/, misc/)"
+    fi
     basename=$(basename "$f" .py)
     if echo "$basename" | grep -qxE 'helpers|common|misc'; then
         err "$f — Forbidden module name '$basename' (STYLE.md: name after domain, not purpose)"
+    fi
+done
+
+# 10b. No unittest.TestCase in new code (STYLE.md: use pytest)
+for f in $STAGED; do
+    if echo "$f" | grep -qE 'tests/'; then
+        if grep -nP 'class\s+\w+\(unittest\.TestCase\)' "$f" > /dev/null 2>&1; then
+            lines=$(grep -nP 'class\s+\w+\(unittest\.TestCase\)' "$f" | head -3)
+            warn "$f — unittest.TestCase in new test (STYLE.md: use pytest, not unittest): $lines"
+        fi
     fi
 done
 
