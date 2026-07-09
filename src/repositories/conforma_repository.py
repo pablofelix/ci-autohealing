@@ -267,6 +267,7 @@ class ConformaRepository:
                   AND application = %s
                   AND is_resolved = FALSE
                 ORDER BY last_updated_at DESC
+                LIMIT 10
             """, (component, application))
             cols = [
                 'component_name', 'scenario',

@@ -909,6 +909,7 @@ Use these URLs in evidence_references when relevant:
         # Save to database (these fields live in analysis_json, not DB columns)
         analysis.pop('evidence_references', None)
         analysis.pop('source_transparency', None)
+        analysis.pop('differential_diagnosis', None)
         analysis_id = self.ai_repo.insert_analysis(
             conforma_result_id=violation['id'],
             model_used=self.llm.model_name(),

@@ -529,6 +529,10 @@ class LabelInferenceService:
     def backfill(self, application=None, limit=100, min_confidence=0.0, dry_run=False):
         """Label all resolved failures that have a resolution_commit_sha but no label.
 
+        Uses PR file lookup first, then falls back to direct commit comparison
+        (base=failing commit, head=fixing commit) when no PR is found. This
+        handles direct pushes, cherry-picks, and cases where the PR lookup times out.
+
         Args:
             application: Filter by application name. None = all applications.
             limit: Maximum failures to process.
@@ -536,14 +540,13 @@ class LabelInferenceService:
             dry_run: If True, compute but do not write labels.
 
         Returns:
-            dict with counts: processed, labeled, skipped_no_pr, skipped_no_files,
-                              skipped_low_confidence, already_labeled, errors.
+            dict with counts: processed, labeled, skipped_no_files,
+                              skipped_low_confidence, errors.
         """
         rows = self._get_resolved_unlabeled(application, limit)
         counts = {
             'processed': 0,
             'labeled': 0,
-            'skipped_no_pr': 0,
             'skipped_no_files': 0,
             'skipped_low_confidence': 0,
             'errors': 0,
@@ -556,6 +559,7 @@ class LabelInferenceService:
                     build_failure_id=row['id'],
                     resolution_commit_sha=row['resolution_commit_sha'],
                     repository_url=row['repository_url'],
+                    failing_commit_sha=row.get('commit_sha'),
                     dry_run=dry_run,
                     min_confidence=min_confidence,
                     _counts=counts,
@@ -571,8 +575,18 @@ class LabelInferenceService:
         return counts
 
     def label_one(self, build_failure_id, resolution_commit_sha, repository_url,
-                  dry_run=False, min_confidence=0.0, _counts=None):
+                  failing_commit_sha=None, dry_run=False, min_confidence=0.0,
+                  _counts=None):
         """Infer and optionally persist a label for one resolved failure.
+
+        Args:
+            build_failure_id: DB id of the build_failure row.
+            resolution_commit_sha: The commit that fixed the build.
+            repository_url: GitHub URL of the component repo.
+            failing_commit_sha: The commit that was failing (used as base for
+                comparison when no PR is found).
+            dry_run: If True, compute but do not write.
+            min_confidence: Skip labels below this threshold.
 
         Returns LabelInference on success, None when skipped.
         """
@@ -587,17 +601,13 @@ class LabelInferenceService:
             return None
 
         owner, repo = parsed
-        pr_number, pr_url, pr_files = self._fetch_pr_files(owner, repo, resolution_commit_sha)
-
-        if pr_number is None:
-            logger.debug("No PR found for commit %s in %s/%s",
-                         resolution_commit_sha, owner, repo)
-            if _counts is not None:
-                _counts['skipped_no_pr'] = _counts.get('skipped_no_pr', 0) + 1
-            return None
+        pr_number, pr_url, pr_files = self._fetch_pr_files(
+            owner, repo, resolution_commit_sha, failing_commit_sha=failing_commit_sha
+        )
 
         if not pr_files:
-            logger.debug("PR #%s has no file list — skipping", pr_number)
+            logger.debug("No changed files found for failure %s (commit=%s)",
+                         build_failure_id, resolution_commit_sha[:8] if resolution_commit_sha else '?')
             if _counts is not None:
                 _counts['skipped_no_files'] = _counts.get('skipped_no_files', 0) + 1
             return None
@@ -621,7 +631,12 @@ class LabelInferenceService:
         return inference
 
     def _get_resolved_unlabeled(self, application, limit):
-        """Return resolved failures with a resolution SHA but no training label yet."""
+        """Return resolved failures with a resolution SHA but no training label yet.
+
+        Returns both commit_sha (the failing commit) and resolution_commit_sha
+        (the fixing commit) so callers can use commit comparison as a fallback
+        when no PR is found for the resolution commit.
+        """
         app_filter = 'AND bf.application = %s' if application else ''
         params = [limit] if not application else [application, limit]
 
@@ -629,7 +644,7 @@ class LabelInferenceService:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT bf.id, bf.component_name, bf.application,
-                       bf.repository_url, bf.resolution_commit_sha
+                       bf.repository_url, bf.resolution_commit_sha, bf.commit_sha
                 FROM build_failures bf
                 LEFT JOIN ml_training_labels ml ON ml.build_failure_id = bf.id
                 WHERE bf.is_resolved = TRUE
@@ -641,27 +656,53 @@ class LabelInferenceService:
                 LIMIT %s
             """.format(app_filter), params)
             cols = ['id', 'component_name', 'application', 'repository_url',
-                    'resolution_commit_sha']
+                    'resolution_commit_sha', 'commit_sha']
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
-    def _fetch_pr_files(self, owner, repo, resolution_commit_sha):
-        """Find the PR for the given commit SHA and return its changed files.
+    def _fetch_pr_files(self, owner, repo, resolution_commit_sha,
+                        failing_commit_sha=None):
+        """Return changed files for a resolved build failure.
+
+        Strategy (in order):
+        1. PR lookup via get_pr_for_commit() — preferred because it provides
+           pr_number and pr_url for provenance.
+        2. Direct commit comparison — fallback for direct pushes, cherry-picks,
+           or cases where no PR is linked to the commit on GitHub.
+
+        Args:
+            owner: Repository owner.
+            repo: Repository name.
+            resolution_commit_sha: The commit that fixed the build.
+            failing_commit_sha: The commit that was failing (base for comparison).
 
         Returns:
-            Tuple of (pr_number, pr_url, [filenames]) or (None, None, []) when not found.
+            Tuple of (pr_number, pr_url, [filenames]).
+            pr_number and pr_url are None when the commit comparison path is used.
         """
         pr = self.github.get_pr_for_commit(owner, repo, resolution_commit_sha)
-        if not pr or not pr.get('number'):
-            return None, None, []
+        if pr and pr.get('number'):
+            pr_number = pr['number']
+            pr_url = pr.get('url', '')
+            resp = self.github._get(
+                '/repos/{}/{}/pulls/{}/files'.format(owner, repo, pr_number)
+            )
+            if resp:
+                files = [f.get('filename', '') for f in resp.json()[:100]
+                         if f.get('filename')]
+                if files:
+                    return pr_number, pr_url, files
 
-        pr_number = pr['number']
-        pr_url = pr.get('url', '')
-        resp = self.github._get('/repos/{}/{}/pulls/{}/files'.format(owner, repo, pr_number))
-        if not resp:
-            return pr_number, pr_url, []
+        if failing_commit_sha and failing_commit_sha != resolution_commit_sha:
+            files = self.github.compare_commits(
+                owner, repo, failing_commit_sha, resolution_commit_sha
+            )
+            if files:
+                logger.debug("Used commit comparison (%s...%s) for %s/%s",
+                             failing_commit_sha[:8], resolution_commit_sha[:8],
+                             owner, repo)
+                return None, None, files
 
-        files = [f.get('filename', '') for f in resp.json()[:100] if f.get('filename')]
-        return pr_number, pr_url, files
+        return None, None, []
 
     def _save_label(self, build_failure_id, resolution_commit_sha,
                     pr_number, pr_url, pr_files, inference):
