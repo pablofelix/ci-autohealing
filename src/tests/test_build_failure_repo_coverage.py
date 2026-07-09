@@ -640,12 +640,12 @@ class TestGetTriageSummary:
         repo, _, _, cursor = repo_and_mocks
         # First query: overview stats
         cursor.fetchone.return_value = (100, 5, 80)
-        # Second query: failing components (9 cols: component, first_detected_at,
+        # Second query: failing components (10 cols: component, first_detected_at,
         # last_updated_at, error_type, jira_key, failure_count, has_logs, has_context,
-        # ai_analyzed)
+        # ai_analyzed, trigger_type)
         cursor.fetchall.return_value = [
-            ('comp-a', datetime(2024, 6, 1), datetime(2024, 6, 2), 'build_error', None, 3, True, False, True),
-            ('comp-b', datetime(2024, 5, 30), datetime(2024, 5, 31), None, 'RHOAI-1', 1, False, True, False),
+            ('comp-a', datetime(2024, 6, 1), datetime(2024, 6, 2), 'build_error', None, 3, True, False, True, 'push'),
+            ('comp-b', datetime(2024, 5, 30), datetime(2024, 5, 31), None, 'RHOAI-1', 1, False, True, False, 'nightly'),
         ]
         result = repo.get_triage_summary('app1')
         assert result['total'] == 100
@@ -659,6 +659,8 @@ class TestGetTriageSummary:
         assert fc[0]['failure_count'] == 3
         assert fc[1]['has_context'] is True
         assert fc[1]['jira_key'] == 'RHOAI-1'
+        assert fc[1]['is_nightly'] is True
+        assert fc[0]['is_nightly'] is False
 
     def test_no_failing_components(self, repo_and_mocks):
         repo, _, _, cursor = repo_and_mocks
