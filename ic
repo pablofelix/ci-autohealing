@@ -1508,7 +1508,7 @@ cmd_get_components() {
         sql_json "
             SELECT component_name AS component, pipelinerun_name, status,
                    error_type, first_detected_at AS first_seen,
-                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN true ELSE false END AS has_logs,
                    CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis
             FROM build_failures
             WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE
@@ -1667,7 +1667,7 @@ cmd_get_components() {
             first_detected_at,
             COALESCE(failed_step_name, '') as failed_task,
             (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name) as total_failures,
-            (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name AND bf.build_logs IS NOT NULL) as with_logs
+            (SELECT COUNT(*) FROM build_failures bf WHERE bf.component_name = build_failures.component_name AND (bf.build_logs IS NOT NULL OR bf.blob_refs ? 'build_logs')) as with_logs
         FROM build_failures
         WHERE application = '$APPLICATION_NAME'
         ORDER BY component_name, first_detected_at DESC
@@ -1732,7 +1732,7 @@ cmd_get_component() {
     echo ""
     echo -e "${BOLD}Summary:${NC}"
     echo "  Total failures: $total"
-    echo "  With logs: $(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")"
+    echo "  With logs: $(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs');")"
     echo "  First seen: $(sql "SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '$component';")"
     echo "  Last seen: $(sql "SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '$component';")"
     echo ""
@@ -1760,7 +1760,7 @@ cmd_get_pipelineruns() {
     if [ "$json_output" = true ]; then
         sql_json "
             SELECT pipelinerun_name, component_name AS component, status,
-                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN true ELSE false END AS has_logs,
                    first_detected_at AS detected
             FROM build_failures
             ORDER BY first_detected_at DESC
@@ -1777,7 +1777,7 @@ cmd_get_pipelineruns() {
         pipelinerun_name as \"PipelineRun\",
         component_name as \"Component\",
         status as \"Status\",
-        CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END as \"Logs\",
+        CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN 'Yes' ELSE 'No' END as \"Logs\",
         first_detected_at as \"Detected\"
     FROM build_failures
     ORDER BY first_detected_at DESC
@@ -1794,7 +1794,7 @@ cmd_get_pipelinerun() {
         return 1
     fi
 
-    local data=$(sql "SELECT component_name, status, CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
+    local data=$(sql "SELECT component_name, status, CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN 'Yes' ELSE 'No' END FROM build_failures WHERE pipelinerun_name = '$pr_name' LIMIT 1;")
 
     if [ -z "$data" ]; then
         echo -e "${RED}Error: PipelineRun not found: $pr_name${NC}"
@@ -1894,7 +1894,7 @@ cmd_describe_component() {
                    error_type, LEFT(error_message, 500) AS error_message,
                    commit_sha, commit_author, LEFT(commit_message, 200) AS commit_message,
                    first_detected_at AS first_seen, last_updated_at AS last_seen,
-                   CASE WHEN build_logs IS NOT NULL THEN true ELSE false END AS has_logs,
+                   CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN true ELSE false END AS has_logs,
                    CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis,
                    jira_key, output_image
             FROM build_failures
@@ -1909,7 +1909,7 @@ cmd_describe_component() {
     echo ""
 
     # Summary
-    local with_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND build_logs IS NOT NULL;")
+    local with_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE component_name = '$component' AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs');")
     local first_failure=$(sql "SELECT MIN(first_detected_at) FROM build_failures WHERE component_name = '$component';")
     local latest_failure=$(sql "SELECT MAX(first_detected_at) FROM build_failures WHERE component_name = '$component';")
 
@@ -1924,7 +1924,7 @@ cmd_describe_component() {
     # Replace newlines in text fields to prevent IFS parsing issues
     local pr_data=$(sql "
         SELECT id, pipelinerun_name, pipelinerun_uid, status, repository_url, branch,
-               CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
+               CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN 'Yes' ELSE 'No' END,
                COALESCE(konflux_logs_url, konflux_url),
                COALESCE(commit_sha, ''), COALESCE(commit_url, ''),
                COALESCE(commit_author, ''),
@@ -2148,7 +2148,7 @@ cmd_describe_pipelinerun() {
 
     local data=$(sql "
         SELECT component_name, pipelinerun_uid, status, repository_url, branch,
-               CASE WHEN build_logs IS NOT NULL THEN 'Yes' ELSE 'No' END,
+               CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN 'Yes' ELSE 'No' END,
                COALESCE(konflux_logs_url, konflux_url), build_logs
         FROM build_failures
         WHERE pipelinerun_name = '$pr_name'
@@ -2398,7 +2398,7 @@ cmd_stats() {
     SELECT
         COUNT(*) as \"Total Failures\",
         COUNT(DISTINCT component_name) as \"Components\",
-        COUNT(CASE WHEN build_logs IS NOT NULL THEN 1 END) as \"With Logs\"
+        COUNT(CASE WHEN build_logs IS NOT NULL OR blob_refs ? 'build_logs' THEN 1 END) as \"With Logs\"
     FROM build_failures;
     "
     echo ""
@@ -2612,7 +2612,7 @@ cmd_triage() {
             pipelinerun_name,
             status,
             first_detected_at,
-            build_logs IS NOT NULL as has_logs,
+            (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
             commit_context IS NOT NULL as has_context
         FROM build_failures
         WHERE application = '$APPLICATION_NAME'
@@ -3158,8 +3158,8 @@ cmd_ai_status() {
     echo ""
 
     # Build failures state breakdown
-    local build_pending=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NOT NULL AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
-    local build_no_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NULL AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local build_pending=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND (build_logs IS NOT NULL OR blob_refs ? 'build_logs') AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
+    local build_no_logs=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_analyzed = FALSE AND is_resolved = FALSE AND build_logs IS NULL AND NOT (blob_refs ? 'build_logs') AND ai_skip_reason IS NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
     local build_skipped=$(sql "SELECT COUNT(*) FROM build_failures WHERE ai_skip_reason IS NOT NULL AND application = '$APPLICATION_NAME';" 2>/dev/null)
     local build_analyzed=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
     local build_low_conf=$(sql "SELECT COUNT(*) FROM ai_analysis a JOIN build_failures b ON a.build_failure_id = b.id WHERE b.application = '$APPLICATION_NAME' AND a.confidence_score < 0.7 AND a.analyzed_at > NOW() - INTERVAL '30 days';" 2>/dev/null)
@@ -5433,7 +5433,7 @@ cmd_get_alerts() {
             SELECT component_name AS component, 'Failed' AS status,
                    error_type, first_detected_at AS first_seen,
                    last_updated_at AS last_seen,
-                   CASE WHEN build_logs IS NOT NULL AND build_logs != '' THEN true ELSE false END AS has_logs,
+                   CASE WHEN (build_logs IS NOT NULL AND build_logs != '') OR blob_refs ? 'build_logs' THEN true ELSE false END AS has_logs,
                    CASE WHEN ai_analysis_id IS NOT NULL THEN true ELSE false END AS has_analysis
             FROM build_failures
             WHERE application = '$APPLICATION_NAME' AND is_resolved = FALSE

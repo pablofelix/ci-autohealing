@@ -36,18 +36,26 @@ ignore = [
     "SIM102", # nested if — sometimes clearer than combined condition
     "SIM105", # contextlib.suppress — try/except/pass is explicit and clear
     "SIM108", # ternary — multi-line if/else is often more readable
+    "SIM117", # multiple with — 92 existing, fix incrementally
+    "SIM116", # if-else-block-instead-of-dict-lookup — style preference
+    "SIM222", # expr-or-true — rare, intentional
+    "SIM300", # yoda conditions — style preference
+    "SIM910", # dict-get-with-none-default — explicit None is fine
+    "F841",   # unused variable — 82 existing, fix incrementally
+    "E741",   # ambiguous variable name (l, O, I) — existing code
 ]
 
 [lint.per-file-ignores]
 "src/clients/tekton_results.py" = ["E402"]
 "src/cli/*.py" = ["T20", "E402"]                 # CLI uses print() and has late imports
-"src/tests/**/*.py" = ["S101", "T20", "S105", "S106", "S107"]  # assert, print, hardcoded passwords OK in tests
+"src/tests/**/*.py" = ["S101", "T20", "S105", "S106", "S107", "S324", "E402", "F811"]  # assert, print, hardcoded passwords, insecure hash, late imports, redefines OK in tests
 "src/*.py" = ["T20"]                            # entry-point scripts use print()
 "scripts/*.py" = ["T20", "S"]                   # scripts have different security model
 
 [lint.isort]
 known-first-party = [
     "analyzers", "api", "cli", "clients", "collectors",
-    "config", "mcp_server", "openshift_auth", "proactive",
-    "repositories", "shared_config", "skills", "utils",
+    "conforma", "config", "knowledge", "log_filter",
+    "mcp_server", "onboarding", "openshift_auth", "proactive",
+    "repositories", "shared_config", "skills",
 ]

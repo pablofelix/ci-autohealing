@@ -98,6 +98,9 @@ post-merge:
 
 pre-push:
   commands:
+    coverage-gate:
+      run: python3 -m pytest src/tests/ --cov --cov-fail-under=85 -q --tb=no
+
     doc-check:
       run: |
         CHANGED=$(git diff --name-only origin/main...HEAD -- src/ ic 2>/dev/null)
