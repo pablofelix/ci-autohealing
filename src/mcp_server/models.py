@@ -48,6 +48,7 @@ class FailureSummary(BaseModel):
     age_hours: Optional[float] = Field(None, description="Hours since first_seen")
     is_new: bool = Field(False, description="First seen in last 24h")
     status_changed: bool = Field(False, description="Status or error_type changed in last 24h")
+    is_nightly: bool = Field(False, description="Most recent build was a nightly (trigger_type=nightly)")
 
 
 class BuildFailureDetails(BaseModel):

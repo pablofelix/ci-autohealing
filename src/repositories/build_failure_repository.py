@@ -431,7 +431,7 @@ class BuildFailureRepository:
                 WITH latest_builds AS (
                     SELECT DISTINCT ON (component_name)
                         component_name, first_detected_at, last_updated_at,
-                        error_type, jira_key,
+                        error_type, jira_key, trigger_type,
                         COUNT(*) OVER (PARTITION BY component_name) as failure_count,
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
                         (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context,
@@ -441,7 +441,8 @@ class BuildFailureRepository:
                     ORDER BY component_name, first_detected_at DESC
                 )
                 SELECT component_name, first_detected_at, last_updated_at,
-                       error_type, jira_key, failure_count, has_logs, has_context, ai_analyzed
+                       error_type, jira_key, failure_count, has_logs, has_context,
+                       ai_analyzed, trigger_type
                 FROM latest_builds ORDER BY first_detected_at DESC
             """, (application,))
             summary['failing_components'] = [
@@ -455,6 +456,8 @@ class BuildFailureRepository:
                     'has_logs': r[6],
                     'has_context': r[7],
                     'ai_analyzed': r[8],
+                    'trigger_type': r[9] or 'push',
+                    'is_nightly': (r[9] or 'push') == 'nightly',
                 }
                 for r in cursor.fetchall()
             ]
@@ -641,6 +644,26 @@ class BuildFailureRepository:
             """, (application,))
             row = cursor.fetchone()
             return {'pending': row[0], 'analyzed': row[1]}
+
+    def get_failing_nightly_components(self, application):
+        """Return the set of components whose most recent nightly build is failing.
+
+        Uses DISTINCT ON to pick the latest nightly build per component and
+        returns only those still unresolved. Called once per display function —
+        callers must not loop and call this per-component.
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT ON (component_name)
+                    component_name
+                FROM build_failures
+                WHERE application = %s
+                  AND trigger_type = 'nightly'
+                  AND is_resolved = FALSE
+                ORDER BY component_name, first_detected_at DESC
+            """, (application,))
+            return {row[0] for row in cursor.fetchall()}
 
     def get_nightly_history(self, application, days=14):
         """Get nightly operator build history with FBC fragment status."""

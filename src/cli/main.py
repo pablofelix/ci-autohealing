@@ -220,8 +220,12 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                 '#', 'Component', 'Error/Cause', 'Since', 'JIRA'))
             print('  {}  {} {} {}  {}'.format(
                 '---', '-' * 45, '-' * 20, '-' * 12, '--------'))
+            nightly_failures = []
             for i, f in enumerate(builds, 1):
                 comp = f.get('component', '?')
+                is_nightly_fail = f.get('is_nightly', False)
+                if is_nightly_fail:
+                    nightly_failures.append(f.get('component', ''))
                 if len(comp) > 45:
                     comp = comp[:42] + '...'
                 err = f.get('error_type') or f.get('possible_cause') or ''
@@ -238,8 +242,15 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
                     jira = info['jira_key']
                 jira = jira or '-'
                 analyzed = green(' [AI]') if f.get('has_analysis') else ''
-                print('  {:<4} {:<45} {:<20} {:>12}  {}{}'.format(
-                    i, comp, err, first, jira, analyzed))
+                nightly_tag = yellow(' 🌙') if is_nightly_fail else ''
+                print('  {:<4} {:<45} {:<20} {:>12}  {}{}{}'.format(
+                    i, comp, err, first, jira, analyzed, nightly_tag))
+            if nightly_failures:
+                print()
+                print(yellow('  🌙 {} nightly build(s) failing (release-critical):'.format(
+                    len(nightly_failures))))
+                for c in nightly_failures:
+                    print(dim('     {}'.format(c)))
         else:
             print('  {} No build failures'.format(green('✓')))
         print()
@@ -470,12 +481,24 @@ def _policy_filter_to_include_future(policy_filter):
 
 def _print_conforma_table(data, app_name, policy_filter):
     """Print conforma violations as a table with unique counts."""
+    from cli.db import check_db
     from cli.formatting import bold, dim, green, red, yellow
     from conforma.policy_tools import (
         extract_policy_from_scenario,
         is_wrong_policy_for_artifact,
         strip_version_suffix,
     )
+
+    # Load failing nightly builds once — used to warn when conforma data
+    # is stale because the nightly build itself failed (no fresh FIPS result).
+    failing_nightlies: set = set()
+    if check_db() and app_name:
+        try:
+            from cli.data import get_repo
+            from repositories.build_failure_repository import BuildFailureRepository
+            failing_nightlies = get_repo(BuildFailureRepository).get_failing_nightly_components(app_name)
+        except Exception:
+            pass
 
     cov_counts = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
 
@@ -546,13 +569,17 @@ def _print_conforma_table(data, app_name, policy_filter):
     print(bold(hdr))
     print(dim(sep))
     wrong_policy_rows = []
+    nightly_build_failed_rows = []
     for i, r in enumerate(rows, 1):
         comp_display = r['comp']
+        nightly_build_failed = r['full_comp'] in failing_nightlies
         if r['wrong_policy']:
             comp_display = '⚠ ' + comp_display
             wrong_policy_rows.append(r)
         elif r['trigger_type'] == 'scheduled':
             comp_display = '🌙 ' + comp_display
+        elif nightly_build_failed:
+            nightly_build_failed_rows.append(r)
         if len(comp_display) > 50:
             comp_display = comp_display[:47] + '...'
         viol_color = yellow if r['wrong_policy'] else (red if r['viol'] > 0 else green)
@@ -561,6 +588,8 @@ def _print_conforma_table(data, app_name, policy_filter):
             viol_color(str(r['unique'])), r['viol'],
             r['warn'], r['ok'], r['exc'], r['since'],
             bold(r['jira']) if r['jira'] != '-' else '-'))
+        if nightly_build_failed and not r['wrong_policy']:
+            print(dim('       🌙 nightly build failed — conforma data from push build (no FIPS check)'))
 
     if any(cov_counts.values()):
         parts = []

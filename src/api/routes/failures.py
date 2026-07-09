@@ -211,6 +211,7 @@ def list_alerts(application: str):
             is_new=is_new,
             status_changed=status_chg,
             jira_key=jira,
+            is_nightly=comp.get('is_nightly', False),
         ))
 
     _detect_systemic_patterns(build_failures)
