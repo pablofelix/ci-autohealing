@@ -190,12 +190,27 @@ class ConformaAnalyzer:
         Returns:
             List of violation dicts ready for analysis
         """
-        return self.ai_repo.get_pending_conforma_violations(
+        from conforma.policy_tools import is_wrong_policy_for_artifact
+
+        violations = self.ai_repo.get_pending_conforma_violations(
             application or self.config.k8s.application_name,
             limit=limit,
             component_filter=component_filter,
             force=force
         )
+        filtered = []
+        for v in violations:
+            comp = v.get('component_name', '') or v.get('component', '')
+            scenario = v.get('scenario', '')
+            if is_wrong_policy_for_artifact(comp, scenario):
+                logger.info(
+                    "Skipping AI analysis for %s: wrong EC policy (%s) for artifact type "
+                    "(Konflux ITS scoping false positive — optional ITS, does not block release)",
+                    comp, scenario,
+                )
+                continue
+            filtered.append(v)
+        return filtered
 
     def build_analysis_prompt(self, violation):
         """Construct system + user prompts from violation data.

@@ -135,6 +135,9 @@ class KonfluxClient:
         spec = scenario.get('spec', {})
         name = meta.get('name', '')
 
+        labels = meta.get('labels', {})
+        is_optional = labels.get('test.appstudio.openshift.io/optional', 'false').lower() == 'true'
+
         contexts = spec.get('contexts', [])
         context_names = [c.get('name', '') for c in contexts]
         is_disabled = 'disabled' in context_names
@@ -169,6 +172,7 @@ class KonfluxClient:
             'is_disabled': is_disabled,
             'is_future': '-future' in name,
             'is_conforma': is_conforma,
+            'is_optional': is_optional,
             'contexts': context_names,
         }
 

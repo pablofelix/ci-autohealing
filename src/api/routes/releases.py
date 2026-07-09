@@ -416,6 +416,7 @@ def _run_readiness_checks(application, full=False):
         lambda: _check_ocp_compatibility(snapshot),
         lambda: _check_cross_product_images(snapshot),
         lambda: _check_tutorial_validation(),
+        lambda: _check_its_scoping(db, application, kfx, namespace),
         # ── Post-stage checks ──
         lambda: _check_stage_release_health(kfx, application),
         lambda: _check_prod_rpa_exists(rpas),
@@ -440,6 +441,7 @@ def _run_readiness_checks(application, full=False):
         'Nudge PR propagation', 'Multi-arch coverage',
         'Test coverage regression', 'OCP compatibility',
         'Cross-product images', 'Tutorial validation',
+        'ITS scoping (Konflux)',
         'Stage release health', 'Prod RPA exists',
         'Snapshot drift', 'Release pipeline completeness',
         'PCC cache (post-push)',
@@ -1066,6 +1068,100 @@ def _check_nudge_propagation(application):
         logger.debug("Nudge propagation check failed: %s", exc)
         return {
             'name': 'Nudge PR propagation',
+            'phase': 'pre-release',
+            'status': 'SKIP',
+            'detail': 'Check failed: {}'.format(exc),
+            'fix': None,
+        }
+
+
+def _check_its_scoping(db, application, kfx, namespace):
+    """Check for Konflux ITS scoping false positives.
+
+    Detects when FBC fragments or Helm chart OCI artifacts are being evaluated
+    against the generic registry-rhoai-prod policy instead of their correct
+    artifact-specific policy. This is a known Konflux platform limitation:
+    the generic 'component' ITS context fires for all components including FBC
+    and charts, which have their own component-specific ITS with the correct
+    policy. The generic ITS is optional and does NOT block release.
+
+    Transitions from WARN → PASS when no wrong-policy violations exist in DB,
+    which happens when either the ITS config is fixed or no FBC/chart builds are
+    failing. The PASS detail distinguishes these cases by checking if the generic
+    ITS still has the broad 'component' context (meaning the platform problem
+    persists but no violations are currently active), which is a signal to keep
+    the IC workaround in place. Only when the generic ITS loses the broad context
+    or becomes optional can the workaround be safely removed.
+
+    Konflux NudgeConfig cross-app support (in development, STONEINTG-1659) would
+    also enable the alternative fix of splitting FBC/charts into separate Apps.
+    """
+    try:
+        from repositories import ConformaRepository
+        repo = ConformaRepository(db)
+
+        # Single query: all (component, scenario) pairs with wrong policy — no N+1
+        wrong_policy = repo.get_wrong_policy_components(application)
+
+        if not wrong_policy:
+            # Check whether the generic ITS still has the broad 'component' context.
+            # If it does, the Konflux-side problem still exists (just no active violations
+            # right now). If it doesn't, the platform may have been fixed.
+            its_still_generic = False
+            if kfx and namespace:
+                try:
+                    scenarios = kfx.get_integration_test_scenarios(
+                        namespace=namespace, app_filter=application)
+                    for s in scenarios:
+                        meta = kfx.extract_its_metadata(s)
+                        if 'registry-rhoai-prod' in meta.get('policy_ref', ''):
+                            contexts = meta.get('contexts', [])
+                            if 'component' in contexts and not meta.get('is_optional'):
+                                its_still_generic = True
+                                break
+                except Exception:
+                    pass
+
+            detail = (
+                'No wrong-policy violations detected, but the generic registry-rhoai-prod '
+                'ITS still uses the broad "component" context — the Konflux-side problem '
+                'persists. Keep the IC workaround (is_wrong_policy_for_artifact) in place.'
+                if its_still_generic else
+                'No FBC/chart components with wrong-policy violations. '
+                'If the generic ITS context was recently narrowed, the IC workaround in '
+                'is_wrong_policy_for_artifact() may now be removable.'
+            )
+            return {
+                'name': 'ITS scoping (Konflux)',
+                'phase': 'pre-release',
+                'status': 'PASS',
+                'detail': detail,
+                'fix': None,
+            }
+
+        return {
+            'name': 'ITS scoping (Konflux)',
+            'phase': 'pre-release',
+            'status': 'WARN',
+            'detail': (
+                '{} component(s) evaluated against wrong EC policy due to Konflux ITS '
+                'scoping limitation (optional ITS, does NOT block release): {}. '
+                'IC marks these as false positives and skips AI analysis. '
+                'Track fix: STONEINTG-1659 (NudgeConfig) or MR to '
+                'releng/konflux-release-data tenants-config/.'
+            ).format(len(wrong_policy), ', '.join(wrong_policy)),
+            'fix': (
+                'No action needed for release. To fix permanently: '
+                '(1) Wait for Konflux NudgeConfig cross-app support and split FBC/charts '
+                'into separate Applications, OR '
+                '(2) MR to releng/konflux-release-data to scope the generic '
+                'conforma-registry-rhoai-prod ITS away from FBC/chart components.'
+            ),
+        }
+    except Exception as exc:
+        logger.debug("ITS scoping check failed: %s", exc)
+        return {
+            'name': 'ITS scoping (Konflux)',
             'phase': 'pre-release',
             'status': 'SKIP',
             'detail': 'Check failed: {}'.format(exc),

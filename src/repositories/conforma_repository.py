@@ -155,10 +155,17 @@ class ConformaRepository:
     def get_violation_summaries(self, application, include_future=None):
         """Summary of all unresolved violations (no violation_details). One query.
 
+        When a component has multiple active scenarios due to Konflux ITS scoping
+        (e.g., FBC evaluated against both its correct fbc-rhoai-prod policy and the
+        generic registry-rhoai-prod policy), deduplicates by component_name keeping
+        only the correct-policy scenario. This prevents false positives from appearing
+        alongside real violations.
+
         Args:
             include_future: None = current only (default), True = future only,
                            'all' = both current and future.
         """
+        from conforma.policy_tools import is_wrong_policy_for_artifact
         with self.db.connection() as conn:
             cursor = conn.cursor()
             future_clause = ''
@@ -186,10 +193,64 @@ class ConformaRepository:
                 'first_detected_at', 'last_updated_at',
                 'ai_analyzed', 'jira_key', 'is_future',
             ]
-            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+            rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+        # Deduplicate: when a component has both a correct-policy and a wrong-policy
+        # scenario for the same policy context (same is_future value), keep only the
+        # correct one. Key on (component_name, is_future) so that current-policy and
+        # future-policy rows for the same component are preserved as separate entries
+        # when include_future='all' is used.
+        seen: dict = {}
+        for row in rows:
+            comp = row['component_name']
+            is_fut = row.get('is_future', False)
+            key = (comp, is_fut)
+            wrong = is_wrong_policy_for_artifact(comp, row['scenario'])
+            if key not in seen:
+                seen[key] = row
+            elif wrong:
+                # Incoming row is wrong-policy; prefer what is already stored
+                pass
+            else:
+                # Incoming row is correct-policy; replace the stored wrong-policy one
+                seen[key] = row
+        return list(seen.values())
+
+    def get_wrong_policy_components(self, application):
+        """Return component names that have at least one wrong-policy scenario active.
+
+        Scans all unresolved current-policy (is_future=False) (component, scenario)
+        pairs in a single query and returns those where the scenario does not match
+        the component's artifact type. Used by _check_its_scoping to detect Konflux
+        ITS scoping false positives without N+1 queries.
+        """
+        from conforma.policy_tools import is_wrong_policy_for_artifact
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT component_name, scenario
+                    FROM conforma_results
+                    WHERE application = %s
+                      AND is_resolved = FALSE
+                      AND is_future = FALSE
+                """, (application,))
+                return [
+                    comp for comp, scen in cursor.fetchall()
+                    if is_wrong_policy_for_artifact(comp, scen)
+                ]
+        except Exception:
+            return []
 
     def get_violation_details(self, component, application):
-        """Full violation details for a component. Used by MCP/API for describe views."""
+        """Full violation details for a component. Used by MCP/API for describe views.
+
+        When a component has multiple active scenarios (e.g., FBC evaluated against
+        both fbc-rhoai-prod and registry-rhoai-prod due to Konflux ITS scoping),
+        prefers the scenario that matches the component's artifact type. This ensures
+        IC shows real policy violations, not false positives from the wrong policy.
+        """
+        from conforma.policy_tools import is_wrong_policy_for_artifact
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -206,11 +267,7 @@ class ConformaRepository:
                   AND application = %s
                   AND is_resolved = FALSE
                 ORDER BY last_updated_at DESC
-                LIMIT 1
             """, (component, application))
-            row = cursor.fetchone()
-            if not row:
-                return None
             cols = [
                 'component_name', 'scenario',
                 'violations_count', 'warnings_count', 'successes_count',
@@ -220,8 +277,19 @@ class ConformaRepository:
                 'first_detected_at', 'last_updated_at',
                 'ai_analyzed', 'jira_key', 'blob_refs',
             ]
-            result = dict(zip(cols, row))
-            return resolve_blob_fields(result, fields=('violation_details',))
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+            # Prefer correct-policy row; fall back to most recent if all are wrong-policy
+            preferred = None
+            for row in rows:
+                result = dict(zip(cols, row))
+                if not is_wrong_policy_for_artifact(result['component_name'], result['scenario']):
+                    preferred = result
+                    break
+            if preferred is None:
+                preferred = dict(zip(cols, rows[0]))
+            return resolve_blob_fields(preferred, fields=('violation_details',))
 
     def get_evaluated_images(self, application):
         """Return {component_name: container_image} for future-policy evaluations."""

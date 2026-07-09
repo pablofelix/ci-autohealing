@@ -108,6 +108,55 @@ def categorize_policy(scenario):
     return _POLICY_CATEGORY_MAP.get(policy, 'Other')
 
 
+# Expected policy by artifact type (component name pattern → correct policy prefix).
+#
+# WORKAROUND for Konflux ITS scoping limitation — see ADR 007.
+# Remove this list and is_wrong_policy_for_artifact() when any of the following:
+#   (1) Konflux adds ITS exclusion support (can scope generic "component" context)
+#   (2) FBC/charts move to separate Konflux Applications (NudgeConfig cross-app, STONEINTG-1659)
+#   (3) The `ITS scoping (Konflux)` check in ic release readiness shows PASS + "consider removing"
+_ARTIFACT_CORRECT_POLICY = [
+    (_FBC_NAME_RE, 'fbc-rhoai-'),
+    (_CHART_NAME_RE, 'registry-rhoai-chart-'),
+]
+
+
+def is_wrong_policy_for_artifact(component_name, scenario):
+    """Return True when a component is evaluated against the wrong EC policy.
+
+    FBC fragments (rhoai-fbc-fragment-*) should only run against fbc-rhoai-*
+    policies. Chart components (rhai-on-*-chart-*) should only run against
+    registry-rhoai-chart-* policies. When either is evaluated against the
+    generic registry-rhoai-prod policy it produces false positives due to a
+    Konflux ITS scoping limitation: the generic ``component`` context in the
+    single-component ITS fires for ALL components, including FBC and charts
+    that already have their own component-specific ITS with the correct policy.
+
+    These violations do NOT block releases (the ITS is marked optional) but
+    appear as alerts in IC, creating triage noise.
+
+    >>> is_wrong_policy_for_artifact('rhoai-fbc-fragment-v3-5', 'conforma-registry-rhoai-prod-v3-5-single-component')
+    True
+    >>> is_wrong_policy_for_artifact('rhai-on-openshift-chart-v3-5', 'conforma-registry-rhoai-prod-v3-5-single-component')
+    True
+    >>> is_wrong_policy_for_artifact('rhoai-fbc-fragment-v3-5', 'conforma-fbc-rhoai-prod-v3-5-single-component')
+    False
+    >>> is_wrong_policy_for_artifact('odh-dashboard-v3-5', 'conforma-registry-rhoai-prod-v3-5-single-component')
+    False
+    >>> is_wrong_policy_for_artifact('', '')
+    False
+    """
+    if not component_name or not scenario:
+        return False
+    policy = extract_policy_from_scenario(scenario)
+    if not policy:
+        return False
+    for pattern, expected_prefix in _ARTIFACT_CORRECT_POLICY:
+        if pattern.match(component_name) and not policy.startswith(expected_prefix):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Step 2: Exception cross-referencing
 # ---------------------------------------------------------------------------
