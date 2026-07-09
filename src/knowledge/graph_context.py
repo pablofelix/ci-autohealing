@@ -143,7 +143,7 @@ def conforma_context(violation):
     Tries the DB rule catalog first (175+ rules); falls back to Neo4j
     PolicyRule nodes if the catalog is unavailable or empty.
     """
-    from utils.conforma_utils import extract_violation_rules
+    from conforma.policy_tools import extract_violation_rules
     summary = violation.get('violation_summary', '') or ''
     rules = extract_violation_rules(summary)
     if not rules:
