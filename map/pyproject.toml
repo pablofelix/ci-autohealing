@@ -1,0 +1,21 @@
+[project]
+name = "rhoai-system-map"
+version = "0.1.0"
+description = "Interactive visual map of RHOAI CI/CD infrastructure"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "neo4j>=5.14.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+map-server = "backend.main:run"
+map-seed = "seed:main"
