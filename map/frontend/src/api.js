@@ -35,6 +35,20 @@ export const api = {
       return res.json();
     });
   },
+  executeAction: (action) => {
+    const validTypes = ['rebuild', 'triage'];
+    if (!validTypes.includes(action.type)) {
+      return Promise.reject(new Error(`Unknown action type: ${action.type}`));
+    }
+    return fetch(`${BASE}/actions/${action.type}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(action.params),
+    }).then((res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    });
+  },
   changes: ({ since, entityId, changeType, limit } = {}) => {
     const params = new URLSearchParams();
     if (since) params.set('since', since);

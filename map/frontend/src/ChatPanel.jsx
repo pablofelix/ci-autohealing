@@ -1,11 +1,121 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { api } from './api';
 
-export default function ChatPanel({ selectedNodeId, onHighlight }) {
+const ACTION_COLORS = {
+  rebuild: { bg: '#f97316', confirm: '#ea580c' },
+  triage: { bg: '#8b5cf6', confirm: '#7c3aed' },
+  improvement: { bg: '#0891b2', confirm: '#0e7490' },
+};
+
+function ActionButton({ action, msgIndex, actionStates, setActionStates, onAction }) {
+  const stateKey = `${msgIndex}-${action.type}-${action.params?.component || ''}`;
+  const state = actionStates[stateKey] || 'idle';
+  const colors = ACTION_COLORS[action.type] || ACTION_COLORS.improvement;
+
+  if (action.confirmation === null) {
+    return (
+      <span
+        style={{
+          display: 'inline-block',
+          marginTop: 4,
+          marginRight: 4,
+          background: '#f3f4f6',
+          border: '1px solid #d1d5db',
+          borderRadius: 10,
+          padding: '2px 8px',
+          fontSize: 10,
+          color: '#4b5563',
+        }}
+        title={action.description}
+      >
+        {action.description?.slice(0, 80) || action.label}
+      </span>
+    );
+  }
+
+  const labels = {
+    idle: action.label,
+    confirming: action.confirmation || `Confirm ${action.label}?`,
+    executing: 'Working...',
+    done: 'Done',
+    error: 'Failed — retry?',
+  };
+
+  async function handleClick() {
+    if (state === 'executing' || state === 'done') return;
+
+    if (state === 'confirming') {
+      setActionStates((prev) => ({ ...prev, [stateKey]: 'executing' }));
+      try {
+        await onAction(action);
+        setActionStates((prev) => ({ ...prev, [stateKey]: 'done' }));
+      } catch {
+        setActionStates((prev) => ({ ...prev, [stateKey]: 'error' }));
+      }
+    } else if (state === 'error') {
+      setActionStates((prev) => ({ ...prev, [stateKey]: 'confirming' }));
+    } else {
+      setActionStates((prev) => ({ ...prev, [stateKey]: 'confirming' }));
+    }
+  }
+
+  function handleCancel(e) {
+    e.stopPropagation();
+    setActionStates((prev) => ({ ...prev, [stateKey]: 'idle' }));
+  }
+
+  const isConfirming = state === 'confirming';
+  const isDone = state === 'done';
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+      <button
+        onClick={handleClick}
+        disabled={state === 'executing' || isDone}
+        title={action.description}
+        style={{
+          display: 'inline-block',
+          marginTop: 4,
+          background: isDone ? '#16a34a' : isConfirming ? colors.confirm : colors.bg,
+          color: '#fff',
+          border: 'none',
+          borderRadius: 10,
+          padding: '2px 8px',
+          fontSize: 10,
+          cursor: state === 'executing' || isDone ? 'default' : 'pointer',
+          opacity: state === 'executing' ? 0.7 : 1,
+        }}
+      >
+        {labels[state]}
+      </button>
+      {isConfirming && (
+        <button
+          onClick={handleCancel}
+          style={{
+            display: 'inline-block',
+            marginTop: 4,
+            background: 'none',
+            border: '1px solid #d1d5db',
+            borderRadius: 10,
+            padding: '2px 6px',
+            fontSize: 10,
+            color: '#9ca3af',
+            cursor: 'pointer',
+          }}
+        >
+          Cancel
+        </button>
+      )}
+    </span>
+  );
+}
+
+export default function ChatPanel({ selectedNodeId, onHighlight, onAction }) {
   const [collapsed, setCollapsed] = useState(true);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [actionStates, setActionStates] = useState({});
   const listRef = useRef(null);
 
   useEffect(() => {
@@ -33,6 +143,7 @@ export default function ChatPanel({ selectedNodeId, onHighlight }) {
           content: result.response,
           model: result.model,
           highlight: result.highlight || null,
+          actions: result.actions || null,
         },
       ]);
       if (result.highlight && onHighlight) {
@@ -231,6 +342,20 @@ export default function ChatPanel({ selectedNodeId, onHighlight }) {
               >
                 Show on map
               </button>
+            )}
+            {msg.actions && msg.actions.length > 0 && (
+              <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                {msg.actions.map((action, actionIdx) => (
+                  <ActionButton
+                    key={actionIdx}
+                    action={action}
+                    msgIndex={i}
+                    actionStates={actionStates}
+                    setActionStates={setActionStates}
+                    onAction={onAction}
+                  />
+                ))}
+              </div>
             )}
           </div>
         ))}

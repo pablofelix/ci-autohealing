@@ -9,7 +9,10 @@ export function layoutGraph(nodes, edges) {
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100, edgesep: 30 });
 
   nodes.forEach((node) => {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
+    const isRelease = node.data?.category === 'release-lifecycle';
+    const w = isRelease ? NODE_WIDTH + 20 : NODE_WIDTH;
+    const h = isRelease ? NODE_HEIGHT + 10 : NODE_HEIGHT;
+    g.setNode(node.id, { width: w, height: h });
   });
 
   edges.forEach((edge) => {
