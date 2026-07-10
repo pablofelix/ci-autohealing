@@ -5,27 +5,32 @@ Standalone — no IC imports. All graph operations go through this module.
 
 import logging
 import os
+import threading
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 _driver = None
+_driver_lock = threading.Lock()
 
 
 def get_driver():
     global _driver
     if _driver is not None:
         return _driver
-    from neo4j import GraphDatabase
-    uri = os.environ.get("SLK_NEO4J_URI", "bolt://localhost:7687")
-    user = os.environ.get("SLK_NEO4J_USER", "neo4j")
-    password = os.environ.get("SLK_NEO4J_PASSWORD", "")
-    if not password:
-        raise RuntimeError("SLK_NEO4J_PASSWORD not set")
-    _driver = GraphDatabase.driver(uri, auth=(user, password))
-    _driver.verify_connectivity()
-    logger.info("Connected to Neo4j at %s", uri)
-    return _driver
+    with _driver_lock:
+        if _driver is not None:
+            return _driver
+        from neo4j import GraphDatabase
+        uri = os.environ.get("SLK_NEO4J_URI", "bolt://localhost:7687")
+        user = os.environ.get("SLK_NEO4J_USER", "neo4j")
+        password = os.environ.get("SLK_NEO4J_PASSWORD", "")
+        if not password:
+            raise RuntimeError("SLK_NEO4J_PASSWORD not set")
+        _driver = GraphDatabase.driver(uri, auth=(user, password))
+        _driver.verify_connectivity()
+        logger.info("Connected to Neo4j at %s", uri)
+        return _driver
 
 
 def close():
@@ -164,9 +169,10 @@ def get_gaps():
     """
     gaps = []
     with session() as s:
-        # Components without build pipeline
+        # Components without build pipeline (only flag static-topology nodes)
         result = s.run(
             "MATCH (c:Component) WHERE NOT (c)-[:BUILDS_WITH]->(:Pipeline) "
+            "AND c._source = 'seed' "
             "RETURN c.id AS id, c.name AS name"
         )
         for r in result:
@@ -239,6 +245,22 @@ def get_gaps():
     return gaps
 
 
+INTERNAL_PROPS = {"_source", "_seeded_at"}
+
+
+def build_gap_map(gaps: list[dict]) -> dict[str, list]:
+    """Group gaps by node_id for efficient lookup."""
+    gap_map: dict[str, list] = {}
+    for g in gaps:
+        gap_map.setdefault(g["node_id"], []).append(g)
+    return gap_map
+
+
+def filter_props(props: dict) -> dict:
+    """Remove internal metadata properties from a node's properties."""
+    return {k: v for k, v in props.items() if k not in INTERNAL_PROPS}
+
+
 def get_impact(node_id: str, max_depth: int = 5, direction: str = "downstream"):
     """Trace impact from a node through the graph.
 
@@ -249,6 +271,8 @@ def get_impact(node_id: str, max_depth: int = 5, direction: str = "downstream"):
     """
     max_depth = max(1, min(max_depth, 10))
 
+    max_results = 500
+
     if direction == "upstream":
         cypher = (
             "MATCH (start {id: $id}) "
@@ -257,7 +281,8 @@ def get_impact(node_id: str, max_depth: int = 5, direction: str = "downstream"):
             "RETURN DISTINCT affected.id AS id, labels(affected)[0] AS type, "
             "affected.name AS name, depth, "
             "[r IN path_rels | type(r)] AS via_relationships "
-            "ORDER BY depth, type, name"
+            "ORDER BY depth, type, name "
+            "LIMIT " + str(max_results)
         )
     else:
         cypher = (
@@ -267,7 +292,8 @@ def get_impact(node_id: str, max_depth: int = 5, direction: str = "downstream"):
             "RETURN DISTINCT affected.id AS id, labels(affected)[0] AS type, "
             "affected.name AS name, depth, "
             "[r IN path_rels | type(r)] AS via_relationships "
-            "ORDER BY depth, type, name"
+            "ORDER BY depth, type, name "
+            "LIMIT " + str(max_results)
         )
 
     with session() as s:

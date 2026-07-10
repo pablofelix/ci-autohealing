@@ -4,7 +4,17 @@ const SEVERITY_STYLES = {
   error: { color: '#dc2626', bg: '#fef2f2' },
   warning: { color: '#d97706', bg: '#fffbeb' },
   info: { color: '#2563eb', bg: '#eff6ff' },
+  pr_open: { color: '#2563eb', bg: '#eff6ff' },
+  pr_merged: { color: '#059669', bg: '#ecfdf5' },
+  pr_stale: { color: '#d97706', bg: '#fffbeb' },
 };
+
+const FILTER_TABS = [
+  { key: 'all', label: 'All' },
+  { key: 'error', label: 'Errors' },
+  { key: 'warning', label: 'Warnings' },
+  { key: 'info', label: 'Info' },
+];
 
 function formatTime(timestamp) {
   if (!timestamp) return '';
@@ -15,9 +25,16 @@ function formatTime(timestamp) {
   }
 }
 
-export default function ActivityFeed({ activity, icAvailable }) {
+export default function ActivityFeed({ activity, icAvailable, onNavigate }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [filter, setFilter] = useState('all');
   const listRef = useRef(null);
+
+  const filtered = filter === 'all'
+    ? activity
+    : activity.filter((e) => e.severity === filter);
+
+  const errorCount = activity.filter((e) => e.severity === 'error').length;
 
   useEffect(() => {
     if (!collapsed && listRef.current) {
@@ -53,6 +70,20 @@ export default function ActivityFeed({ activity, icAvailable }) {
           background: icAvailable ? '#10b981' : '#ef4444',
         }} />
         Activity ({activity.length})
+        {errorCount > 0 && (
+          <span style={{
+            background: '#dc2626',
+            color: '#fff',
+            borderRadius: 8,
+            padding: '0 5px',
+            fontSize: 10,
+            fontWeight: 700,
+            minWidth: 16,
+            textAlign: 'center',
+          }}>
+            {errorCount}
+          </span>
+        )}
       </button>
     );
   }
@@ -113,19 +144,60 @@ export default function ActivityFeed({ activity, icAvailable }) {
         </button>
       </div>
 
+      {/* Filter tabs */}
+      <div style={{
+        display: 'flex',
+        padding: '4px 8px',
+        gap: 4,
+        borderBottom: '1px solid #f3f4f6',
+      }}>
+        {FILTER_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setFilter(tab.key)}
+            style={{
+              flex: 1,
+              padding: '3px 0',
+              fontSize: 10,
+              fontWeight: filter === tab.key ? 700 : 500,
+              color: filter === tab.key ? '#1e293b' : '#9ca3af',
+              background: filter === tab.key ? '#f1f5f9' : 'transparent',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+          >
+            {tab.label}
+            {tab.key === 'error' && errorCount > 0 && (
+              <span style={{
+                marginLeft: 3,
+                background: '#dc2626',
+                color: '#fff',
+                borderRadius: 6,
+                padding: '0 4px',
+                fontSize: 9,
+              }}>
+                {errorCount}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Event list */}
       <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: 8 }}>
         {!icAvailable && activity.length === 0 ? (
           <div style={{ padding: 24, textAlign: 'center', color: '#9ca3af', fontSize: 12 }}>
             IC API unavailable
           </div>
-        ) : activity.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div style={{ padding: 24, textAlign: 'center', color: '#9ca3af', fontSize: 12 }}>
-            No recent activity
+            {filter === 'all' ? 'No recent activity' : `No ${filter} events`}
           </div>
         ) : (
-          activity.map((event, i) => {
+          filtered.map((event, i) => {
             const style = SEVERITY_STYLES[event.severity] || SEVERITY_STYLES.info;
+            const compNodeId = event.component ? `comp-${event.component}` : null;
             return (
               <div
                 key={`${event.component}-${event.timestamp}-${i}`}
@@ -139,9 +211,25 @@ export default function ActivityFeed({ activity, icAvailable }) {
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-                  <span style={{ fontWeight: 600, color: '#374151' }}>
-                    {event.component}
-                  </span>
+                  {compNodeId && onNavigate ? (
+                    <span
+                      onClick={() => onNavigate(compNodeId)}
+                      style={{
+                        fontWeight: 600,
+                        color: '#2563eb',
+                        cursor: 'pointer',
+                        textDecoration: 'underline',
+                        textDecorationColor: '#93c5fd',
+                      }}
+                      title={`Navigate to ${event.component}`}
+                    >
+                      {event.component}
+                    </span>
+                  ) : (
+                    <span style={{ fontWeight: 600, color: '#374151' }}>
+                      {event.component}
+                    </span>
+                  )}
                   <span style={{ color: '#9ca3af', fontSize: 10 }}>
                     {formatTime(event.timestamp)}
                   </span>

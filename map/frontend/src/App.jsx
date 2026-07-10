@@ -42,6 +42,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const rfInstanceRef = useRef(null);
   const { statusMap, onboardingMap, activity, icAvailable } = useLiveStatus('rhoai-v3-5');
 
   // Parse ?highlight= URL param for deep-linking from CLI
@@ -181,10 +182,10 @@ export default function App() {
       setEdges(
         allEdges.map((e) => ({
           ...e,
-          style:
-            visible.has(e.source) && visible.has(e.target)
-              ? { opacity: 1 }
-              : { opacity: 0.05 },
+          hidden: !(visible.has(e.source) && visible.has(e.target)),
+          style: visible.has(e.source) && visible.has(e.target)
+            ? { opacity: 1 }
+            : undefined,
         }))
       );
     },
@@ -277,6 +278,20 @@ export default function App() {
               : { opacity: 0.05 },
         }))
       );
+
+      if (rfInstanceRef.current && nodeSet.size > 0) {
+        const highlightedNodes = allNodes.filter((n) => nodeSet.has(n.id));
+        if (highlightedNodes.length > 0) {
+          setTimeout(() => {
+            if (!rfInstanceRef.current) return;
+            rfInstanceRef.current.fitView({
+              nodes: highlightedNodes.map((n) => ({ id: n.id })),
+              padding: 0.3,
+              duration: 400,
+            });
+          }, 50);
+        }
+      }
     },
     [allNodes, allEdges, setNodes, setEdges, clearHighlight]
   );
@@ -341,6 +356,7 @@ export default function App() {
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
           nodeTypes={nodeTypes}
+          onInit={(instance) => { rfInstanceRef.current = instance; }}
           fitView
           minZoom={0.1}
           maxZoom={2}
@@ -365,7 +381,7 @@ export default function App() {
         onClearHighlight={clearHighlight}
       />
 
-      <ActivityFeed activity={activity} icAvailable={icAvailable} />
+      <ActivityFeed activity={activity} icAvailable={icAvailable} onNavigate={handleNavigate} />
       <ChatPanel selectedNodeId={selectedNode} onHighlight={handleChatHighlight} onAction={handleChatAction} />
     </div>
   );
