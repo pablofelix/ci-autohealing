@@ -150,6 +150,37 @@ def find_map_path(from_id: str, to_id: str) -> Dict:
 
 @mcp.tool()
 @async_tool
+def get_map_impact(
+    node_id: str,
+    max_depth: int = 5,
+    direction: str = "downstream",
+) -> Dict:
+    """Trace downstream or upstream impact from any infrastructure node.
+
+    Shows what other nodes are affected if this node changes, breaks, or needs
+    updating. Critical for understanding blast radius of failures.
+
+    For RHOAI build chains: a Component failure cascades via NUDGES to its
+    operator-bundle and then to the FBC fragment. An ECPolicy change via
+    VALIDATES affects all gated Applications.
+
+    Args:
+        node_id: Starting node ID (use search_map_nodes to find IDs).
+        max_depth: How many hops to trace (1-10, default 5).
+        direction: 'downstream' = what does this affect? (default)
+                   'upstream' = what affects this?
+
+    Returns affected nodes grouped by depth and type, with the relationship
+    chain that connects them to the source.
+    """
+    result = _graph().get_impact(node_id, max_depth=max_depth, direction=direction)
+    if result is None:
+        return {"error": f"Node '{node_id}' not found"}
+    return result
+
+
+@mcp.tool()
+@async_tool
 def get_map_gaps() -> Dict:
     """Detect infrastructure gaps and misconfigurations in the graph.
 
@@ -183,6 +214,88 @@ def get_map_stats() -> Dict:
     etc.). Useful for understanding the graph's scope and coverage.
     """
     return _graph().get_stats()
+
+
+@mcp.tool()
+@async_tool
+def seed_map_from_cluster(application: str = "rhoai-v3-5") -> Dict:
+    """Auto-seed the System Map from the live Konflux cluster.
+
+    Fetches applications, components, and relationships from the IC API
+    and creates corresponding nodes in the Neo4j graph. Also infers
+    NUDGES relationships from component naming conventions.
+
+    Args:
+        application: RHOAI version to seed (default: rhoai-v3-5).
+
+    Returns seeding summary with counts of created nodes and relationships.
+    """
+    from map.cluster_seeder import ClusterSeeder
+    try:
+        driver = _graph().get_driver()
+        seeder = ClusterSeeder(driver)
+        return seeder.seed_all(application)
+    except Exception as e:
+        return {"error": str(e), "seeded": False}
+
+
+@mcp.tool()
+@async_tool
+def get_map_drift() -> Dict:
+    """Detect drift between the System Map and the live cluster.
+
+    Compares Component nodes in Neo4j against components reported by the
+    IC API. Returns nodes that are stale (in graph but not cluster) and
+    missing (in cluster but not graph).
+    """
+    from map.cluster_seeder import ClusterSeeder
+    try:
+        driver = _graph().get_driver()
+        seeder = ClusterSeeder(driver)
+        return seeder.detect_drift()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+@async_tool
+def get_map_changes(
+    since: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    change_type: Optional[str] = None,
+    limit: int = 100,
+) -> Dict:
+    """Get the change history of the System Map graph.
+
+    Shows what nodes and relationships were added, removed, or modified
+    over time. Useful for tracking infrastructure evolution and detecting
+    unexpected topology changes.
+
+    Args:
+        since: ISO datetime to filter changes from (e.g., '2026-07-01T00:00:00').
+        entity_id: Filter to changes involving this node ID (partial match).
+        change_type: Filter by type: 'added', 'removed', or 'modified'.
+        limit: Maximum number of changes to return (default 100).
+
+    Returns recent changes with timestamps and details.
+    """
+    from map.change_tracker import ChangeTracker
+    try:
+        driver = _graph().get_driver()
+        tracker = ChangeTracker(driver)
+
+        since_dt = None
+        if since:
+            from datetime import datetime
+            since_dt = datetime.fromisoformat(since)
+
+        changes = tracker.get_changes(
+            since=since_dt, entity_id=entity_id,
+            change_type=change_type, limit=limit,
+        )
+        return {"changes": changes, "count": len(changes)}
+    except Exception as e:
+        return {"error": str(e), "changes": []}
 
 
 @mcp.tool()
