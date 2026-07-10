@@ -87,7 +87,17 @@ _client = None
 def get_client():
     global _client
     if _client is None:
-        from cli.ic_config import get_api_key, get_api_url, load
+        from cli.ic_config import get_api_key, get_api_url, get_mode, load
+        mode = get_mode()
+        if mode == 'local':
+            import requests
+            try:
+                r = requests.get('http://localhost:8000/health', timeout=2)
+                if r.status_code == 200:
+                    _client = APIClient('http://localhost:8000')
+                    return _client
+            except Exception:
+                pass
         url = get_api_url()
         if not url:
             print("Error: no cluster API URL configured.", file=sys.stderr)

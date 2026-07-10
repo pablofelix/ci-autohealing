@@ -127,8 +127,15 @@ _RELEASE_PROGRESS_PHASES = frozenset({
 })
 
 
-def _release_phase_icon(phase, green_fn, yellow_fn, red_fn):
-    """Map Release CR phase to a colored status icon."""
+def _release_phase_icon(phase, green_fn, yellow_fn, red_fn, condition_status=None):
+    """Map Release CR phase + condition status to a colored status icon.
+
+    A Release CR can have phase='Validated' but condition status='False' when
+    validation ran but failed (e.g., ReleasePlan not found). The condition
+    status overrides the phase-based icon when it indicates failure.
+    """
+    if condition_status == 'False':
+        return red_fn('❌')
     if phase in _RELEASE_SUCCESS_PHASES:
         return green_fn('✅')
     if phase in _RELEASE_PROGRESS_PHASES:
@@ -302,20 +309,30 @@ def get_alerts(ctx, group, show_all, date, from_date, to_date, stage, prod, outp
         # Stage release
         if stage_release:
             phase = stage_release.get('phase', 'Unknown')
-            s_icon = _release_phase_icon(phase, green, yellow, red)
+            cond_status = stage_release.get('status')
+            s_icon = _release_phase_icon(phase, green, yellow, red, cond_status)
             created = stage_release.get('created', '')[:10]
+            label = phase
+            msg = stage_release.get('message', '')
+            if cond_status == 'False' and msg:
+                label = '{} — {}'.format(phase, msg[:60])
             print('  {} Stage   {:<35} {}  [{}]'.format(
-                s_icon, stage_release.get('name', '')[:35], created, phase))
+                s_icon, stage_release.get('name', '')[:35], created, label))
         else:
             print(dim('  ◌ Stage   No stage releases yet'))
 
         # Prod release
         if prod_release:
             phase = prod_release.get('phase', 'Unknown')
-            p_icon = _release_phase_icon(phase, green, yellow, red)
+            cond_status = prod_release.get('status')
+            p_icon = _release_phase_icon(phase, green, yellow, red, cond_status)
             created = prod_release.get('created', '')[:10]
+            label = phase
+            msg = prod_release.get('message', '')
+            if cond_status == 'False' and msg:
+                label = '{} — {}'.format(phase, msg[:60])
             print('  {} Prod    {:<35} {}  [{}]'.format(
-                p_icon, prod_release.get('name', '')[:35], created, phase))
+                p_icon, prod_release.get('name', '')[:35], created, label))
         else:
             print(dim('  ◌ Prod    No prod releases yet'))
         print()
@@ -5031,11 +5048,7 @@ def conforma_catalog(search, package, stats):
 def release(ctx):
     """Release commands."""
     if ctx.invoked_subcommand is None:
-        from cli.mode import ensure_cluster
-        if ensure_cluster():
-            ctx.invoke(release_status)
-        else:
-            _bash_fallback(['release'])
+        _bash_fallback(['release'])
 
 
 @release.command('status')

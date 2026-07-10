@@ -142,8 +142,8 @@ class TestFetchReleasePipeline:
         with patch('cli.config.NAMESPACE', 'rhoai-tenant'):
             kfx = MockKfx.return_value
             kfx.get_releases.return_value = [
-                _make_release_cr('stage-new', 'rhoai-v3-5-ea-2-stage'),
-                _make_release_cr('stage-old', 'rhoai-v3-5-ea-1-stage'),
+                _make_release_cr('stage-new', 'rhoai-v3-5-stage-new'),
+                _make_release_cr('stage-old', 'rhoai-v3-5-stage-old'),
             ]
             MockKfx.extract_release_status = lambda cr: {
                 'name': cr['metadata']['name'],
@@ -161,9 +161,9 @@ class TestFetchReleasePipeline:
         """Breaks from loop after finding both stage and prod."""
         with patch('cli.config.NAMESPACE', 'rhoai-tenant'):
             releases = [
-                _make_release_cr('s', 'rhoai-v3-5-ea-2-stage'),
-                _make_release_cr('p', 'rhoai-v3-5-ea-2-prod'),
-                _make_release_cr('extra', 'rhoai-v3-5-ea-2-prod-extra'),
+                _make_release_cr('s', 'rhoai-v3-5-stage'),
+                _make_release_cr('p', 'rhoai-v3-5-fbc-prod'),
+                _make_release_cr('extra', 'rhoai-v3-5-prod-extra'),
             ]
             kfx = MockKfx.return_value
             kfx.get_releases.return_value = releases

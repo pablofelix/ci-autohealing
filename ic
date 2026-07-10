@@ -8385,10 +8385,22 @@ cmd_get_releases() {
     fi
 
     local app_version="${APPLICATION_NAME#*-v}"
+    local is_ea=false
+    [[ "$app_version" == *-ea-* ]] && is_ea=true
+
     local filtered
-    filtered=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
-        [.items[] | select(.spec.releasePlan | contains($ver))]
-    ' 2>/dev/null)
+    if [ "$is_ea" = true ]; then
+        filtered=$(echo "$releases_json" | jq -c --arg ver "$app_version" '
+            [.items[] | select(.spec.releasePlan | contains($ver))]
+        ' 2>/dev/null)
+    else
+        filtered=$(echo "$releases_json" | jq -c --arg ver "$app_version" --arg ea_prefix "${app_version}-ea" '
+            [.items[] | select(
+                (.spec.releasePlan | contains($ver)) and
+                (.spec.releasePlan | contains($ea_prefix) | not)
+            )]
+        ' 2>/dev/null)
+    fi
 
     local epochs
     epochs=$(echo "$filtered" | jq -r '.[].metadata.name' 2>/dev/null \

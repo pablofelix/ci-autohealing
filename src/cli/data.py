@@ -744,11 +744,14 @@ def _fetch_release_pipeline(application, nightly_status):
         kfx = KonfluxClient(namespace=namespace)
         # Extract version token for filtering (rhoai-v3-5 → v3-5)
         version = application.replace('rhoai-', '') if application else ''
+        is_ea = '-ea-' in version
         releases = kfx.get_releases(limit=30)
         for rel in releases:
             info = KonfluxClient.extract_release_status(rel)
             rp = info.get('release_plan', '')
             if version and version not in rp:
+                continue
+            if version and not is_ea and (version + '-ea') in rp:
                 continue
             target = 'prod' if 'prod' in rp else 'stage'
             if target == 'stage' and not result['stage']:
