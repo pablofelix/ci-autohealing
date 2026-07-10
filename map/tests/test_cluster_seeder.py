@@ -18,28 +18,29 @@ class TestClusterSeeder:
     def seeder(self, mock_driver):
         from map.cluster_seeder import ClusterSeeder
         driver, _ = mock_driver
-        return ClusterSeeder(driver, ic_url="http://test:8080/api/v1")
+        s = ClusterSeeder(driver, ic_url="http://test:8080/api/v1")
+        s._session = MagicMock()
+        return s
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_check_ic_health_ok(self, mock_get, seeder):
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.json.return_value = {"status": "ok"}
-        mock_get.return_value.raise_for_status = MagicMock()
+    def test_check_ic_health_ok(self, seeder):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"status": "ok"}
+        resp.raise_for_status = MagicMock()
+        seeder._session.get.return_value = resp
         assert seeder.check_ic_health() is True
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_check_ic_health_down(self, mock_get, seeder):
-        mock_get.side_effect = Exception("connection refused")
+    def test_check_ic_health_down(self, seeder):
+        seeder._session.get.side_effect = Exception("connection refused")
         assert seeder.check_ic_health() is False
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_applications(self, mock_get, seeder, mock_driver):
+    def test_seed_applications(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = {
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
             "applications": [{"name": "rhoai-v3-5"}, {"name": "rhoai-v3-5-ea-2"}]
         }
+        seeder._session.get.return_value = resp
         mock_session.execute_write = MagicMock()
 
         result = seeder.seed_applications()
@@ -47,24 +48,23 @@ class TestClusterSeeder:
         assert "app-rhoai-v3-5" in result
         assert "app-rhoai-v3-5-ea-2" in result
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_applications_empty(self, mock_get, seeder):
-        mock_get.side_effect = Exception("connection refused")
+    def test_seed_applications_empty(self, seeder):
+        seeder._session.get.side_effect = Exception("connection refused")
         result = seeder.seed_applications()
         assert result == []
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_components(self, mock_get, seeder, mock_driver):
+    def test_seed_components(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = [
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = [
             {
                 "name": "odh-dashboard",
                 "repo": "https://github.com/red-hat-data-services/odh-dashboard",
                 "branch": "rhoai-3.5",
             },
         ]
+        seeder._session.get.return_value = resp
         mock_session.execute_write = MagicMock()
 
         result = seeder.seed_components("rhoai-v3-5")
@@ -73,24 +73,23 @@ class TestClusterSeeder:
         # 1 merge_node + 1 merge_relationship = 2 execute_write calls
         assert mock_session.execute_write.call_count == 2
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_components_empty(self, mock_get, seeder, mock_driver):
+    def test_seed_components_empty(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        # Both API paths return None
-        mock_get.return_value.json.return_value = None
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = None
+        seeder._session.get.return_value = resp
 
         result = seeder.seed_components("rhoai-v3-5")
         assert result == []
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_components_string_list(self, mock_get, seeder, mock_driver):
+    def test_seed_components_string_list(self, seeder, mock_driver):
         """Test handling of component list as plain strings."""
         driver, mock_session = mock_driver
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = ["odh-dashboard", "kserve"]
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = ["odh-dashboard", "kserve"]
+        seeder._session.get.return_value = resp
         mock_session.execute_write = MagicMock()
 
         result = seeder.seed_components("rhoai-v3-5")
@@ -115,16 +114,14 @@ class TestClusterSeeder:
         count = seeder.seed_nudge_chains(comp_ids)
         assert count == 0
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_detect_drift_finds_stale(self, mock_get, seeder, mock_driver):
+    def test_detect_drift_finds_stale(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        # IC returns 2 components
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = [
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = [
             {"name": "comp-a"}, {"name": "comp-b"}
         ]
-        # Graph has 3 components (comp-comp-c is stale)
+        seeder._session.get.return_value = resp
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([
             {"id": "comp-comp-a"}, {"id": "comp-comp-b"}, {"id": "comp-comp-c"}
@@ -135,16 +132,14 @@ class TestClusterSeeder:
         assert result["drift_detected"] is True
         assert "comp-comp-c" in result["stale"]
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_detect_drift_finds_missing(self, mock_get, seeder, mock_driver):
+    def test_detect_drift_finds_missing(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        # IC returns 2 components
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = [
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = [
             {"name": "comp-a"}, {"name": "comp-b"}
         ]
-        # Graph has only 1 component (comp-comp-b is missing from graph)
+        seeder._session.get.return_value = resp
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([
             {"id": "comp-comp-a"}
@@ -155,12 +150,12 @@ class TestClusterSeeder:
         assert result["drift_detected"] is True
         assert "comp-comp-b" in result["missing"]
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_detect_drift_no_drift(self, mock_get, seeder, mock_driver):
+    def test_detect_drift_no_drift(self, seeder, mock_driver):
         driver, mock_session = mock_driver
-        mock_get.return_value.status_code = 200
-        mock_get.return_value.raise_for_status = MagicMock()
-        mock_get.return_value.json.return_value = [{"name": "comp-a"}]
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = [{"name": "comp-a"}]
+        seeder._session.get.return_value = resp
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([{"id": "comp-comp-a"}]))
         mock_session.run.return_value = mock_result
@@ -169,21 +164,18 @@ class TestClusterSeeder:
         assert result["drift_detected"] is False
         assert result["in_sync"] == 1
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_detect_drift_api_down(self, mock_get, seeder):
-        mock_get.side_effect = Exception("connection refused")
+    def test_detect_drift_api_down(self, seeder):
+        seeder._session.get.side_effect = Exception("connection refused")
         result = seeder.detect_drift()
         assert "error" in result
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_all_ic_down(self, mock_get, seeder):
-        mock_get.side_effect = Exception("connection refused")
+    def test_seed_all_ic_down(self, seeder):
+        seeder._session.get.side_effect = Exception("connection refused")
         result = seeder.seed_all()
         assert result["seeded"] is False
         assert "error" in result
 
-    @patch("map.cluster_seeder.requests.get")
-    def test_seed_all_success(self, mock_get, seeder, mock_driver):
+    def test_seed_all_success(self, seeder, mock_driver):
         driver, mock_session = mock_driver
         mock_session.execute_write = MagicMock()
 
@@ -191,18 +183,17 @@ class TestClusterSeeder:
             resp = MagicMock()
             resp.status_code = 200
             resp.raise_for_status = MagicMock()
-            # Check most specific paths first to avoid substring false matches
-            if "/applications/rhoai-v3-5/components" in url:
-                resp.json.return_value = [{"name": "odh-dashboard"}]
+            if "/applications/rhoai-v3-5/health" in url:
+                resp.json.return_value = [{"component_name": "odh-dashboard"}]
             elif "/health" in url:
-                resp.json.return_value = {"status": "ok"}
+                resp.json.return_value = {"status": "healthy"}
             elif "/applications" in url:
                 resp.json.return_value = {"applications": [{"name": "rhoai-v3-5"}]}
             else:
                 resp.json.return_value = None
             return resp
 
-        mock_get.side_effect = side_effect
+        seeder._session.get.side_effect = side_effect
         result = seeder.seed_all("rhoai-v3-5")
         assert result["seeded"] is True
         assert result["applications"] >= 1

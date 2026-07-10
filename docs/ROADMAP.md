@@ -701,7 +701,9 @@ Goal: interactive visual map of RHOAI CI/CD infrastructure backed by Neo4j. See 
 - [x] `useLiveStatus` hook with 60s polling interval + unmount cleanup
 - [x] Graceful degradation: IC unavailable → nodes keep static colors, feed shows "offline"
 - [x] Live/Offline indicator in toolbar
-- [x] 20 tests (ICClient, LiveStatusService, route)
+- [x] Enriched detail strings: per-status context (consecutive failures, health score, success rate, last build date)
+- [x] `_build_health_detail()` in `live_status_service.py`: failing → "5 consecutive failures | last fail: 2026-07-09", degraded → "health 60/100 | 7d success: 85%", healthy → "last build: 2026-07-10"
+- [x] 24 tests (ICClient, LiveStatusService, enriched detail, route)
 
 **Phase 3 — MCP Server (done):**
 - [x] `map/mcp_server/`: FastMCP server with 11 tools (same pattern as IC MCP server)
@@ -729,7 +731,9 @@ Goal: interactive visual map of RHOAI CI/CD infrastructure backed by Neo4j. See 
 - [x] Drift detection: compare graph nodes vs cluster components (stale + missing)
 - [x] MCP tools: `seed_map_from_cluster(application)`, `get_map_drift()`
 - [x] API endpoints: `POST /api/map/seed/cluster`, `GET /api/map/drift`
-- [x] 12 unit tests (health, seed apps/components, string lists, nudge chains, drift, seed_all)
+- [x] Auto-seed on startup: `_auto_seed_from_ic()` in FastAPI lifespan — Neo4j populated with 230+ components on boot (no manual seed needed)
+- [x] Drift endpoint accepts `?application=` parameter for multi-app drift detection
+- [x] 15 unit tests (health, seed apps/components, string lists, nudge chains, drift, seed_all, auto-seed)
 
 **Phase 6 — Change Detection Feed (done):**
 - [x] `ChangeTracker`: records node/edge additions, removals, and property modifications
@@ -917,7 +921,7 @@ Goal: shift from reactive failure detection to proactive infrastructure auditing
 
 ---
 
-## Current Release Status (updated 2026-07-10)
+## Current Release Status (updated 2026-07-10, audit gaps resolved)
 
 **RHAI 3.5 schedule (from Product Pages):**
 
@@ -947,6 +951,9 @@ Goal: shift from reactive failure detection to proactive infrastructure auditing
 - Konflux config validator blocking scheduled nightlies (Alex+Mhamad fix, deadline Jul 17)
 - ~~`ic get conforma` ignores positional app arg~~ (fixed: argument wired as `application`)
 - ~~Release-readiness false blockers~~ (fixed: exception-aware `compute_blocks()` in readiness endpoint)
+- ~~System Map nodes show no detail beyond status color~~ (fixed: enriched detail strings per status type)
+- ~~System Map requires manual seed after every restart~~ (fixed: auto-seed from IC API on startup)
+- ~~Drift endpoint only checks default application~~ (fixed: `?application=` query parameter)
 
 **People:**
 - Ujjwal: new build IC, mentored by Moulali

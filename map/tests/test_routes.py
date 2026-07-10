@@ -35,7 +35,8 @@ SAMPLE_STATS = {
 
 @pytest.fixture
 def client():
-    with patch("map.backend.graph.get_driver"):
+    with patch("map.backend.graph.get_driver"), \
+         patch("map.backend.main._auto_seed_from_ic"):
         from map.backend.main import app
         yield TestClient(app)
 
@@ -316,6 +317,38 @@ class TestImpactEndpoint:
         resp = client.get("/api/map/impact/leaf-node")
         assert resp.status_code == 200
         assert resp.json()["total_affected"] == 0
+
+
+class TestAutoSeed:
+    @patch("map.backend.main.graph.get_driver")
+    def test_auto_seed_calls_seeder_when_ic_healthy(self, mock_driver):
+        with patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.check_ic_health.return_value = True
+            mock_instance.seed_all.return_value = {
+                "seeded": True, "applications": 2, "components": 50,
+                "nudge_relationships": 10, "timestamp": "2026-07-10T00:00:00Z",
+            }
+            from map.backend.main import _auto_seed_from_ic
+            _auto_seed_from_ic()
+            mock_instance.check_ic_health.assert_called_once()
+            mock_instance.seed_all.assert_called_once()
+
+    @patch("map.backend.main.graph.get_driver")
+    def test_auto_seed_skips_when_ic_down(self, mock_driver):
+        with patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.check_ic_health.return_value = False
+            from map.backend.main import _auto_seed_from_ic
+            _auto_seed_from_ic()
+            mock_instance.seed_all.assert_not_called()
+
+    @patch("map.backend.main.graph.get_driver")
+    def test_auto_seed_handles_exception_gracefully(self, mock_driver):
+        with patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            MockSeeder.side_effect = Exception("Neo4j unreachable")
+            from map.backend.main import _auto_seed_from_ic
+            _auto_seed_from_ic()  # should not raise
 
 
 class TestChangesEndpoint:

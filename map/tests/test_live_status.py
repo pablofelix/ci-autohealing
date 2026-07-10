@@ -110,13 +110,74 @@ SAMPLE_READINESS = {
 }
 
 
+SAMPLE_ONBOARDING = {
+    "application": "rhoai-v3-5",
+    "total": 3,
+    "complete": 1,
+    "partial": 1,
+    "incomplete": 1,
+    "components": [
+        {
+            "component": "odh-dashboard-v3-5",
+            "overall": "complete",
+            "score": 100,
+            "checks": {
+                "repository": {"status": "PASS", "detail": "https://github.com/opendatahub-io/odh-dashboard"},
+                "branch": {"status": "PASS", "detail": "rhoai-3.5"},
+                "container_image": {"status": "PASS", "detail": "quay.io/rhoai/odh-dashboard"},
+                "pac": {"status": "PASS", "detail": "PaC Repository CR found"},
+                "builds": {"status": "PASS", "detail": "Latest build succeeded"},
+                "last_built": {"status": "PASS", "detail": "Last built commit: abc123"},
+                "nudges": {"status": "PASS", "detail": "3 nudge(s) configured"},
+            },
+            "failing": [],
+            "warnings": [],
+        },
+        {
+            "component": "odh-vllm-cpu-v3-5",
+            "overall": "partial",
+            "score": 75,
+            "checks": {
+                "repository": {"status": "PASS", "detail": "https://github.com/vllm-project/vllm"},
+                "branch": {"status": "PASS", "detail": "rhoai-3.5"},
+                "container_image": {"status": "PASS", "detail": "quay.io/rhoai/vllm"},
+                "pac": {"status": "WARN", "detail": "No PaC Repository CR found", "fix": "Create a PaC Repository CR"},
+                "builds": {"status": "PASS", "detail": "Latest build succeeded"},
+                "last_built": {"status": "PASS", "detail": "Last built commit: def456"},
+                "nudges": {"status": "INFO", "detail": "No nudges configured"},
+            },
+            "failing": [],
+            "warnings": ["pac"],
+            "jira_key": "RHOAI-12345",
+        },
+        {
+            "component": "odh-notebook-v3-5",
+            "overall": "incomplete",
+            "score": 35,
+            "checks": {
+                "repository": {"status": "PASS", "detail": "https://github.com/opendatahub-io/notebooks"},
+                "branch": {"status": "FAIL", "detail": "No branch configured", "fix": "Set spec.source.git.revision"},
+                "container_image": {"status": "FAIL", "detail": "No container image configured", "fix": "Set spec.containerImage"},
+                "pac": {"status": "SKIP", "detail": "No repository URL to match"},
+                "builds": {"status": "FAIL", "detail": "No builds found", "fix": "Trigger an initial build"},
+                "last_built": {"status": "WARN", "detail": "No successful build recorded"},
+                "nudges": {"status": "INFO", "detail": "No nudges configured"},
+            },
+            "failing": ["branch", "container_image", "builds"],
+            "warnings": ["last_built"],
+        },
+    ],
+}
+
+
 class TestLiveStatusService:
-    def _make_service(self, alerts=None, health=None, readiness=None):
+    def _make_service(self, alerts=None, health=None, readiness=None, onboarding=None):
         from map.backend.live_status_service import LiveStatusService
         client = MagicMock()
         client.get_alerts.return_value = alerts
         client.get_health.return_value = health
         client.get_readiness.return_value = readiness
+        client.get_onboarding.return_value = onboarding
         return LiveStatusService(client=client, cache_ttl=0)
 
     def test_healthy_component_gets_green(self):
@@ -197,12 +258,102 @@ class TestLiveStatusService:
         timestamps = [e["timestamp"] for e in result["activity"]]
         assert timestamps == sorted(timestamps, reverse=True)
 
+    def test_onboarding_included_in_response(self):
+        service = self._make_service(onboarding=SAMPLE_ONBOARDING)
+        result = service.get_live_status("rhoai-v3-5")
+        assert "onboarding" in result
+        assert len(result["onboarding"]) == 3
+
+    def test_onboarding_complete_gets_green(self):
+        service = self._make_service(onboarding=SAMPLE_ONBOARDING)
+        result = service.get_live_status("rhoai-v3-5")
+        ob_map = {o["node_id"]: o for o in result["onboarding"]}
+        dashboard = ob_map["comp-odh-dashboard-v3-5"]
+        assert dashboard["score"] == 100
+        assert dashboard["overall"] == "complete"
+        assert dashboard["badge_color"] == "#10b981"
+
+    def test_onboarding_partial_gets_yellow(self):
+        service = self._make_service(onboarding=SAMPLE_ONBOARDING)
+        result = service.get_live_status("rhoai-v3-5")
+        ob_map = {o["node_id"]: o for o in result["onboarding"]}
+        vllm = ob_map["comp-odh-vllm-cpu-v3-5"]
+        assert vllm["score"] == 75
+        assert vllm["overall"] == "partial"
+        assert vllm["badge_color"] == "#f59e0b"
+        assert vllm["jira_key"] == "RHOAI-12345"
+
+    def test_onboarding_incomplete_gets_red(self):
+        service = self._make_service(onboarding=SAMPLE_ONBOARDING)
+        result = service.get_live_status("rhoai-v3-5")
+        ob_map = {o["node_id"]: o for o in result["onboarding"]}
+        notebook = ob_map["comp-odh-notebook-v3-5"]
+        assert notebook["score"] == 35
+        assert notebook["overall"] == "incomplete"
+        assert notebook["badge_color"] == "#ef4444"
+        assert "branch" in notebook["failing"]
+        assert "container_image" in notebook["failing"]
+
+    def test_onboarding_checks_preserved(self):
+        service = self._make_service(onboarding=SAMPLE_ONBOARDING)
+        result = service.get_live_status("rhoai-v3-5")
+        ob_map = {o["node_id"]: o for o in result["onboarding"]}
+        checks = ob_map["comp-odh-notebook-v3-5"]["checks"]
+        assert checks["branch"]["status"] == "FAIL"
+        assert "fix" in checks["branch"]
+
+    def test_onboarding_none_returns_empty_list(self):
+        service = self._make_service(onboarding=None)
+        result = service.get_live_status("rhoai-v3-5")
+        assert result["onboarding"] == []
+
+    def test_onboarding_empty_components_returns_empty(self):
+        service = self._make_service(onboarding={"components": []})
+        result = service.get_live_status("rhoai-v3-5")
+        assert result["onboarding"] == []
+
+    def test_healthy_detail_shows_last_build_date(self):
+        health = [{"component_name": "comp-a", "health_score": 95,
+                   "last_successful_build": "2026-07-10T08:30:00Z"}]
+        service = self._make_service(health=health)
+        result = service.get_live_status("rhoai-v3-5")
+        nodes = {n["node_id"]: n for n in result["nodes"]}
+        assert "2026-07-10" in nodes["comp-comp-a"]["detail"]
+
+    def test_healthy_detail_fallback_without_timestamp(self):
+        health = [{"component_name": "comp-b", "health_score": 90}]
+        service = self._make_service(health=health)
+        result = service.get_live_status("rhoai-v3-5")
+        nodes = {n["node_id"]: n for n in result["nodes"]}
+        assert "success" in nodes["comp-comp-b"]["detail"]
+
+    def test_failing_detail_shows_consecutive_failures(self):
+        health = [{"component_name": "comp-c", "health_score": 20,
+                   "consecutive_failures": 5, "last_failed_build": "2026-07-09T14:00:00Z"}]
+        service = self._make_service(health=health)
+        result = service.get_live_status("rhoai-v3-5")
+        nodes = {n["node_id"]: n for n in result["nodes"]}
+        detail = nodes["comp-comp-c"]["detail"]
+        assert "5 consecutive" in detail
+        assert "2026-07-09" in detail
+
+    def test_degraded_detail_shows_score_and_rate(self):
+        health = [{"component_name": "comp-d", "health_score": 60,
+                   "success_rate_last_7d": "85.71"}]
+        service = self._make_service(health=health)
+        result = service.get_live_status("rhoai-v3-5")
+        nodes = {n["node_id"]: n for n in result["nodes"]}
+        detail = nodes["comp-comp-d"]["detail"]
+        assert "60/100" in detail
+        assert "85.71%" in detail
+
     def test_cache_returns_same_data(self):
         from map.backend.live_status_service import LiveStatusService
         client = MagicMock()
         client.get_alerts.return_value = SAMPLE_ALERTS
         client.get_health.return_value = None
         client.get_readiness.return_value = None
+        client.get_onboarding.return_value = None
         service = LiveStatusService(client=client, cache_ttl=300)
 
         first = service.get_live_status("rhoai-v3-5")
@@ -218,7 +369,8 @@ class TestLiveStatusService:
 class TestLiveStatusRoute:
     @pytest.fixture
     def client(self):
-        with patch("map.backend.graph.get_driver"):
+        with patch("map.backend.graph.get_driver"), \
+             patch("map.backend.main._auto_seed_from_ic"):
             from map.backend.main import app
             yield TestClient(app)
 
