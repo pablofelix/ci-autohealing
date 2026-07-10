@@ -10,7 +10,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-IC_BASE_URL = "http://localhost:8080/api/v1"
+import os
+IC_BASE_URL = os.environ.get("IC_API_URL", "http://localhost:8000").rstrip("/") + "/api/v1"
 
 
 class ClusterSeeder:
@@ -19,11 +20,13 @@ class ClusterSeeder:
     def __init__(self, driver, ic_url: str = IC_BASE_URL):
         self.driver = driver
         self.ic_url = ic_url.rstrip("/")
+        self._session = requests.Session()
+        self._session.timeout = 30
 
     def _api(self, path: str, params: dict | None = None) -> dict | list | None:
         """Call IC API endpoint. Returns None on failure."""
         try:
-            resp = requests.get(f"{self.ic_url}{path}", params=params, timeout=30)
+            resp = self._session.get(f"{self.ic_url}{path}", params=params, timeout=30)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -55,8 +58,13 @@ class ClusterSeeder:
 
     def check_ic_health(self) -> bool:
         """Verify IC API is available."""
-        data = self._api("/health")
-        return data is not None and data.get("status") == "ok"
+        try:
+            base = self.ic_url.split("/api/v1")[0]
+            resp = self._session.get(f"{base}/health", timeout=5)
+            data = resp.json()
+            return data.get("status") in ("ok", "healthy")
+        except Exception:
+            return False
 
     def seed_applications(self) -> list[str]:
         """Fetch applications from IC and create Application nodes."""
@@ -83,9 +91,7 @@ class ClusterSeeder:
 
     def seed_components(self, application: str = "rhoai-v3-5") -> list[str]:
         """Fetch components from IC and create Component nodes + relationships."""
-        data = self._api(f"/applications/{application}/components")
-        if not data:
-            data = self._api("/components", params={"application": application})
+        data = self._api(f"/applications/{application}/health")
         if not data:
             logger.warning("No components for %s", application)
             return []
@@ -98,10 +104,13 @@ class ClusterSeeder:
             for comp in components:
                 if isinstance(comp, str):
                     comp = {"name": comp}
-                comp_id = f"comp-{comp['name']}"
+                name = comp.get("name") or comp.get("component_name", "")
+                if not name:
+                    continue
+                comp_id = f"comp-{name}"
                 node_data = {
                     "id": comp_id,
-                    "name": comp["name"],
+                    "name": name,
                     "repo": comp.get("repo", ""),
                     "branch": comp.get("branch", ""),
                     "container_image": comp.get("container_image", ""),
@@ -151,13 +160,13 @@ class ClusterSeeder:
         logger.info("Created %d NUDGES relationships", nudge_count)
         return nudge_count
 
-    def detect_drift(self) -> dict:
+    def detect_drift(self, application: str = "rhoai-v3-5") -> dict:
         """Compare current graph against cluster state to find drift.
 
         Returns nodes that exist in graph but not cluster (stale), and
         nodes in cluster but not graph (missing).
         """
-        cluster_components = self._api("/components")
+        cluster_components = self._api(f"/applications/{application}/health")
         if cluster_components is None:
             return {"error": "Could not reach IC API", "stale": [], "missing": []}
 
@@ -166,7 +175,7 @@ class ClusterSeeder:
 
         cluster_ids = set()
         for c in cluster_components:
-            name = c["name"] if isinstance(c, dict) else c
+            name = (c.get("name") or c.get("component_name", "")) if isinstance(c, dict) else c
             cluster_ids.add(f"comp-{name}")
 
         with self.driver.session() as s:

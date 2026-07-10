@@ -26,6 +26,18 @@ class NodeStatus:
 
 
 @dataclass(frozen=True)
+class OnboardingStatus:
+    node_id: str
+    score: int  # 0-100
+    overall: str  # "complete", "partial", "incomplete"
+    badge_color: str  # hex color for badge
+    checks: dict  # {check_name: {status, detail, fix}}
+    failing: list  # check names that are failing
+    warnings: list  # check names with warnings
+    jira_key: str = ""
+
+
+@dataclass(frozen=True)
 class ActivityEvent:
     timestamp: str  # ISO 8601
     component: str
@@ -33,6 +45,12 @@ class ActivityEvent:
     severity: str  # "error", "warning", "info"
     message: str
 
+
+ONBOARDING_COLORS = {
+    "complete": "#10b981",   # green
+    "partial": "#f59e0b",    # yellow
+    "incomplete": "#ef4444", # red
+}
 
 STATUS_COLORS = {
     "healthy": "#10b981",
@@ -50,6 +68,31 @@ def _compute_status(health_score: int | None) -> str:
     if health_score >= 50:
         return "degraded"
     return "failing"
+
+
+def _build_health_detail(comp: dict, status: str) -> str:
+    """Build a human-readable detail string from health data."""
+    parts = []
+    if status == "failing":
+        consecutive = comp.get("consecutive_failures", 0)
+        if consecutive:
+            parts.append(f"{consecutive} consecutive failures")
+        last_fail = comp.get("last_failed_build")
+        if last_fail:
+            parts.append(f"last fail: {str(last_fail)[:10]}")
+    elif status == "degraded":
+        score = comp.get("health_score", 0)
+        parts.append(f"health {score}/100")
+        rate = comp.get("success_rate_last_7d")
+        if rate is not None:
+            parts.append(f"7d success: {rate}%")
+    else:
+        last_ok = comp.get("last_successful_build")
+        if last_ok:
+            parts.append(f"last build: {str(last_ok)[:10]}")
+        else:
+            parts.append("last build: success")
+    return " | ".join(parts) if parts else ""
 
 
 class LiveStatusService:
@@ -73,16 +116,22 @@ class LiveStatusService:
         alerts = self._client.get_alerts(application)
         health_list = self._client.get_health(application)
         readiness = self._client.get_readiness(application)
+        onboarding_data = self._client.get_onboarding(application)
+        pr_data = self._client.get_pr_activity(application)
 
         ic_available = any(x is not None for x in (alerts, health_list, readiness))
 
         nodes = self._build_node_statuses(alerts, health_list, readiness, application)
         activity = self._build_activity_feed(alerts)
+        pr_events = self._build_pr_events(pr_data)
+        activity = sorted(activity + pr_events, key=lambda e: e.timestamp, reverse=True)[:30]
+        onboarding = self._build_onboarding_statuses(onboarding_data)
 
         return {
             "application": application,
             "nodes": [asdict(n) for n in nodes],
             "activity": [asdict(e) for e in activity],
+            "onboarding": [asdict(o) for o in onboarding],
             "ic_available": ic_available,
             "last_updated": datetime.utcnow().isoformat() + "Z",
         }
@@ -100,12 +149,14 @@ class LiveStatusService:
                 if name and score is not None:
                     node_id = f"comp-{name}"
                     status = _compute_status(score)
+                    detail = _build_health_detail(comp, status)
                     statuses[node_id] = NodeStatus(
                         node_id=node_id,
                         node_type="Component",
                         status=status,
                         health_score=int(score),
                         border_color=STATUS_COLORS[status],
+                        detail=detail,
                     )
 
         # 2. Alerts override — failures are worse than health degradation
@@ -194,3 +245,61 @@ class LiveStatusService:
 
         events.sort(key=lambda e: e.timestamp, reverse=True)
         return events[:limit]
+
+    def _build_pr_events(self, pr_data) -> list[ActivityEvent]:
+        if not pr_data:
+            return []
+        events = []
+        for pr in pr_data.get("prs", []):
+            comp = pr.get("component_name", "unknown")
+            ts = pr.get("attempted_at", "")
+            if isinstance(ts, datetime):
+                ts = ts.isoformat() + "Z"
+            pr_num = pr.get("pr_number", "")
+            label = f"PR #{pr_num}" if pr_num else "PR"
+
+            merged = pr.get("pr_merged")
+            success = pr.get("was_successful")
+            if merged and success:
+                severity = "pr_merged"
+                message = f"{label} merged and verified"
+            elif merged and success is False:
+                severity = "pr_stale"
+                message = f"{label} merged but fix failed"
+            elif merged:
+                severity = "pr_merged"
+                message = f"{label} merged"
+            else:
+                severity = "pr_open"
+                message = f"{label} opened"
+
+            events.append(ActivityEvent(
+                timestamp=str(ts),
+                component=comp,
+                event_type="fix_pr",
+                severity=severity,
+                message=message,
+            ))
+        return events
+
+    def _build_onboarding_statuses(self, onboarding_data) -> list[OnboardingStatus]:
+        if not onboarding_data:
+            return []
+        components = onboarding_data.get("components", [])
+        statuses = []
+        for comp in components:
+            name = comp.get("component", "")
+            if not name:
+                continue
+            overall = comp.get("overall", "incomplete")
+            statuses.append(OnboardingStatus(
+                node_id=f"comp-{name}",
+                score=comp.get("score", 0),
+                overall=overall,
+                badge_color=ONBOARDING_COLORS.get(overall, ONBOARDING_COLORS["incomplete"]),
+                checks=comp.get("checks", {}),
+                failing=comp.get("failing", []),
+                warnings=comp.get("warnings", []),
+                jira_key=comp.get("jira_key", ""),
+            ))
+        return statuses

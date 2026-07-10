@@ -24,8 +24,34 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app):
+    _auto_seed_from_ic()
     yield
     graph.close()
+
+
+def _auto_seed_from_ic():
+    """Best-effort auto-seed of Component/Application nodes from IC API on startup."""
+    try:
+        from cluster_seeder import ClusterSeeder
+    except ModuleNotFoundError:
+        from map.cluster_seeder import ClusterSeeder
+
+    logger = logging.getLogger(__name__)
+    try:
+        driver = graph.get_driver()
+        seeder = ClusterSeeder(driver)
+        if not seeder.check_ic_health():
+            logger.info("IC API not available — skipping auto-seed")
+            return
+        result = seeder.seed_all()
+        logger.info(
+            "Auto-seed complete: %d apps, %d components, %d nudges",
+            result.get("applications", 0),
+            result.get("components", 0),
+            result.get("nudge_relationships", 0),
+        )
+    except Exception as exc:
+        logger.warning("Auto-seed failed (non-fatal): %s", exc)
 
 
 app = FastAPI(
