@@ -8,7 +8,7 @@ hammering the IC API on every frontend poll.
 import logging
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .ic_client import ICClient
 
@@ -70,6 +70,18 @@ def _compute_status(health_score: int | None) -> str:
     return "failing"
 
 
+def _parse_timestamp(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    s = str(value).rstrip("Z").replace("+00:00", "")
+    try:
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_health_detail(comp: dict, status: str) -> str:
     """Build a human-readable detail string from health data."""
     parts = []
@@ -113,11 +125,20 @@ class LiveStatusService:
         return result
 
     def _fetch_and_compute(self, application: str) -> dict:
-        alerts = self._client.get_alerts(application)
-        health_list = self._client.get_health(application)
-        readiness = self._client.get_readiness(application)
-        onboarding_data = self._client.get_onboarding(application)
-        pr_data = self._client.get_pr_activity(application)
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            f_alerts = pool.submit(self._client.get_alerts, application)
+            f_health = pool.submit(self._client.get_health, application)
+            f_readiness = pool.submit(self._client.get_readiness, application)
+            f_onboarding = pool.submit(self._client.get_onboarding, application)
+            f_pr = pool.submit(self._client.get_pr_activity, application)
+
+        alerts = f_alerts.result()
+        health_list = f_health.result()
+        readiness = f_readiness.result()
+        onboarding_data = f_onboarding.result()
+        pr_data = f_pr.result()
 
         ic_available = any(x is not None for x in (alerts, health_list, readiness))
 
@@ -200,6 +221,18 @@ class LiveStatusService:
                 else "failing" if verdict == "NOT_READY"
                 else "unknown"
             )
+            checks = readiness.get("checks", [])
+            skip_count = sum(1 for c in checks if c.get("status") == "SKIP")
+            fail_count = sum(1 for c in checks if c.get("status") == "FAIL")
+            total = len(checks)
+
+            detail_parts = [f"Release: {verdict}"]
+            if fail_count:
+                detail_parts.append(f"{fail_count} failing")
+            if skip_count:
+                detail_parts.append(f"{skip_count}/{total} checks skipped")
+            detail = " | ".join(detail_parts)
+
             app_id = f"app-{application}"
             statuses[app_id] = NodeStatus(
                 node_id=app_id,
@@ -207,22 +240,27 @@ class LiveStatusService:
                 status=app_status,
                 health_score=100 if verdict == "READY" else 50 if verdict == "AT_RISK" else 20,
                 border_color=STATUS_COLORS[app_status],
-                detail=f"Release: {verdict}",
+                detail=detail,
             )
 
         return list(statuses.values())
 
-    def _build_activity_feed(self, alerts, limit: int = 20) -> list[ActivityEvent]:
+    def _build_activity_feed(
+        self, alerts, limit: int = 20, max_age_days: int = 7,
+    ) -> list[ActivityEvent]:
         if not alerts:
             return []
+
+        cutoff = datetime.utcnow() - timedelta(days=max_age_days)
         events = []
 
         for f in alerts.get("build_failures", []):
-            ts = f.get("last_seen") or f.get("first_seen", "")
-            if isinstance(ts, datetime):
-                ts = ts.isoformat() + "Z"
+            ts_raw = f.get("last_seen") or f.get("first_seen", "")
+            ts_dt = _parse_timestamp(ts_raw)
+            if ts_dt and ts_dt < cutoff:
+                continue
             events.append(ActivityEvent(
-                timestamp=str(ts),
+                timestamp=str(ts_raw),
                 component=f.get("component", "unknown"),
                 event_type="build_failure",
                 severity="error",
@@ -230,13 +268,14 @@ class LiveStatusService:
             ))
 
         for v in alerts.get("conforma_violations", []):
-            ts = v.get("last_seen") or v.get("first_seen", "")
-            if isinstance(ts, datetime):
-                ts = ts.isoformat() + "Z"
+            ts_raw = v.get("last_seen") or v.get("first_seen", "")
+            ts_dt = _parse_timestamp(ts_raw)
+            if ts_dt and ts_dt < cutoff:
+                continue
             blocks = v.get("blocks", "none")
             severity = "warning" if blocks not in ("none", "") else "info"
             events.append(ActivityEvent(
-                timestamp=str(ts),
+                timestamp=str(ts_raw),
                 component=v.get("component", "unknown"),
                 event_type="conforma_violation",
                 severity=severity,

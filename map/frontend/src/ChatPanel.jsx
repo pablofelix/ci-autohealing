@@ -329,18 +329,24 @@ export default function ChatPanel({ selectedNodeId, onHighlight, onAction }) {
               <button
                 onClick={() => onHighlight && onHighlight(msg.highlight)}
                 style={{
-                  display: 'inline-block',
-                  marginTop: 4,
-                  background: 'none',
-                  border: '1px solid #d1d5db',
-                  borderRadius: 10,
-                  padding: '2px 8px',
-                  fontSize: 10,
-                  color: '#6b7280',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  marginTop: 6,
+                  background: '#eff6ff',
+                  border: '1px solid #93c5fd',
+                  borderRadius: 12,
+                  padding: '3px 10px',
+                  fontSize: 11,
+                  color: '#2563eb',
+                  fontWeight: 600,
                   cursor: 'pointer',
+                  transition: 'background 0.15s',
                 }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = '#dbeafe'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = '#eff6ff'; }}
               >
-                Show on map
+                <span style={{ fontSize: 12 }}>📍</span> Show on map
               </button>
             )}
             {msg.actions && msg.actions.length > 0 && (

@@ -409,3 +409,153 @@ class TestLiveStatusRoute:
             data = resp.json()
             assert data["ic_available"] is False
             assert data["nodes"] == []
+
+
+# ─── Phase 10f fixes ─────────────────────────────────────────────────────────
+
+
+class TestActivityFeedStaleness:
+    def _make_service(self, alerts=None):
+        from map.backend.live_status_service import LiveStatusService
+        client = MagicMock()
+        client.get_alerts.return_value = alerts
+        client.get_health.return_value = None
+        client.get_readiness.return_value = None
+        client.get_onboarding.return_value = None
+        client.get_pr_activity.return_value = None
+        return LiveStatusService(client=client, cache_ttl=0)
+
+    def test_stale_events_filtered_out(self):
+        stale_alerts = {
+            "build_failures": [
+                {
+                    "component": "old-comp",
+                    "status": "Failed",
+                    "error_type": "build_error",
+                    "last_seen": "2024-01-01T00:00:00Z",
+                },
+                {
+                    "component": "fresh-comp",
+                    "status": "Failed",
+                    "error_type": "build_error",
+                    "last_seen": "2099-01-01T00:00:00Z",
+                },
+            ],
+            "conforma_violations": [],
+        }
+        service = self._make_service(alerts=stale_alerts)
+        result = service.get_live_status("rhoai-v3-5")
+        components = [e["component"] for e in result["activity"]]
+        assert "fresh-comp" in components
+        assert "old-comp" not in components
+
+    def test_all_stale_returns_empty_feed(self):
+        stale_alerts = {
+            "build_failures": [
+                {
+                    "component": "ancient",
+                    "status": "Failed",
+                    "error_type": "timeout",
+                    "last_seen": "2020-01-01T00:00:00Z",
+                },
+            ],
+            "conforma_violations": [],
+        }
+        service = self._make_service(alerts=stale_alerts)
+        result = service.get_live_status("rhoai-v3-5")
+        assert len(result["activity"]) == 0
+
+    def test_datetime_object_timestamps_handled(self):
+        from datetime import datetime
+        alerts = {
+            "build_failures": [
+                {
+                    "component": "dt-comp",
+                    "status": "Failed",
+                    "error_type": "build_error",
+                    "last_seen": datetime(2099, 6, 1, 12, 0, 0),
+                },
+            ],
+            "conforma_violations": [],
+        }
+        service = self._make_service(alerts=alerts)
+        result = service.get_live_status("rhoai-v3-5")
+        components = [e["component"] for e in result["activity"]]
+        assert "dt-comp" in components
+
+    def test_timezone_aware_timestamps_handled(self):
+        alerts = {
+            "build_failures": [
+                {
+                    "component": "tz-comp",
+                    "status": "Failed",
+                    "error_type": "build_error",
+                    "last_seen": "2099-01-01T00:00:00+00:00",
+                },
+            ],
+            "conforma_violations": [],
+        }
+        service = self._make_service(alerts=alerts)
+        result = service.get_live_status("rhoai-v3-5")
+        components = [e["component"] for e in result["activity"]]
+        assert "tz-comp" in components
+
+
+class TestReadinessDetailWithSkips:
+    def _make_service(self, readiness=None):
+        from map.backend.live_status_service import LiveStatusService
+        client = MagicMock()
+        client.get_alerts.return_value = None
+        client.get_health.return_value = None
+        client.get_readiness.return_value = readiness
+        client.get_onboarding.return_value = None
+        client.get_pr_activity.return_value = None
+        return LiveStatusService(client=client, cache_ttl=0)
+
+    def test_readiness_skip_count_in_detail(self):
+        readiness = {
+            "verdict": "NOT_READY",
+            "checks": [
+                {"name": "build_failures", "status": "FAIL"},
+                {"name": "conforma", "status": "FAIL"},
+                {"name": "fbc_health", "status": "PASS"},
+                {"name": "pcc_cache", "status": "SKIP"},
+                {"name": "stale", "status": "SKIP"},
+                {"name": "snapshot", "status": "SKIP"},
+            ],
+        }
+        service = self._make_service(readiness=readiness)
+        result = service.get_live_status("rhoai-v3-5")
+        app_nodes = [n for n in result["nodes"] if n["node_type"] == "Application"]
+        assert len(app_nodes) == 1
+        detail = app_nodes[0]["detail"]
+        assert "3/6 checks skipped" in detail
+        assert "2 failing" in detail
+
+    def test_readiness_no_skips_no_skip_text(self):
+        readiness = {
+            "verdict": "READY",
+            "checks": [
+                {"name": "build_failures", "status": "PASS"},
+                {"name": "conforma", "status": "PASS"},
+            ],
+        }
+        service = self._make_service(readiness=readiness)
+        result = service.get_live_status("rhoai-v3-5")
+        app_nodes = [n for n in result["nodes"] if n["node_type"] == "Application"]
+        assert "skipped" not in app_nodes[0]["detail"]
+
+
+class TestICClientReadinessTimeout:
+    def test_readiness_uses_longer_timeout(self):
+        from map.backend.ic_client import ICClient
+        client = ICClient(base_url="http://test:8000")
+        session = MagicMock()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"verdict": "READY"}
+        session.get.return_value = resp
+        client._session = session
+
+        client.get_readiness("rhoai-v3-5")
+        call_kwargs = session.get.call_args
+        assert call_kwargs.kwargs.get("timeout") == 35 or call_kwargs[1].get("timeout") == 35

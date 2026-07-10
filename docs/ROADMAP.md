@@ -837,16 +837,75 @@ Goal: embedded AI assistant in the Map UI that answers questions, diagnoses prob
 - [x] Map backend action proxy endpoints (POST /api/map/actions/rebuild, /actions/triage)
 - [x] Two-click confirmation UX (click → confirm → execute) with cancel option
 
-**Phase 10f — UI Quality Fixes (pending):**
+**Phase 10f — UI + Data Quality Fixes (done 2026-07-10):**
 
-Reported during triage meeting verification on 2026-07-10:
+Reported and discovered during system audit on 2026-07-10:
 
-- [ ] "Show on map" link navigation: concept highlight links in chat messages don't navigate to the correct node; user clicks but nothing useful happens
-- [ ] Link formatting: links lack color, styling, or hover effects — hard to identify as interactive elements
-- [ ] Filter relationship cleanup: filtering by ECPOLICY (or other type) hides the filtered nodes but leaves their edges visible, cluttering the graph
-- [ ] Activity feed relevance: activity feed items don't surface actionable information — need severity-based filtering or summarization
-- [ ] Issues detected count inflation: "235 issues detected" includes many non-issues (info-level warnings, resolved items) — needs filtering to show only real issues
-- [ ] MCP server stale process: long-running Claude sessions accumulate stale MCP server processes; after code changes, the stale process keeps old imports in memory (e.g. `from utils.conforma_utils` after `src/utils/` was deleted). Fixed by killing stale process, but needs preventive restart mechanism
+*UI issues (user-reported):*
+- [x] "Show on map" link navigation: styled as blue pill button with hover effect; `handleChatHighlight` now calls `fitView` on highlighted nodes for viewport navigation
+- [x] Link formatting: "Show on map" button restyled with blue color, icon, hover effect, 600 weight
+- [x] Filter relationship cleanup: filtered edges now use `hidden: true` (React Flow native) instead of `opacity: 0.05`, completely removing them from the graph
+- [x] Activity feed relevance: added severity filter tabs (All/Errors/Warnings/Info), error count badge, click-to-navigate on component names
+
+*Critical data bugs (audit-discovered):*
+- [x] Health endpoint ignores application param: `GET /applications/{app}/health` calls `monitor.get_component_health_summary()` without passing `application` — returns ALL 230 components across ALL releases instead of just the requested one. Fix: pass `application=application` (one-line fix in `api/routes/applications.py:129`, code fixed, needs API restart)
+- [x] Map live status cascade failure: `_fetch_and_compute()` parallelized with ThreadPoolExecutor (5 workers), readiness timeout increased to 35s. Wall-clock for all 5 fetches = max(individual) instead of sum
+- [x] Gap detection false positives: `get_gaps()` Cypher now excludes `_source='cluster'` components from missing_pipeline check — auto-seeded components don't have pipeline edges by design
+- [x] v3.4 stale data: `_build_activity_feed()` now filters events older than 7 days. Uses `_parse_timestamp()` helper for robust datetime normalization (handles ISO strings, datetime objects, timezone suffixes). Stale build failures from old releases no longer appear in the activity feed
+- [x] v3.5 readiness: readiness detail now surfaces SKIP/FAIL counts (e.g., "Release: NOT_READY | 3 failing | 12/22 checks skipped") so users understand partial readiness is due to infra constraints, not code bugs
+
+*Infrastructure:*
+- [x] MCP server stale process: long-running Claude sessions accumulate stale MCP server processes. Fixed by killing stale process; new process spawned with current code
+
+**Phase 10g — System Audit Findings (2026-07-10):**
+
+Comprehensive 3-perspective audit (Triage Engineer, Code Quality, Learner).
+Total: 2 critical, 10 major, 12 minor/documentation issues.
+
+*Critical — P0 (blocks correct operation):*
+- [ ] `/alerts` endpoint hangs: N+1 query (41 per-component DB calls) + synchronous Jira/K8s/GitHub API calls → 60s+ response, starves all uvicorn workers, entire API becomes unresponsive. Fix: replace `find_unresolved_component_names()` + per-component loop with `get_violation_summaries()` (1 query, already used in MCP tools). Move external calls to ThreadPoolExecutor or make them lazy/optional. (`failures.py:237-240`)
+- [ ] `_check_rpm_drift` is a no-op: `drift_found = []` declared but never appended to — function always returns PASS regardless of actual RPM drift, giving false confidence in release readiness checks. Either implement the drift comparison or remove the check. (`releases.py:2027-2102`)
+
+*Major — P1 (degrades accuracy or reliability):*
+- [ ] Health warnings endpoint ignores application filter: `GET /applications/{app}/health/warnings` never passes `application` to `monitor.run_checks()` → returns warnings for ALL applications. (`applications.py:132-147`)
+- [ ] `releases.py _db()` creates new DB connection per request instead of using the shared pool (`get_pool()`), causing connection leaks. All other route files use `get_repository()`. (`releases.py:30-33`)
+- [ ] No request-level timeout middleware: one slow request blocks all uvicorn workers → entire API unresponsive. Need FastAPI middleware to abort after 30s.
+- [ ] Nightly warnings silently swallowed: `except Exception: pass` in `list_alerts()` makes it impossible to distinguish "no issues" from "check failed". (`failures.py:284-297`)
+- [ ] ThreadPoolExecutor not context-managed in readiness checks — if `futures` dict creation fails, pool leaks threads. (`releases.py:470-501`)
+- [ ] Dead code `_d()` function in `sync_schedule()` — unused SQL value formatter, potential SQL injection pattern. (`releases.py:156-157`)
+- [ ] Dead `date.today()` call discarded in `_compute_freeze_countdown`. (`failures.py:37`)
+- [ ] Nonexistent application returns empty 200 instead of 404 — `/alerts`, `/readiness`, `/nightly` silently succeed with zero results. `ValidatedApp` dependency exists in `validators.py` but is never used. Only 2 of 30+ endpoints validate application names.
+- [ ] Inconsistent error responses: `triage.py` uses `HTTPException`, `violations.py`/`failures.py` use `ICError` — two different error shapes coexist.
+- [ ] Duplicate exception-aware conforma counting logic in `failures.py:220-282` and `releases.py:306-323` — extract to shared function.
+
+*Minor / Documentation — P2:*
+- [ ] `releases.py` is 2,562 lines (god module) — should split into readiness_checks.py, release_details.py, freeze_schedule.py
+- [ ] `cli/main.py` is 7,117 lines — should split into cli/commands/ submodules
+- [ ] No domain glossary (30+ undefined acronyms: EA, GA, RC, FBC, PCC, EC, ITS, RPA, etc.)
+- [ ] No getting-started guide for new engineers (installation exists but no workflow walkthrough)
+- [ ] `ic get conforma` help says "Conforma test failures" — misleading, they're policy violations
+- [ ] Exception coverage column values cryptic to newcomers ("NO (in reg-prod-future)")
+- [ ] "Readiness" concept not exposed in CLI help — `ic release status` exists but not discoverable
+- [ ] No blocker vs risk classification documentation
+- [ ] API/MCP feature gap: 8 API endpoints have no MCP tool, 14 MCP tools have no API endpoint
+- [ ] `datetime.utcnow()` usage (deprecated in Python 3.12+) — should use `datetime.now(UTC)`
+- [ ] Repository methods silently return defaults on error — a DB outage reports "zero failures"
+- [ ] Architecture doc lacks data-flow narrative (what happens when a build fails, step by step)
+
+*Pending audit work:*
+- [ ] Triage Engineer perspective: endpoint-by-endpoint data correctness testing (was blocked by API starvation on 2026-07-10). Requires: (1) restart API server `kill 870200`, (2) re-run triage audit across rhoai-v3-5-ea-2, rhoai-v3-5, rhoai-v3-4
+- [ ] Verify health endpoint fix is live (code fixed at `applications.py:129` but server not restarted)
+
+*Fix priority order for next session:*
+1. Restart API server (pick up health endpoint fix)
+2. Fix `/alerts` N+1 query (P0 — root cause of server starvation)
+3. Add request timeout middleware (P0 — prevents future starvation)
+4. Fix health warnings application filter (P1)
+5. Fix `_db()` connection pool bypass (P1)
+6. Remove dead code (`_d()`, `date.today()`, `_check_rpm_drift`)
+7. Add application validation to remaining endpoints (P1)
+8. Run Triage Engineer audit with healthy API
+9. Fix remaining P1 and P2 issues
 
 **Phase 11 — Resolution Visualization (planned):**
 - [ ] Resolution timeline component showing IC fix workflow steps

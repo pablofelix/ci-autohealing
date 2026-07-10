@@ -33,8 +33,11 @@ class ICClient:
         return self._get(f"/api/v1/applications/{application}/health")
 
     def get_readiness(self, application: str) -> dict | None:
-        """GET /api/v1/applications/{app}/readiness → release verdict."""
-        return self._get(f"/api/v1/applications/{application}/readiness")
+        """GET /api/v1/applications/{app}/readiness → release verdict.
+
+        Uses a longer timeout because readiness runs ~22 checks server-side.
+        """
+        return self._get(f"/api/v1/applications/{application}/readiness", timeout=35)
 
     def get_onboarding(self, application: str) -> dict | None:
         """GET /api/v1/applications/{app}/onboarding → per-component onboarding scores."""
@@ -118,10 +121,10 @@ class ICClient:
         except Exception:
             return False
 
-    def _get(self, path: str):
+    def _get(self, path: str, timeout: int | None = None):
         try:
             resp = self._session.get(
-                f"{self.base_url}{path}", timeout=self.timeout,
+                f"{self.base_url}{path}", timeout=timeout or self.timeout,
             )
             if resp.status_code == 200:
                 return resp.json()

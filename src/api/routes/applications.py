@@ -126,7 +126,7 @@ def get_health(application: str) -> List[Dict[str, Any]]:
     """Component health scores and status."""
     from proactive.health_monitor import HealthMonitor
     monitor = HealthMonitor(get_pool())
-    return monitor.get_component_health_summary() or []
+    return monitor.get_component_health_summary(application=application) or []
 
 
 @router.get("/applications/{application}/health/warnings")
@@ -145,3 +145,11 @@ def get_health_warnings(application: str):
         )
         for w in checks
     ]
+
+
+@router.get("/applications/{application}/pr-activity")
+def get_pr_activity(application: str, days: int = 7) -> Dict[str, Any]:
+    """Recent PR activity for the System Map activity feed."""
+    repo = get_repository(ResolutionAttemptRepository)
+    attempts = repo.get_recent_for_application(application, days=days)
+    return {"application": application, "prs": attempts}
