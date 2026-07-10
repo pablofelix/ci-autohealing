@@ -678,7 +678,200 @@ Only proceed if sklearn accuracy from PR-diff features plateaus below 80% and da
 
 ---
 
-## Current Release Status (updated 2026-07-06)
+## Phase 18: System Map (in progress)
+
+Goal: interactive visual map of RHOAI CI/CD infrastructure backed by Neo4j. See `docs/RHOAI-CICD-IMPROVEMENTS.md` §7.5 for full architecture and phased roadmap.
+
+**Phase 1 — Static Map (done):**
+- [x] Neo4j schema: 8 node types (Repository, Workflow, Pipeline, TektonTask, ECPolicy, Automation, Application, Component)
+- [x] `seed.py`: populate graph from static topology + IC API (44 static nodes, 87 relationships)
+- [x] FastAPI backend: 8 endpoints (graph, nodes, edges, node detail, search, path, gaps, stats, health)
+- [x] React Flow frontend: interactive graph with custom nodes, zoom, pan, minimap, type filters, search
+- [x] Detail panel with neighbor connections
+- [x] Gap detection (orphan nodes, missing relationships)
+- [x] 16 unit tests + 19 E2E BDD tests (Gherkin)
+- [x] Descriptions with "why" context for all nodes
+
+**Phase 2 — Live Status Overlay (done):**
+- [x] `ic_client.py`: HTTP client to IC API (alerts, health, readiness) with 10s timeout
+- [x] `live_status_service.py`: status computation (healthy/degraded/failing) + 55s cache
+- [x] Status overlay: green/yellow/red borders on Component and Application nodes
+- [x] Status precedence: health scores → build failures override → blocking conforma override
+- [x] Activity feed panel (collapsible, bottom-right) with severity-colored events
+- [x] `useLiveStatus` hook with 60s polling interval + unmount cleanup
+- [x] Graceful degradation: IC unavailable → nodes keep static colors, feed shows "offline"
+- [x] Live/Offline indicator in toolbar
+- [x] 20 tests (ICClient, LiveStatusService, route)
+
+**Phase 3 — MCP Server (done):**
+- [x] `map/mcp_server/`: FastMCP server with 7 tools (same pattern as IC MCP server)
+- [x] Tools: `get_map_graph`, `search_map_nodes`, `get_map_node`, `find_map_path`, `get_map_gaps`, `get_map_stats`, `get_map_live_status`
+- [x] Registered in `.claude/settings.json` as `system-map` MCP server (stdio transport)
+- [x] 14 unit tests covering all tools + error cases
+- [x] Cypher injection fix in `graph.py:search_nodes` (parameterized queries)
+
+**Phase 4 — Impact Analysis (planned):**
+- [ ] "What does X affect?" — trace downstream dependencies from any node
+- [ ] Blast radius visualization: highlight all nodes affected by a component failure
+- [ ] Integration with IC alerts: when a build fails, show propagation path on map
+
+**Phase 5 — Auto-seed from Cluster (planned):**
+- [ ] Populate Neo4j graph directly from live Konflux cluster CRDs
+- [ ] Discover Components, Applications, Pipelines, IntegrationTestScenarios from cluster
+- [ ] Diff against existing graph to detect drift (new components, removed pipelines)
+
+**Phase 6 — Change Detection Feed (planned):**
+- [ ] Track graph changes over time (new nodes, removed edges, status transitions)
+- [ ] Timeline view: "what changed this week in the infrastructure?"
+- [ ] Notifications on topology drift (new component appeared, pipeline removed)
+
+**Phase 7 — Onboarding Tracker Visual (planned):**
+- [ ] Overlay onboarding progress on Component nodes (score, blocked steps)
+- [ ] Color-coded by onboarding status: complete=green, partial=yellow, incomplete=red
+- [ ] Link to `ic onboard describe <comp>` for details
+
+**Phase 8 — IC CLI Link (planned):**
+- [ ] Deep-link from `ic describe component <comp>` to System Map node
+- [ ] URL format: `http://localhost:3001/?highlight=comp-<name>`
+- [ ] Quick keyboard shortcut in IC CLI to open map view
+
+**Phase 9 — PR & Resolution Event Feed (planned):**
+- [ ] Surface nudge/fix/Renovate PR events in the activity feed (data already in IC)
+- [ ] Event types: "nudge PR created for comp-X", "fix PR merged", "Renovate PR opened"
+- [ ] These are key resolution signals — shows whether a failure is being actively fixed or stale
+- [ ] Pull from IC's component PR data (`get_component_prs`) and triage tracking
+- [ ] Color-code: open PR = blue (in progress), merged = green (resolved), stale = yellow (needs attention)
+
+**Phase 10 — Conversational Agent (planned):**
+
+Goal: embedded AI assistant in the Map UI that answers questions, diagnoses problems, teaches concepts, and suggests improvements — using the graph topology + IC data together.
+
+*10a — Graph Explainer (no IC dependency):*
+- [ ] Chat panel in React UI with node-aware context (selected node, neighbors, path)
+- [ ] Explain nodes, relationships, and paths in natural language
+- [ ] "What does this pipeline do?" / "How are these two connected?" / "What is PaC?"
+- [ ] Backend endpoint proxying to Claude API with graph context as system prompt
+
+*10b — Contextual Diagnostics (uses IC via MCP):*
+- [ ] "Why is this node red?" → calls IC `get_failure()` + adds graph neighbors/impact context
+- [ ] "What's blocking the release?" → combines readiness + conforma + build failures + triage
+- [ ] "Is anyone working on this?" → crosses triage items + open PRs + Jira status
+- [ ] Correlate multiple failures: "These 5 reds share the same upstream cause"
+
+*10c — Panoramic View (aggregates IC data):*
+- [ ] "Summarize the current state in one sentence" → overall health synthesis
+- [ ] "What changed since yesterday?" → status diff, new failures, merged fixes
+- [ ] "Are we better or worse than last week?" → trend analysis from IC history
+- [ ] Daily briefing generation: proactive summary of what needs attention
+
+*10d — Interactive Onboarding (teaching mode):*
+- [ ] Guided tour of RHOAI CI/CD: highlights nodes while explaining concepts
+- [ ] "Explain Conforma" → points to ECPolicy nodes, traces validation path to release
+- [ ] "How does nudging work?" → highlights NUDGES edges, walks through the flow
+- [ ] Adaptive: detects what user already knows from questions asked
+
+*10e — Guided Actions + Improvement Suggestions:*
+- [ ] Suggest rebuilds for transient failures with "do it?" confirmation → `trigger_rebuild`
+- [ ] Suggest triage/Jira creation with pre-filled context from graph + IC diagnosis
+- [ ] **Config improvement suggestions** from graph + IC cross-analysis:
+  - Graph gaps → "This component has no pipeline linked, want me to fix it?"
+  - Recurring failures → "This fails 5x/week by the same cause — suggest auto-rebuild rule"
+  - Config drift → "nudging.yaml references 3 components that no longer exist"
+  - Release prep → "4 days to freeze, 3 exceptions expiring — here's a prioritized action plan"
+  - Pipeline migration → "8 components still on deprecated docker-build, here's the migration"
+  - Onboarding gaps → "These components always stall on the same steps: webhook + renovate"
+- [ ] All actions require user confirmation — never auto-execute
+
+**Phase 11 — Resolution Visualization (planned):**
+- [ ] Resolution timeline component showing IC fix workflow steps
+- [ ] SSE/WebSocket event stream from IC
+- [ ] Path highlighting for affected nodes during resolution
+
+---
+
+## Phase 19: FBC & Chart Introspection
+
+Goal: extract and expose the contents of FBC (File-Based Catalog) fragment images and Helm charts so that IC can answer "what ships in this release?" precisely, and the System Map can visualize component→bundle→channel relationships.
+
+**19a — FBC Fragment Inspection (IC):**
+- [ ] `ic fbc inspect [app]` — extract channels, operator versions, related images from FBC fragment
+- [ ] Parse FBC JSON from `opm render` or registry manifest inspection
+- [ ] Show which component images are referenced in each channel (fast/stable/candidate)
+- [ ] Detect stale images: component has newer build but FBC still references old SHA
+- [ ] `ic fbc diff <sha1> <sha2>` — compare two FBC fragments (new images, channel updates, removed entries)
+- [ ] MCP tool: `get_fbc_contents(application)` for agent access
+- [ ] Cache extracted FBC data (changes only on rebuild)
+
+**19b — Helm Chart Inspection (IC):**
+- [ ] `ic chart inspect <chart-name>` — extract values, dependencies, image references from Helm charts
+- [ ] List all container images referenced in chart templates
+- [ ] Detect version mismatches between chart values and actual built images
+- [ ] Compare chart versions across releases (EA1 vs EA2 vs GA)
+- [ ] MCP tool: `get_chart_contents(chart_name)` for agent access
+
+**19c — System Map Integration:**
+- [ ] Add FBC fragment as a node type with edges to all component images it references
+- [ ] Add Helm chart nodes with edges to referenced images and config
+- [ ] Channel membership visualization: which components are in which OLM channels
+- [ ] "What ships together?" view — click FBC node to see full bundle contents
+
+---
+
+## Phase 20: Proactive Konflux Configuration Advisor
+
+Goal: shift from reactive failure detection to proactive infrastructure auditing. IC currently reacts to build failures and Conforma violations — this phase adds intelligence that audits Konflux configuration and suggests improvements *before* problems occur, based on features available in the installed Konflux version.
+
+**20a — Build Optimization Audit:**
+- [ ] Detect components without hermetic builds (required for SLSA L3 compliance)
+- [ ] Detect components without caching proxy enabled (slower builds than necessary)
+- [ ] Audit `on-cel-expression` in `.tekton/` PipelineRun YAMLs — find redundant rebuilds (CEL too broad) or missed builds (CEL too restrictive)
+- [ ] Detect components that need pipeline migration (deprecated Tekton tasks not yet updated by MintMaker)
+- [ ] Detect components without trusted artifacts (insecure pipeline data sharing)
+- [ ] Suggest `overriding-compute-resources` when builds OOM recurrently (pattern: same component, OOMKilled, >3 times)
+- [ ] Track build duration trends — flag components where build time increased >50% vs 30-day average
+- [ ] MCP: `get_build_optimization_audit(application)` / CLI: `ic advisor builds [app]`
+
+**20b — Testing Gap Detection:**
+- [ ] Detect applications without periodic integration tests (Konflux supports CronJob + snapshot labeling)
+- [ ] Detect ITS with wrong contexts (should run on push but only configured for PR, or vice versa)
+- [ ] Detect ITS pointing to stale Git refs (resolver bundle hasn't changed in >90 days)
+- [ ] Detect if group snapshots are configured for coordinated cross-component PRs
+- [ ] Surface which ITS scenarios are disabled and why
+- [ ] MCP: `get_testing_gap_audit(application)` / CLI: `ic advisor tests [app]`
+
+**20c — Supply Chain Compliance Audit:**
+- [ ] SLSA provenance attestation gaps — verify all component images have complete attestations
+- [ ] SBOM completeness audit — not just CVE counts, verify SBOM contains all declared dependencies
+- [ ] Artifact scan results freshness — detect outdated SARIF scans (>7 days since last scan)
+- [ ] Verify attestation signatures match expected signing keys
+- [ ] MCP: `get_supply_chain_audit(application)` / CLI: `ic advisor compliance [app]`
+
+**20d — Dependency Management Health (MintMaker):**
+- [ ] Detect components without MintMaker/Renovate configured
+- [ ] Security update PRs ignored (open >7 days without review) — correlate with CVE severity
+- [ ] RPM lockfile refresh not configured where applicable
+- [ ] Compare renovate.json5 with MintMaker default config to find coverage gaps
+- [ ] Track auto-merge health: nudge PRs that should auto-merge but don't
+- [ ] MCP: `get_dependency_health(application)` / CLI: `ic advisor deps [app]`
+
+**20e — Configuration Drift Detection:**
+- [ ] CaC repo (Kustomize overlays) vs actual cluster state — drift detection
+- [ ] Component CR spec vs `.tekton/` config mismatch
+- [ ] ImageRepository credentials rotation status (approaching expiry)
+- [ ] ReleasePlan / ReleasePlanAdmission freshness (last updated >90 days ago)
+- [ ] EC policy stage vs prod gap — components that pass stage but would fail prod
+- [ ] MCP: `get_config_drift(application)` / CLI: `ic advisor drift [app]`
+
+**20f — Unified Advisor Dashboard:**
+- [ ] `ic advisor [app]` — run all audits, present unified report with priority ranking
+- [ ] Severity scoring: Critical (will block release), Warning (toil/risk), Info (improvement opportunity)
+- [ ] Track advisor findings over time — show which were addressed, which are new
+- [ ] Weekly digest: "3 new findings, 2 resolved since last week"
+- [ ] Integration with Map agent (Phase 10e) — advisor findings feed into improvement suggestions
+
+---
+
+## Current Release Status (updated 2026-07-10)
 
 **RHAI 3.5 schedule (from Product Pages):**
 
@@ -692,25 +885,32 @@ Only proceed if sklearn accuracy from PR-diff features plateaus below 80% and da
 | RHOAI Release | Jun 18 | Jul 16 | Aug 20 |
 | RHAI 3.5 GA | — | — | Aug 20 |
 
-**EA2 status (as of Jul 1):**
-- RC1: Jun 23 ✓ — RC2: Jul 3 (PCC cache regen, not code change)
-- 1 blocker: consume ray cuda (hardware dependency)
-- Release window: Jul 14-15
+**EA2 status (as of Jul 10):**
+- RC1: Jun 23 ✓ — RC2: Jul 3 ✓ (PCC cache regen)
+- Release window: Jul 14-15 (4 days away)
 - Israel testing started Jul 5
 
 **3.5 GA status:**
-- Code freeze: Jul 24
-- 5 blockers (same as prior week)
-- Same-day release coordinated with RHAI team
+- Feature freeze: Jul 17 (7 days)
+- Code freeze: Jul 24 (14 days)
+- Deprecated Tekton tasks EOL: Aug 20-30 (must update before GA)
+- EC volatile exclusions expire: Aug 1 (must fix root cause or renew)
 
 **Known issues:**
 - PCC cache not auto-refreshing after releases (seen EA1+EA2, sustaining investigating)
 - Konflux config validator blocking scheduled nightlies (Alex+Mhamad fix, deadline Jul 17)
-- Onboarding automation prematurely closing Jira tickets
+- ~~`ic get conforma` ignores positional app arg~~ (fixed: argument wired as `application`)
+- ~~Release-readiness false blockers~~ (fixed: exception-aware `compute_blocks()` in readiness endpoint)
 
 **People:**
 - Ujjwal: new build IC, mentored by Moulali
 - Jira dashboard: https://redhat.atlassian.net/jira/dashboards/23119
+
+**Konflux upstream activity (as of Jul 10):**
+- release-service: managed pipeline retry with mitigations (RELEASE-2120)
+- build-definitions: task migration tool improvements, step-count optimization guidance
+- mintmaker: replaced deprecated buildah image
+- integration-service: added PipelineRun link in status, RBAC fixes for SA/RoleBindings
 
 ---
 
