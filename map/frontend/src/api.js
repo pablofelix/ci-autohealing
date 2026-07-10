@@ -22,6 +22,19 @@ export const api = {
   impact: (nodeId, { maxDepth = 5, direction = 'downstream' } = {}) =>
     fetchJson(`/impact/${encodeURIComponent(nodeId)}?max_depth=${maxDepth}&direction=${direction}`),
   drift: () => fetchJson('/drift'),
+  concepts: () => fetchJson('/concepts'),
+  chat: (message, nodeId = null) => {
+    const body = { message };
+    if (nodeId) body.node_id = nodeId;
+    return fetch(`${BASE}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    });
+  },
   changes: ({ since, entityId, changeType, limit } = {}) => {
     const params = new URLSearchParams();
     if (since) params.set('since', since);

@@ -678,7 +678,7 @@ Only proceed if sklearn accuracy from PR-diff features plateaus below 80% and da
 
 ---
 
-## Phase 18: System Map (in progress)
+## Phase 18: System Map (Phases 1-9 done, 10a-10d done, 10e-11 planned)
 
 Goal: interactive visual map of RHOAI CI/CD infrastructure backed by Neo4j. See `docs/RHOAI-CICD-IMPROVEMENTS.md` §7.5 for full architecture and phased roadmap.
 
@@ -704,71 +704,117 @@ Goal: interactive visual map of RHOAI CI/CD infrastructure backed by Neo4j. See 
 - [x] 20 tests (ICClient, LiveStatusService, route)
 
 **Phase 3 — MCP Server (done):**
-- [x] `map/mcp_server/`: FastMCP server with 7 tools (same pattern as IC MCP server)
-- [x] Tools: `get_map_graph`, `search_map_nodes`, `get_map_node`, `find_map_path`, `get_map_gaps`, `get_map_stats`, `get_map_live_status`
+- [x] `map/mcp_server/`: FastMCP server with 11 tools (same pattern as IC MCP server)
+- [x] Tools: `get_map_graph`, `search_map_nodes`, `get_map_node`, `find_map_path`, `get_map_gaps`, `get_map_stats`, `get_map_live_status`, `get_map_impact`, `seed_map_from_cluster`, `get_map_drift`, `get_map_changes`
 - [x] Registered in `.claude/settings.json` as `system-map` MCP server (stdio transport)
 - [x] 14 unit tests covering all tools + error cases
 - [x] Cypher injection fix in `graph.py:search_nodes` (parameterized queries)
 
-**Phase 4 — Impact Analysis (planned):**
-- [ ] "What does X affect?" — trace downstream dependencies from any node
-- [ ] Blast radius visualization: highlight all nodes affected by a component failure
-- [ ] Integration with IC alerts: when a build fails, show propagation path on map
+**Phase 4 — Impact Analysis (done, frontend added 2026-07-10):**
+- [x] `get_impact(node_id, max_depth, direction)` — trace downstream/upstream via variable-length Cypher paths
+- [x] Blast radius: affected nodes grouped by depth and type with relationship chain
+- [x] Direction support: downstream (what does this affect?) and upstream (what affects this?)
+- [x] Depth-limited traversal (1-10 hops, default 5) with LIMIT 500 safety cap
+- [x] MCP tool: `get_map_impact(node_id, max_depth, direction)`
+- [x] API endpoint: `GET /api/map/impact/{node_id}?max_depth=5&direction=downstream`
+- [x] 3 unit tests (downstream, upstream, node not found)
+- [x] Frontend: "Downstream Impact" and "Upstream Deps" buttons in DetailPanel
+- [x] Blast radius visualization: source node red glow, affected nodes orange glow, edges highlighted
+- [x] Non-affected nodes dimmed to 12% opacity with "Clear" button to reset
 
-**Phase 5 — Auto-seed from Cluster (planned):**
-- [ ] Populate Neo4j graph directly from live Konflux cluster CRDs
-- [ ] Discover Components, Applications, Pipelines, IntegrationTestScenarios from cluster
-- [ ] Diff against existing graph to detect drift (new components, removed pipelines)
+**Phase 5 — Auto-seed from Cluster (done):**
+- [x] `ClusterSeeder`: populates Neo4j from live IC API data (applications, components)
+- [x] HTTP session pooling with `requests.Session` for connection reuse
+- [x] Nudge chain inference from component naming conventions (comp → bundle → FBC fragment)
+- [x] Drift detection: compare graph nodes vs cluster components (stale + missing)
+- [x] MCP tools: `seed_map_from_cluster(application)`, `get_map_drift()`
+- [x] API endpoints: `POST /api/map/seed/cluster`, `GET /api/map/drift`
+- [x] 12 unit tests (health, seed apps/components, string lists, nudge chains, drift, seed_all)
 
-**Phase 6 — Change Detection Feed (planned):**
-- [ ] Track graph changes over time (new nodes, removed edges, status transitions)
-- [ ] Timeline view: "what changed this week in the infrastructure?"
-- [ ] Notifications on topology drift (new component appeared, pipeline removed)
+**Phase 6 — Change Detection Feed (done):**
+- [x] `ChangeTracker`: records node/edge additions, removals, and property modifications
+- [x] Snapshot-based diff: compare current graph state against stored snapshots
+- [x] Timezone-safe datetime filtering with `datetime.fromisoformat()` comparison
+- [x] Filter by entity_id (partial match), change_type (added/removed/modified), date range
+- [x] Property diff: detects changed keys between old and new node properties
+- [x] MCP tool: `get_map_changes(since, entity_id, change_type, limit)`
+- [x] API endpoint: `GET /api/map/changes?since=...&entity_id=...&change_type=...`
+- [x] Tests for snapshot diff, property change detection, filtering
 
-**Phase 7 — Onboarding Tracker Visual (planned):**
-- [ ] Overlay onboarding progress on Component nodes (score, blocked steps)
-- [ ] Color-coded by onboarding status: complete=green, partial=yellow, incomplete=red
-- [ ] Link to `ic onboard describe <comp>` for details
+**Phase 7 — Onboarding Tracker Visual (done):**
+- [x] Overlay onboarding progress on Component nodes (score badge with badge_color)
+- [x] Color-coded by onboarding status: complete=green, partial=yellow, incomplete=red
+- [x] Full onboarding detail section in DetailPanel (check steps, score bar, Jira link)
+- [x] Data flow: `useLiveStatus` → `onboardingMap` → `App.jsx` merges into node data → `MapNode.jsx` renders badge
 
-**Phase 8 — IC CLI Link (planned):**
-- [ ] Deep-link from `ic describe component <comp>` to System Map node
-- [ ] URL format: `http://localhost:3001/?highlight=comp-<name>`
-- [ ] Quick keyboard shortcut in IC CLI to open map view
+**Phase 8 — IC CLI Link (done 2026-07-10):**
+- [x] `SYSTEM_MAP_URL` env var in `shared_config.py` (default `http://localhost:3001`)
+- [x] `make_system_map_url(component_name)` helper function
+- [x] `ic describe component <comp>` prints `System Map:` deep-link URL
+- [x] Frontend parses `?highlight=comp-<name>` URL param on mount
+- [x] Auto-selects node, opens DetailPanel, dims non-matching nodes to 0.35 opacity
+- [x] One-shot highlight via `useRef` gate (doesn't re-trigger on live-status merges)
+- [x] 7 unit tests covering URL generation edge cases
 
-**Phase 9 — PR & Resolution Event Feed (planned):**
-- [ ] Surface nudge/fix/Renovate PR events in the activity feed (data already in IC)
-- [ ] Event types: "nudge PR created for comp-X", "fix PR merged", "Renovate PR opened"
-- [ ] These are key resolution signals — shows whether a failure is being actively fixed or stale
-- [ ] Pull from IC's component PR data (`get_component_prs`) and triage tracking
-- [ ] Color-code: open PR = blue (in progress), merged = green (resolved), stale = yellow (needs attention)
+**Phase 9 — PR & Resolution Event Feed (done 2026-07-10):**
+- [x] New `get_recent_for_application(app, days, limit)` in `ResolutionAttemptRepository`
+- [x] New IC API endpoint: `GET /applications/{app}/pr-activity` (aggregated, not N+1)
+- [x] New `ICClient.get_pr_activity()` method in Map backend
+- [x] `LiveStatusService._build_pr_events()` builds PR events from IC data
+- [x] PR events merged into main activity feed, sorted by timestamp, capped at 30
+- [x] Three new severity types with distinct colors:
+  - `pr_open` — blue (#2563eb) — PR opened, fix in progress
+  - `pr_merged` — green (#059669) — PR merged (and optionally verified)
+  - `pr_stale` — amber (#d97706) — PR merged but fix verification failed
+- [x] `ActivityFeed.jsx` updated with new severity styles
+- [x] 6 unit tests covering PR event severity logic and integration
 
-**Phase 10 — Conversational Agent (planned):**
+**Phase 10 — Conversational Agent (10a done 2026-07-10):**
 
 Goal: embedded AI assistant in the Map UI that answers questions, diagnoses problems, teaches concepts, and suggests improvements — using the graph topology + IC data together.
 
-*10a — Graph Explainer (no IC dependency):*
-- [ ] Chat panel in React UI with node-aware context (selected node, neighbors, path)
-- [ ] Explain nodes, relationships, and paths in natural language
-- [ ] "What does this pipeline do?" / "How are these two connected?" / "What is PaC?"
-- [ ] Backend endpoint proxying to Claude API with graph context as system prompt
+*10a — Graph Explainer (done 2026-07-10):*
+- [x] `ChatPanel.jsx` — collapsible floating panel (bottom-left), message history, loading state
+- [x] `chat_service.py` — ChatService class using existing `LLMProvider` abstraction (Vertex AI / Anthropic)
+- [x] `POST /api/map/chat` endpoint — receives message + optional node_id, builds graph context
+- [x] Context includes: selected node props, neighbors (capped at 15), gaps, impact analysis, graph stats
+- [x] System prompt tuned for RHOAI CI/CD domain, 2-4 sentence answers
+- [x] Node-aware placeholder: "Ask about comp-X..." when a node is selected
+- [x] Error display for LLM unavailability (503 when no provider configured)
+- [x] 11 unit tests covering context building, chat service, and route
 
-*10b — Contextual Diagnostics (uses IC via MCP):*
-- [ ] "Why is this node red?" → calls IC `get_failure()` + adds graph neighbors/impact context
-- [ ] "What's blocking the release?" → combines readiness + conforma + build failures + triage
-- [ ] "Is anyone working on this?" → crosses triage items + open PRs + Jira status
-- [ ] Correlate multiple failures: "These 5 reds share the same upstream cause"
+*10b — Contextual Diagnostics (done 2026-07-10):*
+- [x] "Why is this node red?" → fetches IC `get_failure()` + AI analysis + graph context
+- [x] "What's blocking the release?" → combines readiness checks + blockers + triage
+- [x] "Is anyone working on this?" → triage items filtered by component with Jira keys
+- [x] ICClient expanded: `get_failure()`, `get_analysis()`, `get_violation()`, `get_triage()`, `get_blockers()`
+- [x] `_fetch_ic_context()` routes by node type: comp-* → failure/analysis/violation/triage, app-* → readiness/blockers/triage
+- [x] `_build_ic_context()` formats IC data into structured sections for LLM: [Build Failure], [AI Analysis], [Conforma Violation], [Active Triage], [Release Readiness], [Jira Blockers]
+- [x] System prompt updated for diagnostic queries (cite errors, suggest next steps)
+- [x] IC data always fetched when node_id provided (best-effort, degrades gracefully)
+- [x] 25 tests covering IC context building, fetch routing, and integration
 
-*10c — Panoramic View (aggregates IC data):*
-- [ ] "Summarize the current state in one sentence" → overall health synthesis
-- [ ] "What changed since yesterday?" → status diff, new failures, merged fixes
-- [ ] "Are we better or worse than last week?" → trend analysis from IC history
-- [ ] Daily briefing generation: proactive summary of what needs attention
+*10c — Panoramic View (done 2026-07-10):*
+- [x] App-wide IC context when no node selected: alerts, triage summary, daily stats, resolved, readiness, nightly, schedule, health warnings, stale components
+- [x] `_fetch_panoramic_context()` — 9 parallel IC calls via ThreadPoolExecutor
+- [x] `_build_panoramic_context()` — formats into [Current State], [Failure Trend], [Recent Resolutions], [Release Status], [Nightly Build Health], [Health Warnings], [Stale Components]
+- [x] System prompt updated for panoramic queries (trends, deadlines, state summaries)
+- [x] Contextual suggestion chips: panoramic set when no node, node-specific when selected
+- [x] 8 new ICClient methods: get_stats, get_daily_stats, get_resolved, get_nightly, get_schedule, get_health_warnings, get_stale, get_triage_summary
+- [x] 37 tests (25 existing + 12 new for panoramic context, fetch, and integration)
 
-*10d — Interactive Onboarding (teaching mode):*
-- [ ] Guided tour of RHOAI CI/CD: highlights nodes while explaining concepts
-- [ ] "Explain Conforma" → points to ECPolicy nodes, traces validation path to release
-- [ ] "How does nudging work?" → highlights NUDGES edges, walks through the flow
-- [ ] Adaptive: detects what user already knows from questions asked
+*10d — Interactive Onboarding (teaching mode) — done:*
+- [x] Guided tour of RHOAI CI/CD: highlights nodes while explaining concepts
+- [x] "Explain Conforma" → points to ECPolicy nodes, traces validation path to release
+- [x] "How does nudging work?" → highlights NUDGES edges, walks through the flow
+- [x] 5 concept paths: Conforma, Nudging, Build Pipeline, Release Lifecycle, Dependency Management
+- [x] Concept detection via regex trigger matching in chat messages
+- [x] Chat response returns `highlight` field with node IDs, edge IDs, glow color, dim flag
+- [x] Frontend applies concept highlights using same pattern as impact analysis
+- [x] "Show on map" button on assistant messages for re-applying concept highlights
+- [x] Dynamic edge expansion for NUDGES (includes all component nudge chains from live graph)
+- [x] Beginner-friendly narratives: technical but every term explained inline
+- [ ] Adaptive: detects what user already knows from questions asked (deferred to future iteration)
 
 *10e — Guided Actions + Improvement Suggestions:*
 - [ ] Suggest rebuilds for transient failures with "do it?" confirmation → `trigger_rebuild`
