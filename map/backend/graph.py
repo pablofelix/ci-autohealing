@@ -237,3 +237,70 @@ def get_gaps():
             })
 
     return gaps
+
+
+def get_impact(node_id: str, max_depth: int = 5, direction: str = "downstream"):
+    """Trace impact from a node through the graph.
+
+    Args:
+        node_id: Starting node ID.
+        max_depth: Maximum hops to trace (1-10, default 5).
+        direction: 'downstream' follows outgoing edges, 'upstream' follows incoming.
+    """
+    max_depth = max(1, min(max_depth, 10))
+
+    if direction == "upstream":
+        cypher = (
+            "MATCH (start {id: $id}) "
+            "MATCH path = (affected)-[r*1.." + str(max_depth) + "]->(start) "
+            "WITH affected, nodes(path) AS path_nodes, relationships(path) AS path_rels, length(path) AS depth "
+            "RETURN DISTINCT affected.id AS id, labels(affected)[0] AS type, "
+            "affected.name AS name, depth, "
+            "[r IN path_rels | type(r)] AS via_relationships "
+            "ORDER BY depth, type, name"
+        )
+    else:
+        cypher = (
+            "MATCH (start {id: $id}) "
+            "MATCH path = (start)-[r*1.." + str(max_depth) + "]->(affected) "
+            "WITH affected, nodes(path) AS path_nodes, relationships(path) AS path_rels, length(path) AS depth "
+            "RETURN DISTINCT affected.id AS id, labels(affected)[0] AS type, "
+            "affected.name AS name, depth, "
+            "[r IN path_rels | type(r)] AS via_relationships "
+            "ORDER BY depth, type, name"
+        )
+
+    with session() as s:
+        # Check start node exists
+        check = s.run("MATCH (n {id: $id}) RETURN n.id AS id", id=node_id)
+        if not check.single():
+            return None
+
+        result = s.run(cypher, id=node_id)
+        records = [dict(r) for r in result]
+
+    # Group by depth
+    by_depth = {}
+    for r in records:
+        d = r["depth"]
+        by_depth.setdefault(d, []).append({
+            "id": r["id"],
+            "type": r["type"],
+            "name": r["name"],
+            "via": r["via_relationships"],
+        })
+
+    # Group by type
+    by_type = {}
+    for r in records:
+        by_type.setdefault(r["type"], []).append(r["id"])
+
+    return {
+        "source": node_id,
+        "direction": direction,
+        "max_depth": max_depth,
+        "total_affected": len(records),
+        "by_depth": by_depth,
+        "by_type": {k: len(v) for k, v in by_type.items()},
+        "affected": [{"id": r["id"], "type": r["type"], "name": r["name"], "depth": r["depth"]} for r in records],
+    }

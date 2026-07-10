@@ -184,6 +184,51 @@ class TestFindMapPath:
         assert "error" in result
 
 
+class TestGetMapImpact:
+    @patch("map.mcp_server.tools._graph")
+    def test_impact_returns_result(self, mock_graph_fn):
+        g = MagicMock()
+        g.get_impact.return_value = {
+            "source": "comp-kserve", "direction": "downstream",
+            "max_depth": 5, "total_affected": 2,
+            "by_depth": {}, "by_type": {"Component": 2}, "affected": [],
+        }
+        mock_graph_fn.return_value = g
+
+        from map.mcp_server.tools import get_map_impact
+        result = run_async(get_map_impact("comp-kserve"))
+
+        assert result["total_affected"] == 2
+        g.get_impact.assert_called_once_with("comp-kserve", max_depth=5, direction="downstream")
+
+    @patch("map.mcp_server.tools._graph")
+    def test_impact_node_not_found(self, mock_graph_fn):
+        g = MagicMock()
+        g.get_impact.return_value = None
+        mock_graph_fn.return_value = g
+
+        from map.mcp_server.tools import get_map_impact
+        result = run_async(get_map_impact("nonexistent"))
+
+        assert "error" in result
+
+    @patch("map.mcp_server.tools._graph")
+    def test_impact_upstream_direction(self, mock_graph_fn):
+        g = MagicMock()
+        g.get_impact.return_value = {
+            "source": "comp-fbc", "direction": "upstream",
+            "max_depth": 3, "total_affected": 1,
+            "by_depth": {}, "by_type": {"Component": 1}, "affected": [],
+        }
+        mock_graph_fn.return_value = g
+
+        from map.mcp_server.tools import get_map_impact
+        result = run_async(get_map_impact("comp-fbc", max_depth=3, direction="upstream"))
+
+        assert result["direction"] == "upstream"
+        g.get_impact.assert_called_once_with("comp-fbc", max_depth=3, direction="upstream")
+
+
 class TestGetMapGaps:
     @patch("map.mcp_server.tools._graph")
     def test_returns_gaps_with_counts(self, mock_graph):

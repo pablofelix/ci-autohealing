@@ -108,6 +108,15 @@ def shortest_path(from_id: str, to_id: str):
     return path
 
 
+@router.get("/impact/{node_id}")
+def get_impact_analysis(node_id: str, max_depth: int = 5, direction: str = "downstream"):
+    """Trace downstream or upstream impact from a node."""
+    result = graph.get_impact(node_id, max_depth=max_depth, direction=direction)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
+    return result
+
+
 @router.get("/stats")
 def stats():
     """Node and edge counts by type."""
@@ -126,6 +135,62 @@ def gaps():
         "count": len(all_gaps),
         "by_type": {k: len(v) for k, v in by_type.items()},
     }
+
+
+@router.post("/seed/cluster")
+def seed_from_cluster(application: str = Query("rhoai-v3-5", description="Application to seed")):
+    """Trigger auto-seed from live cluster via IC API."""
+    from map.cluster_seeder import ClusterSeeder
+    try:
+        driver = graph.get_driver()
+        seeder = ClusterSeeder(driver)
+        result = seeder.seed_all(application)
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/drift")
+def get_drift():
+    """Detect drift between graph and cluster."""
+    from map.cluster_seeder import ClusterSeeder
+    try:
+        driver = graph.get_driver()
+        seeder = ClusterSeeder(driver)
+        return seeder.detect_drift()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/changes")
+def get_graph_changes(
+    since: str = Query(None, description="ISO datetime to filter from"),
+    entity_id: str = Query(None, description="Filter by entity ID (partial match)"),
+    change_type: str = Query(None, description="Filter: added, removed, modified"),
+    limit: int = Query(100, description="Max results"),
+):
+    """Get graph change history."""
+    from map.change_tracker import ChangeTracker
+    try:
+        driver = graph.get_driver()
+        tracker = ChangeTracker(driver)  # memory-only for now
+
+        since_dt = None
+        if since:
+            from datetime import datetime
+            since_dt = datetime.fromisoformat(since)
+
+        changes = tracker.get_changes(
+            since=since_dt, entity_id=entity_id,
+            change_type=change_type, limit=limit,
+        )
+        return {"changes": changes, "count": len(changes)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/live-status")

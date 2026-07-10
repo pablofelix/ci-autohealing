@@ -59,8 +59,9 @@ def mock_graph():
             "nodes": [{"id": "app-rhoai-v3-5", "type": "Application", "name": "rhoai-v3-5"}, {"id": "comp-odh-dashboard", "type": "Component", "name": "odh-dashboard"}],
             "edges": [{"source": "app-rhoai-v3-5", "target": "comp-odh-dashboard", "label": "CONTAINS"}],
         }),
+        patch("map.backend.graph.get_impact") as mock_get_impact,
     ):
-        yield
+        yield {"get_impact": mock_get_impact}
 
 
 class TestGraphEndpoint:
@@ -178,6 +179,70 @@ class TestGapsEndpoint:
         assert "missing_pipeline" in data["by_type"]
 
 
+class TestSeedClusterEndpoint:
+    def test_seed_success(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.seed_all.return_value = {
+                "seeded": True, "applications": 1, "components": 10,
+                "nudge_relationships": 5, "timestamp": "2026-07-10T00:00:00Z",
+            }
+            resp = client.post("/api/map/seed/cluster?application=rhoai-v3-5")
+            assert resp.status_code == 200
+            assert resp.json()["seeded"] is True
+
+    def test_seed_ic_down(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.seed_all.return_value = {"error": "IC API not available", "seeded": False}
+            resp = client.post("/api/map/seed/cluster")
+            assert resp.status_code == 503
+
+    def test_seed_internal_error(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.seed_all.side_effect = RuntimeError("boom")
+            resp = client.post("/api/map/seed/cluster")
+            assert resp.status_code == 500
+
+
+class TestDriftEndpoint:
+    def test_drift_detected(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.detect_drift.return_value = {
+                "drift_detected": True, "stale": ["comp-old"], "missing": [],
+                "graph_count": 10, "cluster_count": 9, "in_sync": 9,
+            }
+            resp = client.get("/api/map/drift")
+            assert resp.status_code == 200
+            assert resp.json()["drift_detected"] is True
+
+    def test_drift_no_drift(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.detect_drift.return_value = {
+                "drift_detected": False, "stale": [], "missing": [],
+                "graph_count": 10, "cluster_count": 10, "in_sync": 10,
+            }
+            resp = client.get("/api/map/drift")
+            assert resp.status_code == 200
+            assert resp.json()["drift_detected"] is False
+
+    def test_drift_error(self, client):
+        with patch("map.backend.routes.graph.get_driver") as mock_driver, \
+             patch("map.cluster_seeder.ClusterSeeder") as MockSeeder:
+            mock_instance = MockSeeder.return_value
+            mock_instance.detect_drift.side_effect = RuntimeError("boom")
+            resp = client.get("/api/map/drift")
+            assert resp.status_code == 500
+
+
 class TestHealthEndpoint:
     def test_healthy(self, client):
         resp = client.get("/api/map/health")
@@ -191,3 +256,86 @@ class TestHealthEndpoint:
             assert resp.status_code == 200
             data = resp.json()
             assert data["status"] == "degraded"
+
+
+class TestImpactEndpoint:
+    def test_impact_downstream(self, client, mock_graph):
+        mock_graph["get_impact"].return_value = {
+            "source": "comp-kserve",
+            "direction": "downstream",
+            "max_depth": 5,
+            "total_affected": 2,
+            "by_depth": {1: [{"id": "comp-kserve-bundle", "type": "Component", "name": "kserve-bundle", "via": ["NUDGES"]}],
+                         2: [{"id": "comp-fbc-fragment", "type": "Component", "name": "fbc-fragment", "via": ["NUDGES", "NUDGES"]}]},
+            "by_type": {"Component": 2},
+            "affected": [
+                {"id": "comp-kserve-bundle", "type": "Component", "name": "kserve-bundle", "depth": 1},
+                {"id": "comp-fbc-fragment", "type": "Component", "name": "fbc-fragment", "depth": 2},
+            ],
+        }
+        resp = client.get("/api/map/impact/comp-kserve")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_affected"] == 2
+        assert data["direction"] == "downstream"
+
+    def test_impact_upstream(self, client, mock_graph):
+        mock_graph["get_impact"].return_value = {
+            "source": "comp-fbc-fragment",
+            "direction": "upstream",
+            "max_depth": 5,
+            "total_affected": 1,
+            "by_depth": {1: [{"id": "comp-kserve-bundle", "type": "Component", "name": "kserve-bundle", "via": ["NUDGES"]}]},
+            "by_type": {"Component": 1},
+            "affected": [{"id": "comp-kserve-bundle", "type": "Component", "name": "kserve-bundle", "depth": 1}],
+        }
+        resp = client.get("/api/map/impact/comp-fbc-fragment?direction=upstream")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["direction"] == "upstream"
+
+    def test_impact_custom_depth(self, client, mock_graph):
+        mock_graph["get_impact"].return_value = {
+            "source": "comp-kserve", "direction": "downstream", "max_depth": 2,
+            "total_affected": 1, "by_depth": {}, "by_type": {}, "affected": [],
+        }
+        resp = client.get("/api/map/impact/comp-kserve?max_depth=2")
+        assert resp.status_code == 200
+        mock_graph["get_impact"].assert_called_once_with("comp-kserve", max_depth=2, direction="downstream")
+
+    def test_impact_node_not_found(self, client, mock_graph):
+        mock_graph["get_impact"].return_value = None
+        resp = client.get("/api/map/impact/nonexistent")
+        assert resp.status_code == 404
+
+    def test_impact_no_affected(self, client, mock_graph):
+        mock_graph["get_impact"].return_value = {
+            "source": "leaf-node", "direction": "downstream", "max_depth": 5,
+            "total_affected": 0, "by_depth": {}, "by_type": {}, "affected": [],
+        }
+        resp = client.get("/api/map/impact/leaf-node")
+        assert resp.status_code == 200
+        assert resp.json()["total_affected"] == 0
+
+
+class TestChangesEndpoint:
+    @patch("map.backend.routes.graph.get_driver")
+    def test_get_changes_empty(self, mock_driver, client):
+        with patch("map.change_tracker.ChangeTracker") as MockTracker:
+            mock_instance = MockTracker.return_value
+            mock_instance.get_changes.return_value = []
+            resp = client.get("/api/map/changes")
+            assert resp.status_code == 200
+            assert resp.json()["count"] == 0
+
+    @patch("map.backend.routes.graph.get_driver")
+    def test_get_changes_with_filters(self, mock_driver, client):
+        with patch("map.change_tracker.ChangeTracker") as MockTracker:
+            mock_instance = MockTracker.return_value
+            mock_instance.get_changes.return_value = [
+                {"change_type": "added", "entity_id": "comp-x",
+                 "timestamp": "2026-07-10T00:00:00"}
+            ]
+            resp = client.get("/api/map/changes?change_type=added&entity_id=comp-x&limit=10")
+            assert resp.status_code == 200
+            assert resp.json()["count"] == 1
