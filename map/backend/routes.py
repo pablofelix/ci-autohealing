@@ -3,6 +3,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from . import graph
 
@@ -32,16 +33,13 @@ def full_graph():
     """Full graph (nodes + edges) in React Flow format."""
     raw_nodes = graph.get_all_nodes()
     raw_edges = graph.get_all_edges()
-    gaps = graph.get_gaps()
-
-    gap_map: dict[str, list] = {}
-    for g in gaps:
-        gap_map.setdefault(g["node_id"], []).append(g)
+    gap_map = graph.build_gap_map(graph.get_gaps())
 
     rf_nodes = []
     for n in raw_nodes:
         props = n.get("props", {})
         node_gaps = gap_map.get(n["id"], [])
+        filtered = graph.filter_props(props)
         rf_nodes.append({
             "id": n["id"],
             "type": n["type"],
@@ -51,7 +49,7 @@ def full_graph():
                 "nodeType": n["type"],
                 "gaps": node_gaps,
                 "hasGaps": len(node_gaps) > 0,
-                **{k: v for k, v in props.items() if k not in ("id", "name", "description", "_source", "_seeded_at")},
+                **{k: v for k, v in filtered.items() if k not in ("id", "name", "description")},
             },
             "position": {"x": 0, "y": 0},
         })
@@ -70,9 +68,6 @@ def full_graph():
     return {"nodes": rf_nodes, "edges": rf_edges}
 
 
-INTERNAL_PROPS = {"_source", "_seeded_at"}
-
-
 @router.get("/node/{node_id}")
 def node_detail(node_id: str):
     """Detailed view of a single node with its neighbors."""
@@ -81,7 +76,7 @@ def node_detail(node_id: str):
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
 
     if "props" in detail:
-        detail["props"] = {k: v for k, v in detail["props"].items() if k not in INTERNAL_PROPS}
+        detail["props"] = graph.filter_props(detail["props"])
 
     gaps = graph.get_gaps()
     node_gaps = [g for g in gaps if g["node_id"] == node_id]
@@ -140,7 +135,10 @@ def gaps():
 @router.post("/seed/cluster")
 def seed_from_cluster(application: str = Query("rhoai-v3-5", description="Application to seed")):
     """Trigger auto-seed from live cluster via IC API."""
-    from map.cluster_seeder import ClusterSeeder
+    try:
+        from cluster_seeder import ClusterSeeder
+    except ModuleNotFoundError:
+        from map.cluster_seeder import ClusterSeeder
     try:
         driver = graph.get_driver()
         seeder = ClusterSeeder(driver)
@@ -155,13 +153,16 @@ def seed_from_cluster(application: str = Query("rhoai-v3-5", description="Applic
 
 
 @router.get("/drift")
-def get_drift():
+def get_drift(application: str = Query("rhoai-v3-5", description="Application to check")):
     """Detect drift between graph and cluster."""
-    from map.cluster_seeder import ClusterSeeder
+    try:
+        from cluster_seeder import ClusterSeeder
+    except ModuleNotFoundError:
+        from map.cluster_seeder import ClusterSeeder
     try:
         driver = graph.get_driver()
         seeder = ClusterSeeder(driver)
-        return seeder.detect_drift()
+        return seeder.detect_drift(application=application)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -174,7 +175,10 @@ def get_graph_changes(
     limit: int = Query(100, description="Max results"),
 ):
     """Get graph change history."""
-    from map.change_tracker import ChangeTracker
+    try:
+        from change_tracker import ChangeTracker
+    except ModuleNotFoundError:
+        from map.change_tracker import ChangeTracker
     try:
         driver = graph.get_driver()
         tracker = ChangeTracker(driver)  # memory-only for now
@@ -209,3 +213,175 @@ def live_status(application: str = Query("rhoai-v3-5", description="Application 
             "ic_available": False,
             "last_updated": None,
         }
+
+
+@router.get("/concepts")
+def list_concepts():
+    """Available CI/CD concepts for interactive onboarding."""
+    from .concepts import list_concepts as _list_concepts
+    return {"concepts": _list_concepts()}
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    node_id: str | None = None
+
+
+@router.post("/chat")
+def chat(request: ChatRequest):
+    """Chat with the System Map assistant (Claude with graph + IC context)."""
+    from .chat_service import ChatService
+    from .concepts import detect_concept, get_highlight, get_concept_narrative, needs_dynamic_edges
+    try:
+        node_detail = None
+        impact = None
+        ic_data = {}
+        panoramic_data = {}
+        highlight = None
+        concept_narrative = None
+
+        concept_key = detect_concept(request.message) if not request.node_id else None
+
+        if concept_key:
+            rf_edges = None
+            if needs_dynamic_edges(concept_key):
+                all_edges = graph.get_all_edges()
+                rf_edges = [
+                    {
+                        "id": "{}-{}-{}".format(e["source"], e["label"], e["target"]),
+                        "source": e["source"],
+                        "target": e["target"],
+                        "label": e["label"],
+                    }
+                    for e in all_edges
+                ]
+            highlight = get_highlight(concept_key, rf_edges)
+            concept_narrative = get_concept_narrative(concept_key)
+
+        if request.node_id:
+            node_detail = graph.get_node_detail(request.node_id)
+            if node_detail and "props" in node_detail:
+                node_detail["props"] = graph.filter_props(node_detail["props"])
+            impact = graph.get_impact(request.node_id)
+            ic_data = _fetch_ic_context(request.node_id)
+        elif not concept_key:
+            panoramic_data = _fetch_panoramic_context(_DEFAULT_APP)
+
+        stats = graph.get_stats()
+        service = ChatService()
+        result = service.chat(
+            message=request.message,
+            node_detail=node_detail,
+            impact=impact,
+            graph_stats=stats,
+            ic_data=ic_data or None,
+            panoramic_data=panoramic_data or None,
+            concept_narrative=concept_narrative,
+        )
+
+        if result is None:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM not configured. Set LLM_PROVIDER or ANTHROPIC_API_KEY.",
+            )
+
+        if highlight:
+            result["highlight"] = highlight
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Chat failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+_DEFAULT_APP = "rhoai-v3-5"
+_ic_client = None
+
+
+def _get_ic_client():
+    global _ic_client
+    if _ic_client is None:
+        from .ic_client import ICClient
+        _ic_client = ICClient()
+    return _ic_client
+
+
+def _fetch_ic_context(node_id: str) -> dict:
+    """Fetch IC diagnostic data for a node (best-effort, never fails).
+
+    Calls are parallelized via ThreadPoolExecutor to minimize latency.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        client = _get_ic_client()
+        if not client.is_available():
+            return {}
+
+        app = _DEFAULT_APP
+        futures = {}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            if node_id.startswith("comp-"):
+                component = node_id[5:]
+                futures["failure"] = pool.submit(client.get_failure, component, app)
+                futures["analysis"] = pool.submit(client.get_analysis, component, app)
+                futures["violation"] = pool.submit(client.get_violation, component, app)
+                futures["triage"] = pool.submit(client.get_triage, app)
+            elif node_id.startswith("app-"):
+                futures["readiness"] = pool.submit(client.get_readiness, app)
+                futures["blockers"] = pool.submit(client.get_blockers, app)
+                futures["triage"] = pool.submit(client.get_triage, app)
+
+        data = {}
+        for key, future in futures.items():
+            result = future.result()
+            if result is not None:
+                data[key] = result
+
+        if node_id.startswith("comp-") and "triage" in data:
+            component = node_id[5:]
+            items = data["triage"] if isinstance(data["triage"], list) else data["triage"].get("items", [])
+            comp_items = [t for t in items if t.get("component") == component]
+            data["triage"] = comp_items if comp_items else None
+
+        return {k: v for k, v in data.items() if v is not None}
+    except Exception as exc:
+        logger.warning("IC context fetch failed for %s: %s", node_id, exc)
+        return {}
+
+
+def _fetch_panoramic_context(app: str) -> dict:
+    """Fetch app-wide IC data for panoramic queries (best-effort, never fails).
+
+    Fires 9 parallel calls for a comprehensive application overview.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        client = _get_ic_client()
+        if not client.is_available():
+            return {}
+
+        futures = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures["alerts"] = pool.submit(client.get_alerts, app)
+            futures["triage_summary"] = pool.submit(client.get_triage_summary, app)
+            futures["daily_stats"] = pool.submit(client.get_daily_stats, app, 7)
+            futures["resolved"] = pool.submit(client.get_resolved, app, 7)
+            futures["readiness"] = pool.submit(client.get_readiness, app)
+            futures["nightly"] = pool.submit(client.get_nightly, app)
+            futures["schedule"] = pool.submit(client.get_schedule, app)
+            futures["health_warnings"] = pool.submit(client.get_health_warnings, app)
+            futures["stale"] = pool.submit(client.get_stale, app)
+
+        data = {}
+        for key, future in futures.items():
+            result = future.result()
+            if result is not None:
+                data[key] = result
+
+        return data
+    except Exception as exc:
+        logger.warning("Panoramic context fetch failed: %s", exc)
+        return {}

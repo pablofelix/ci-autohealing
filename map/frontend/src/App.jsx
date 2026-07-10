@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -15,6 +15,7 @@ import MapNode from './nodes/MapNode';
 import DetailPanel from './DetailPanel';
 import Toolbar from './Toolbar';
 import ActivityFeed from './ActivityFeed';
+import ChatPanel from './ChatPanel';
 import { useLiveStatus } from './hooks/useLiveStatus';
 
 const nodeTypes = { default: MapNode };
@@ -41,25 +42,53 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const { statusMap, activity, icAvailable } = useLiveStatus('rhoai-v3-5');
+  const { statusMap, onboardingMap, activity, icAvailable } = useLiveStatus('rhoai-v3-5');
+
+  // Parse ?highlight= URL param for deep-linking from CLI
+  const [highlightId] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('highlight') || null;
+  });
 
   // Fetch graph data on mount
   useEffect(() => {
     loadGraph();
   }, []);
 
-  // Merge live status into nodes when statusMap updates
+  // Auto-select highlighted node from URL param once graph loads (fire once)
+  const highlightApplied = useRef(false);
   useEffect(() => {
-    if (statusMap.size === 0) return;
+    if (!highlightId || allNodes.length === 0 || highlightApplied.current) return;
+    const match = allNodes.find((n) => n.id === highlightId);
+    if (match) {
+      highlightApplied.current = true;
+      setSelectedNode(match.id);
+      setNodes((nds) =>
+        nds.map((n) => ({
+          ...n,
+          selected: n.id === match.id,
+          style: n.id === match.id ? { opacity: 1 } : { opacity: 0.35 },
+        }))
+      );
+    }
+  }, [highlightId, allNodes, setNodes]);
+
+  // Merge live status and onboarding into nodes
+  useEffect(() => {
+    if (statusMap.size === 0 && onboardingMap.size === 0) return;
     setNodes((prev) => {
       if (prev.length === 0) return prev;
       return prev.map((n) => {
         const live = statusMap.get(n.id);
-        if (!live || !live.border_color) return n;
-        return { ...n, data: { ...n.data, liveStatus: live } };
+        const onboarding = onboardingMap.get(n.id);
+        if (!live && !onboarding) return n;
+        const data = { ...n.data };
+        if (live && live.border_color) data.liveStatus = live;
+        if (onboarding) data.onboarding = onboarding;
+        return { ...n, data };
       });
     });
-  }, [statusMap, setNodes]);
+  }, [statusMap, onboardingMap, setNodes]);
 
   async function loadGraph() {
     setLoading(true);
@@ -167,7 +196,6 @@ export default function App() {
       setSelectedNode(nodeId);
       const node = allNodes.find((n) => n.id === nodeId);
       if (node) {
-        // React Flow fitView would need ref — for now just select
         setNodes((nds) =>
           nds.map((n) => ({
             ...n,
@@ -177,6 +205,75 @@ export default function App() {
       }
     },
     [allNodes, setNodes]
+  );
+
+  const handleImpact = useCallback(
+    async (nodeId, direction = 'downstream') => {
+      try {
+        const data = await api.impact(nodeId, { direction });
+        const affectedIds = new Set(data.affected.map((a) => a.id));
+        affectedIds.add(nodeId);
+
+        setNodes(
+          allNodes.map((n) => ({
+            ...n,
+            style: affectedIds.has(n.id)
+              ? { opacity: 1, boxShadow: n.id === nodeId ? '0 0 0 3px #dc2626' : '0 0 0 2px #f97316' }
+              : { opacity: 0.12 },
+          }))
+        );
+        setEdges(
+          allEdges.map((e) => ({
+            ...e,
+            style:
+              affectedIds.has(e.source) && affectedIds.has(e.target)
+                ? { opacity: 1, stroke: '#f97316', strokeWidth: 2 }
+                : { opacity: 0.05 },
+          }))
+        );
+      } catch {
+        // keep current view on impact error
+      }
+    },
+    [allNodes, allEdges, setNodes, setEdges]
+  );
+
+  const clearHighlight = useCallback(() => {
+    setNodes(allNodes.map((n) => ({ ...n, style: undefined })));
+    setEdges(allEdges.map((e) => ({ ...e, style: undefined })));
+  }, [allNodes, allEdges, setNodes, setEdges]);
+
+  const handleChatHighlight = useCallback(
+    (highlight) => {
+      if (!highlight) {
+        clearHighlight();
+        return;
+      }
+      const nodeSet = new Set(highlight.nodes || []);
+      const edgeSet = new Set(highlight.edges || []);
+      const glow = highlight.glow_color || '#f97316';
+
+      setNodes(
+        allNodes.map((n) => ({
+          ...n,
+          style: nodeSet.has(n.id)
+            ? { opacity: 1, boxShadow: `0 0 0 2px ${glow}` }
+            : highlight.dim_others !== false
+            ? { opacity: 0.12 }
+            : { opacity: 1 },
+        }))
+      );
+      setEdges(
+        allEdges.map((e) => ({
+          ...e,
+          style:
+            edgeSet.has(e.id) || (nodeSet.has(e.source) && nodeSet.has(e.target))
+              ? { opacity: 1, stroke: glow, strokeWidth: 2 }
+              : { opacity: 0.05 },
+        }))
+      );
+    },
+    [allNodes, allEdges, setNodes, setEdges, clearHighlight]
   );
 
   if (loading) {
@@ -258,9 +355,13 @@ export default function App() {
         nodeId={selectedNode}
         onClose={() => setSelectedNode(null)}
         onNavigate={handleNavigate}
+        onboardingMap={onboardingMap}
+        onImpact={handleImpact}
+        onClearHighlight={clearHighlight}
       />
 
       <ActivityFeed activity={activity} icAvailable={icAvailable} />
+      <ChatPanel selectedNodeId={selectedNode} onHighlight={handleChatHighlight} />
     </div>
   );
 }
