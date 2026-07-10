@@ -288,6 +288,16 @@ def chat(request: ChatRequest):
         if highlight:
             result["highlight"] = highlight
 
+        from .actions import detect_actions
+        actions = detect_actions(
+            ic_data=ic_data or None,
+            panoramic_data=panoramic_data or None,
+            node_id=request.node_id,
+            application=_DEFAULT_APP,
+        )
+        if actions:
+            result["actions"] = actions
+
         return result
     except HTTPException:
         raise
@@ -343,7 +353,10 @@ def _fetch_ic_context(node_id: str) -> dict:
         if node_id.startswith("comp-") and "triage" in data:
             component = node_id[5:]
             items = data["triage"] if isinstance(data["triage"], list) else data["triage"].get("items", [])
-            comp_items = [t for t in items if t.get("component") == component]
+            comp_items = [
+                t for t in items
+                if component == t.get("component") or component in t.get("components", [])
+            ]
             data["triage"] = comp_items if comp_items else None
 
         return {k: v for k, v in data.items() if v is not None}
@@ -385,3 +398,55 @@ def _fetch_panoramic_context(app: str) -> dict:
     except Exception as exc:
         logger.warning("Panoramic context fetch failed: %s", exc)
         return {}
+
+
+# --- Action execution endpoints -----------------------------------------
+
+class RebuildAction(BaseModel):
+    component: str = Field(min_length=1)
+    application: str = Field(default="rhoai-v3-5")
+
+
+class TriageAction(BaseModel):
+    component: str = Field(min_length=1)
+    application: str = Field(default="rhoai-v3-5")
+    root_cause: str = ""
+    failed_step: str = ""
+    notes: str = ""
+
+
+@router.post("/actions/rebuild")
+def execute_rebuild(req: RebuildAction):
+    """Trigger a component rebuild via IC API (proxied to K8s)."""
+    client = _get_ic_client()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="IC API unavailable")
+
+    result = client.trigger_rebuild(req.component, req.application)
+    if result is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Rebuild failed for {req.component}",
+        )
+    return result
+
+
+@router.post("/actions/triage")
+def execute_triage(req: TriageAction):
+    """Create a triage item via IC API."""
+    client = _get_ic_client()
+    if not client.is_available():
+        raise HTTPException(status_code=503, detail="IC API unavailable")
+
+    result = client.create_triage(req.application, {
+        "component": req.component,
+        "root_cause": req.root_cause,
+        "failed_step": req.failed_step,
+        "notes": req.notes,
+    })
+    if result is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Triage creation failed for {req.component}",
+        )
+    return result

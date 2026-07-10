@@ -821,16 +821,32 @@ Goal: embedded AI assistant in the Map UI that answers questions, diagnoses prob
 - [ ] Adaptive: detects what user already knows from questions asked (deferred to future iteration)
 
 *10e — Guided Actions + Improvement Suggestions:*
-- [ ] Suggest rebuilds for transient failures with "do it?" confirmation → `trigger_rebuild`
-- [ ] Suggest triage/Jira creation with pre-filled context from graph + IC diagnosis
-- [ ] **Config improvement suggestions** from graph + IC cross-analysis:
+- [x] Suggest rebuilds for transient failures with "do it?" confirmation → `trigger_rebuild`
+- [x] Suggest triage/Jira creation with pre-filled context from graph + IC diagnosis
+- [x] **Config improvement suggestions** from graph + IC cross-analysis:
   - Graph gaps → "This component has no pipeline linked, want me to fix it?"
   - Recurring failures → "This fails 5x/week by the same cause — suggest auto-rebuild rule"
   - Config drift → "nudging.yaml references 3 components that no longer exist"
-  - Release prep → "4 days to freeze, 3 exceptions expiring — here's a prioritized action plan"
+  - [x] Release prep → "4 days to freeze, 3 exceptions expiring — here's a prioritized action plan"
   - Pipeline migration → "8 components still on deprecated docker-build, here's the migration"
   - Onboarding gaps → "These components always stall on the same steps: webhook + renovate"
-- [ ] All actions require user confirmation — never auto-execute
+- [x] All actions require user confirmation — never auto-execute
+- [x] Stale component rebuild suggestions from panoramic IC data
+- [x] Health warnings surfaced as improvement suggestions
+- [x] IC API rebuild endpoint (POST /api/v1/applications/{app}/rebuild/{component})
+- [x] Map backend action proxy endpoints (POST /api/map/actions/rebuild, /actions/triage)
+- [x] Two-click confirmation UX (click → confirm → execute) with cancel option
+
+**Phase 10f — UI Quality Fixes (pending):**
+
+Reported during triage meeting verification on 2026-07-10:
+
+- [ ] "Show on map" link navigation: concept highlight links in chat messages don't navigate to the correct node; user clicks but nothing useful happens
+- [ ] Link formatting: links lack color, styling, or hover effects — hard to identify as interactive elements
+- [ ] Filter relationship cleanup: filtering by ECPOLICY (or other type) hides the filtered nodes but leaves their edges visible, cluttering the graph
+- [ ] Activity feed relevance: activity feed items don't surface actionable information — need severity-based filtering or summarization
+- [ ] Issues detected count inflation: "235 issues detected" includes many non-issues (info-level warnings, resolved items) — needs filtering to show only real issues
+- [ ] MCP server stale process: long-running Claude sessions accumulate stale MCP server processes; after code changes, the stale process keeps old imports in memory (e.g. `from utils.conforma_utils` after `src/utils/` was deleted). Fixed by killing stale process, but needs preventive restart mechanism
 
 **Phase 11 — Resolution Visualization (planned):**
 - [ ] Resolution timeline component showing IC fix workflow steps
@@ -949,6 +965,12 @@ Goal: shift from reactive failure detection to proactive infrastructure auditing
 **Known issues:**
 - PCC cache not auto-refreshing after releases (seen EA1+EA2, sustaining investigating)
 - Konflux config validator blocking scheduled nightlies (Alex+Mhamad fix, deadline Jul 17)
+- Map UI: "Show on map" links in chat don't navigate correctly to nodes
+- Map UI: links have no color/formatting, not identifiable as interactive
+- Map UI: type filter hides nodes but leaves relationships visible (visual clutter)
+- Map UI: activity feed items lack actionable information, need severity filtering
+- Map UI: "issues detected" count inflated (235 shown, many are info/warnings not real issues)
+- ~~MCP "No module named utils"~~ (fixed: stale process from Jul07 killed, new process spawned with current code)
 - ~~`ic get conforma` ignores positional app arg~~ (fixed: argument wired as `application`)
 - ~~Release-readiness false blockers~~ (fixed: exception-aware `compute_blocks()` in readiness endpoint)
 - ~~System Map nodes show no detail beyond status color~~ (fixed: enriched detail strings per status type)

@@ -238,6 +238,11 @@ export default function App() {
     [allNodes, allEdges, setNodes, setEdges]
   );
 
+  const handleChatAction = useCallback(async (action) => {
+    const result = await api.executeAction(action);
+    return result;
+  }, []);
+
   const clearHighlight = useCallback(() => {
     setNodes(allNodes.map((n) => ({ ...n, style: undefined })));
     setEdges(allEdges.map((e) => ({ ...e, style: undefined })));
@@ -344,7 +349,7 @@ export default function App() {
           <Background variant="dots" gap={16} size={1} color="#e5e7eb" />
           <Controls position="bottom-right" />
           <MiniMap
-            nodeColor={(n) => TYPE_MINIMAP_COLORS[n.data?.nodeType] || '#9ca3af'}
+            nodeColor={(n) => n.data?.category === 'release-lifecycle' ? '#7c3aed' : (TYPE_MINIMAP_COLORS[n.data?.nodeType] || '#9ca3af')}
             maskColor="rgba(255,255,255,0.7)"
             style={{ border: '1px solid #e5e7eb' }}
           />
@@ -361,7 +366,7 @@ export default function App() {
       />
 
       <ActivityFeed activity={activity} icAvailable={icAvailable} />
-      <ChatPanel selectedNodeId={selectedNode} onHighlight={handleChatHighlight} />
+      <ChatPanel selectedNodeId={selectedNode} onHighlight={handleChatHighlight} onAction={handleChatAction} />
     </div>
   );
 }

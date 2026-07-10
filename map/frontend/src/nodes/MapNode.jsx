@@ -27,25 +27,31 @@ const TYPE_ICONS = {
   Environment: '🌐',
 };
 
+const RELEASE_COLOR = '#7c3aed';
+
 export default function MapNode({ data, selected }) {
-  const typeColor = TYPE_COLORS[data.nodeType] || '#6b7280';
+  const isRelease = data.category === 'release-lifecycle';
+  const typeColor = isRelease ? RELEASE_COLOR : (TYPE_COLORS[data.nodeType] || '#6b7280');
   const liveStatus = data.liveStatus;
+  const onboarding = data.onboarding;
   const color = (liveStatus?.border_color) || typeColor;
-  const icon = TYPE_ICONS[data.nodeType] || '●';
+  const icon = isRelease ? '🚀' : (TYPE_ICONS[data.nodeType] || '●');
   const hasGaps = data.hasGaps;
 
   return (
     <div
       style={{
-        background: '#fff',
-        border: `2px solid ${selected ? '#000' : color}`,
-        borderRadius: 8,
-        padding: '8px 12px',
-        minWidth: 180,
+        background: isRelease ? '#f5f3ff' : '#fff',
+        border: `${isRelease ? 3 : 2}px solid ${selected ? '#000' : color}`,
+        borderRadius: isRelease ? 12 : 8,
+        padding: isRelease ? '10px 14px' : '8px 12px',
+        minWidth: isRelease ? 200 : 180,
         maxWidth: 260,
         boxShadow: selected
           ? '0 0 0 2px rgba(0,0,0,0.2)'
-          : '0 1px 3px rgba(0,0,0,0.1)',
+          : isRelease
+            ? `0 2px 8px rgba(124, 58, 237, 0.15)`
+            : '0 1px 3px rgba(0,0,0,0.1)',
         position: 'relative',
         cursor: 'pointer',
       }}
@@ -92,8 +98,34 @@ export default function MapNode({ data, selected }) {
         </span>
       )}
 
+      {onboarding && (
+        <span
+          style={{
+            position: 'absolute',
+            top: hasGaps ? 16 : -8,
+            right: -8,
+            background: onboarding.badge_color,
+            color: '#fff',
+            borderRadius: 10,
+            minWidth: 24,
+            height: 18,
+            padding: '0 5px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 10,
+            fontWeight: 'bold',
+            border: '2px solid #fff',
+            boxShadow: '0 0 2px rgba(0,0,0,0.2)',
+          }}
+          title={`Onboarding: ${onboarding.score}% — ${onboarding.overall}`}
+        >
+          {onboarding.score}
+        </span>
+      )}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontSize: 16 }}>{icon}</span>
+        <span style={{ fontSize: isRelease ? 18 : 16 }}>{icon}</span>
         <span
           style={{
             fontSize: 10,
@@ -103,14 +135,14 @@ export default function MapNode({ data, selected }) {
             letterSpacing: '0.05em',
           }}
         >
-          {data.nodeType}
+          {isRelease ? 'Release' : data.nodeType}
         </span>
       </div>
 
       <div
         style={{
-          fontSize: 13,
-          fontWeight: 600,
+          fontSize: isRelease ? 14 : 13,
+          fontWeight: isRelease ? 700 : 600,
           marginTop: 4,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
