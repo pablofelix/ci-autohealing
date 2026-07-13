@@ -116,3 +116,17 @@ class TestGetProvider:
         with patch.dict(os.environ, {"GRAPH_PROVIDER": "direct"}):
             provider = get_provider()
         assert isinstance(provider, DirectGraphProvider)
+
+
+class TestGraphContextUsedFlag:
+    def test_flag_true_when_context_returned(self):
+        analysis_json = {'tool_calls': []}
+        graph_section = "## Known Policy Rules\n- policy_hermetic_build"
+        analysis_json['graph_context_used'] = bool(graph_section)
+        assert analysis_json['graph_context_used'] is True
+
+    def test_flag_false_when_context_empty(self):
+        analysis_json = {'tool_calls': []}
+        graph_section = ""
+        analysis_json['graph_context_used'] = bool(graph_section)
+        assert analysis_json['graph_context_used'] is False

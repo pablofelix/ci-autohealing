@@ -1233,10 +1233,10 @@ class ReleaseFailureAnalyzer:
         if pattern_section:
             sections.append(pattern_section)
 
-        # Targeted knowledge graph context (fails silently if Neo4j unavailable)
+        # Targeted knowledge graph context (circuit-breaker protected)
         try:
-            from knowledge.graph_context import release_context
-            graph_section = release_context(context)
+            from knowledge.graph_provider import get_provider
+            graph_section = get_provider().release_context(context)
             if graph_section:
                 sections.append(graph_section)
         except Exception:
@@ -1462,6 +1462,15 @@ class ReleaseFailureAnalyzer:
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
                     tc.setdefault('input', {})['artifact_health'] = artifact_summaries
+                    break
+
+        # Track graph context usage in analysis_json
+        from knowledge.graph_provider import get_provider
+        graph_section = get_provider().release_context(context)
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
+                    tc.setdefault('input', {})['graph_context_used'] = bool(graph_section)
                     break
 
         analysis_id = self.ai_repo.insert_release_analysis(
