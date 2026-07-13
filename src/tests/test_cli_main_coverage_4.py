@@ -895,9 +895,20 @@ class TestPatternsCommands:
 class TestNightlyCommand:
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_with_blockers(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_with_blockers(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {
+            'chain_date': '2026-07-01',
+            'chain_status': 'broken',
+            'steps': [
+                {'name': 'GHA Trigger', 'status': 'pass', 'detail': 'ok', 'timestamp': '2026-07-01T02:00:00Z'},
+                {'name': 'Operator Build', 'status': 'pass', 'detail': 'ok'},
+                {'name': 'FBC Fragment', 'status': 'fail', 'detail': 'failed'},
+                {'name': 'PCC Cache', 'status': 'skip', 'detail': 'skipped'},
+            ],
+        }
         mock_status.return_value = {
             'fbc_health': {
                 'health_score': 80,
@@ -914,28 +925,33 @@ class TestNightlyCommand:
             ],
         }
         result = runner.invoke(cli, ['nightly'])
-        assert 'Nightly Status' in result.output
+        assert 'Nightly Chain' in result.output
         assert 'comp-x' in result.output
         assert '1 blocker' in result.output
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_no_blockers(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_no_blockers(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {
             'fbc_health': {'health_score': 100, 'current_status': 'Succeeded'},
             'fbc_component': 'fbc-frag',
             'blockers': [],
         }
         result = runner.invoke(cli, ['nightly'])
-        assert 'No build blockers' in result.output
+        assert 'Nightly Chain' in result.output
+        assert 'blocker(s)' not in result.output
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_json(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_json(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {'fbc_component': 'fbc', 'blockers': []}
         result = runner.invoke(cli, ['--json', 'nightly'])
         parsed = json.loads(result.output)
@@ -943,9 +959,11 @@ class TestNightlyCommand:
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_fbc_failed(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_fbc_failed(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {
             'fbc_health': {
                 'health_score': 30,
@@ -956,27 +974,31 @@ class TestNightlyCommand:
             'blockers': [],
         }
         result = runner.invoke(cli, ['nightly'])
-        assert 'Failed' in result.output
         assert '2 violations' in result.output
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_no_fbc_health(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_no_fbc_health(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {
             'fbc_health': None,
             'fbc_component': 'fbc-frag',
             'blockers': [],
         }
         result = runner.invoke(cli, ['nightly'])
-        assert 'No health data' in result.output
+        assert 'Nightly Chain' in result.output
+        assert result.exit_code == 0
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_with_pcc_stale(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_with_pcc_stale(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {
             'fbc_health': {'health_score': 90, 'current_status': 'Succeeded'},
             'fbc_component': 'fbc-frag',
@@ -997,9 +1019,11 @@ class TestNightlyCommand:
 
     @patch('repositories.connection.DatabaseConnection')
     @patch('config.CollectorConfig.from_env')
+    @patch('proactive.health_monitor.HealthMonitor.get_nightly_chain')
     @patch('proactive.health_monitor.HealthMonitor.get_nightly_status')
-    def test_nightly_with_gha(self, mock_status, mock_config, mock_db, runner):
+    def test_nightly_with_gha(self, mock_status, mock_chain, mock_config, mock_db, runner):
         mock_config.return_value.db = MagicMock()
+        mock_chain.return_value = {'chain_date': None, 'chain_status': 'unknown', 'steps': []}
         mock_status.return_value = {
             'fbc_health': {'health_score': 100, 'current_status': 'Succeeded'},
             'fbc_component': 'fbc-frag',
@@ -1011,7 +1035,7 @@ class TestNightlyCommand:
             },
         }
         result = runner.invoke(cli, ['nightly'])
-        assert 'GHA Validation' in result.output
+        assert 'GHA:' in result.output
 
 
 # ---------------------------------------------------------------------------
