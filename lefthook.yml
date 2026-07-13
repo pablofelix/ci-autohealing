@@ -66,6 +66,18 @@ post-commit:
         " 2>/dev/null
       background: true
 
+    playwright-e2e:
+      run: |
+        if [ -f map/frontend/node_modules/.bin/playwright ]; then
+          mkdir -p .test-results
+          cd map/frontend && npx playwright test --reporter=list 2>&1 \
+            | tee ../../.test-results/playwright-last-run.txt
+          echo "Playwright: $(grep -c 'passed' ../../.test-results/playwright-last-run.txt 2>/dev/null || echo '?') tests"
+        else
+          echo "Playwright not installed, skipping frontend E2E" >&2
+        fi
+      background: true
+
     attestation-log:
       run: |
         COMMIT=$(git rev-parse HEAD)
