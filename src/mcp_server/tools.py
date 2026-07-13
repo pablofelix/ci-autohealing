@@ -35,7 +35,7 @@ from mcp_server.models import (
     StatsResponse,
     TriageResponse,
 )
-from shared_config import APPLICATION_NAME, KONFLUX_UI_BASE, NAMESPACE
+from shared_config import APPLICATION_NAME, NAMESPACE, make_konflux_pipelinerun_url
 
 DEFAULT_APPLICATION = APPLICATION_NAME
 
@@ -86,7 +86,7 @@ def _triage_repo():
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
+    return make_konflux_pipelinerun_url(pr_name)
 
 
 # ---------------------------------------------------------------------------

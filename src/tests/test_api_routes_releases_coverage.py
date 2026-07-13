@@ -973,50 +973,19 @@ class TestCheckFBCPrune:
 
 class TestCheckRpmDrift:
 
-    def test_no_snapshot(self):
+    def test_not_implemented(self):
         result = _check_rpm_drift(None)
         assert result['status'] == 'SKIP'
-        assert 'No snapshot available' in result['detail']
+        assert 'Not implemented' in result['detail']
+        assert result['phase'] == 'build'
 
-    @patch('subprocess.run')
-    def test_pass_no_drift(self, mock_run):
-        # cosign returns RPM data but no drift detected (drift_found stays empty)
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='pkg:rpm/redhat/openssl@3.0.7\n'
-        )
+    def test_with_snapshot_still_skip(self):
         snapshot = {'spec': {'components': [
             {'name': 'comp-a', 'containerImage': 'img@sha256:abc'},
         ]}}
         result = _check_rpm_drift(snapshot)
-        assert result['status'] == 'PASS'
-        assert 'checked 1 components' in result['detail']
-
-    @patch('subprocess.run')
-    def test_cosign_fails(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout='')
-        snapshot = {'spec': {'components': [
-            {'name': 'comp-a', 'containerImage': 'img@sha256:abc'},
-        ]}}
-        result = _check_rpm_drift(snapshot)
-        assert result['status'] == 'PASS'
-
-    @patch('subprocess.run')
-    def test_cosign_timeout(self, mock_run):
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd='cosign', timeout=15)
-        snapshot = {'spec': {'components': [
-            {'name': 'comp-a', 'containerImage': 'img@sha256:abc'},
-        ]}}
-        result = _check_rpm_drift(snapshot)
-        assert result['status'] == 'PASS'
-
-    def test_no_images_with_digest(self):
-        snapshot = {'spec': {'components': [
-            {'name': 'comp-a', 'containerImage': 'img:latest'},
-        ]}}
-        result = _check_rpm_drift(snapshot)
-        assert result['status'] == 'PASS'
+        assert result['status'] == 'SKIP'
+        assert 'Not implemented' in result['detail']
 
 
 # ═══════════════════════════════════════════════════════════════════════════

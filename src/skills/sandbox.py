@@ -39,7 +39,11 @@ class ContainerSandbox:
         script = '#!/bin/bash\nset -euo pipefail\n\n'
         for i, block in enumerate(code_blocks):
             script += '# --- step {} ---\n'.format(i + 1)
-            script += block['code'] + '\n\n'
+            if block.get('lang') in ('python', 'python3'):
+                escaped = block['code'].replace("'", "'\\''")
+                script += "python3 -c '{}'\n\n".format(escaped)
+            else:
+                script += block['code'] + '\n\n'
 
         try:
             from kubernetes import client, config

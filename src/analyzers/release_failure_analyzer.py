@@ -1234,13 +1234,12 @@ class ReleaseFailureAnalyzer:
             sections.append(pattern_section)
 
         # Targeted knowledge graph context (circuit-breaker protected)
-        try:
-            from knowledge.graph_provider import get_provider
-            graph_section = get_provider().release_context(context)
-            if graph_section:
-                sections.append(graph_section)
-        except Exception:
-            pass
+        from knowledge.graph_provider import get_provider
+        graph_section = get_provider().release_context(context)
+        if graph_section:
+            sections.append(graph_section)
+        # Store for later use at save time
+        self._last_graph_section = graph_section
 
         sections.append("\nUse the record_release_analysis tool. Remember:")
         sections.append("- CRITICAL: Determine failure_category from step-detailed-report [Violation] lines, NOT from step-validate errors")
@@ -1465,12 +1464,11 @@ class ReleaseFailureAnalyzer:
                     break
 
         # Track graph context usage in analysis_json
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().release_context(context)
+        graph_used = bool(getattr(self, '_last_graph_section', ''))
         if isinstance(tool_calls, list):
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
-                    tc.setdefault('input', {})['graph_context_used'] = bool(graph_section)
+                    tc.setdefault('input', {})['graph_context_used'] = graph_used
                     break
 
         analysis_id = self.ai_repo.insert_release_analysis(

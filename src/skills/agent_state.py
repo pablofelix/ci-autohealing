@@ -45,7 +45,11 @@ class AgentState:
             if isinstance(existing, list):
                 existing.append(content_block)
             else:
-                self.messages[-1]['content'] = [content_block]
+                blocks = []
+                if existing:
+                    blocks.append({'type': 'text', 'text': str(existing)})
+                blocks.append(content_block)
+                self.messages[-1]['content'] = blocks
         else:
             self.messages.append({'role': 'user', 'content': [content_block]})
 

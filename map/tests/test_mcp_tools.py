@@ -26,13 +26,20 @@ SAMPLE_GAPS = [
 
 
 class TestGetMapGraph:
+    def _mock_graph(self, mock_graph_fn, nodes, edges, gaps):
+        from map.backend.graph import build_gap_map, filter_props
+        g = MagicMock()
+        g.get_all_nodes.return_value = nodes
+        g.get_all_edges.return_value = edges
+        g.get_gaps.return_value = gaps
+        g.build_gap_map.side_effect = build_gap_map
+        g.filter_props.side_effect = filter_props
+        mock_graph_fn.return_value = g
+        return g
+
     @patch("map.mcp_server.tools._graph")
     def test_returns_nodes_and_edges(self, mock_graph):
-        g = MagicMock()
-        g.get_all_nodes.return_value = SAMPLE_NODES
-        g.get_all_edges.return_value = SAMPLE_EDGES
-        g.get_gaps.return_value = []
-        mock_graph.return_value = g
+        self._mock_graph(mock_graph, SAMPLE_NODES, SAMPLE_EDGES, [])
 
         from map.mcp_server.tools import get_map_graph
         result = run_async(get_map_graph())
@@ -44,11 +51,7 @@ class TestGetMapGraph:
 
     @patch("map.mcp_server.tools._graph")
     def test_includes_gaps_in_nodes(self, mock_graph):
-        g = MagicMock()
-        g.get_all_nodes.return_value = SAMPLE_NODES
-        g.get_all_edges.return_value = []
-        g.get_gaps.return_value = SAMPLE_GAPS
-        mock_graph.return_value = g
+        self._mock_graph(mock_graph, SAMPLE_NODES, [], SAMPLE_GAPS)
 
         from map.mcp_server.tools import get_map_graph
         result = run_async(get_map_graph())
@@ -59,13 +62,9 @@ class TestGetMapGraph:
 
     @patch("map.mcp_server.tools._graph")
     def test_strips_internal_properties(self, mock_graph):
-        g = MagicMock()
         nodes = [{"id": "x", "type": "Component", "props": {
             "name": "x", "_source": "seed", "_seeded_at": "2026-01-01", "repo": "https://..."}}]
-        g.get_all_nodes.return_value = nodes
-        g.get_all_edges.return_value = []
-        g.get_gaps.return_value = []
-        mock_graph.return_value = g
+        self._mock_graph(mock_graph, nodes, [], [])
 
         from map.mcp_server.tools import get_map_graph
         result = run_async(get_map_graph())
@@ -137,6 +136,7 @@ class TestGetMapNode:
 
     @patch("map.mcp_server.tools._graph")
     def test_strips_internal_props(self, mock_graph):
+        from map.backend.graph import filter_props
         g = MagicMock()
         g.get_node_detail.return_value = {
             "id": "x", "type": "Component",
@@ -144,6 +144,7 @@ class TestGetMapNode:
             "neighbors": [],
         }
         g.get_gaps.return_value = []
+        g.filter_props.side_effect = filter_props
         mock_graph.return_value = g
 
         from map.mcp_server.tools import get_map_node

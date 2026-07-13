@@ -709,8 +709,13 @@ class BuildFailureAnalyzer:
         dep_updates_section = self._get_dependency_updates(failure)
 
         # Targeted knowledge graph context (circuit-breaker protected)
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().build_context(failure)
+        try:
+            from knowledge.graph_provider import get_provider
+            graph_section = get_provider().build_context(failure)
+        except Exception:
+            graph_section = ""
+        # Store for later use at save time
+        self._last_graph_section = graph_section
 
         release_context = self._get_release_context(failure)
 
@@ -1202,15 +1207,11 @@ Use these URLs in evidence_references when relevant:
         # Estimate cost (rough approximation: $3/MTok input, $15/MTok output for Claude Sonnet)
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
-        # Track graph context usage
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().build_context(failure)
-
         # Prepare analysis_json with pattern boost metadata if applicable
         analysis_json = {
             'tool_calls': response.tool_calls,
             'pattern_boost': pattern_boost_metadata,
-            'graph_context_used': bool(graph_section),
+            'graph_context_used': bool(getattr(self, '_last_graph_section', '')),
         }
 
         # Save to database

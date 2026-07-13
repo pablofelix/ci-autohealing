@@ -8,6 +8,7 @@ import { api } from '../api';
  */
 export function useLiveStatus(application = 'rhoai-v3-5', interval = 60000) {
   const [statusMap, setStatusMap] = useState(new Map());
+  const [onboardingMap, setOnboardingMap] = useState(new Map());
   const [activity, setActivity] = useState([]);
   const [icAvailable, setIcAvailable] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -26,6 +27,13 @@ export function useLiveStatus(application = 'rhoai-v3-5', interval = 60000) {
           map.set(node.node_id, node);
         }
         setStatusMap(map);
+
+        const obMap = new Map();
+        for (const ob of (data.onboarding || [])) {
+          obMap.set(ob.node_id, ob);
+        }
+        setOnboardingMap(obMap);
+
         setActivity(data.activity || []);
         setIcAvailable(data.ic_available !== false);
         setLastUpdated(data.last_updated || null);
@@ -44,5 +52,5 @@ export function useLiveStatus(application = 'rhoai-v3-5', interval = 60000) {
     };
   }, [application, interval]);
 
-  return { statusMap, activity, icAvailable, lastUpdated };
+  return { statusMap, onboardingMap, activity, icAvailable, lastUpdated };
 }

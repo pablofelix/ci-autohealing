@@ -269,9 +269,40 @@ class ResolutionAttemptRepository:
                 FROM resolution_attempts ra
                 LEFT JOIN build_failures   bf ON bf.id = ra.build_failure_id
                 LEFT JOIN conforma_results cr ON cr.id = ra.conforma_result_id
-                WHERE ra.attempted_at >= NOW() - INTERVAL '%s days'
+                WHERE ra.attempted_at >= NOW() - make_interval(days => %s)
                 ORDER BY ra.attempted_at DESC
             """, (days,))
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_recent_for_application(self, application, days=7, limit=50):
+        """Return recent PR activity for one application, newest first."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    ra.id,
+                    COALESCE(bf.component_name, cr.component_name) AS component_name,
+                    CASE
+                        WHEN ra.build_failure_id IS NOT NULL THEN 'build'
+                        ELSE 'conforma'
+                    END AS failure_type,
+                    ra.status,
+                    ra.pr_url,
+                    ra.pr_number,
+                    ra.was_successful,
+                    ra.pr_merged,
+                    ra.attempted_at,
+                    ra.verified_at
+                FROM resolution_attempts ra
+                LEFT JOIN build_failures   bf ON bf.id = ra.build_failure_id
+                LEFT JOIN conforma_results cr ON cr.id = ra.conforma_result_id
+                WHERE ra.attempted_at >= NOW() - make_interval(days => %s)
+                  AND ra.pr_url IS NOT NULL
+                  AND COALESCE(bf.application, cr.application) = %s
+                ORDER BY ra.attempted_at DESC
+                LIMIT %s
+            """, (days, application, limit))
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
 

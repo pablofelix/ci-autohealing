@@ -16,7 +16,25 @@ function formatPropKey(key) {
 const MIN_ZOOM = 0.7;
 const MAX_ZOOM = 1.6;
 
-export default function DetailPanel({ nodeId, onClose, onNavigate }) {
+const CHECK_STATUS_ICONS = {
+  PASS: { icon: '✓', color: '#10b981' },
+  FAIL: { icon: '✗', color: '#ef4444' },
+  WARN: { icon: '⚠', color: '#f59e0b' },
+  INFO: { icon: 'i', color: '#3b82f6' },
+  SKIP: { icon: '—', color: '#9ca3af' },
+};
+
+const CHECK_LABELS = {
+  repository: 'Repository URL',
+  branch: 'Release Branch',
+  container_image: 'Container Image',
+  pac: 'PipelinesAsCode',
+  builds: 'Build Status',
+  last_built: 'Last Built',
+  nudges: 'Nudge References',
+};
+
+export default function DetailPanel({ nodeId, onClose, onNavigate, onboardingMap, onImpact, onClearHighlight }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [width, setWidth] = useState(400);
@@ -170,6 +188,64 @@ export default function DetailPanel({ nodeId, onClose, onNavigate }) {
               </a>
             )}
 
+            {/* Impact Analysis */}
+            {onImpact && (
+              <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => onImpact(nodeId, 'downstream')}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    background: '#fef2f2',
+                    color: '#dc2626',
+                    padding: `${5 * zoom}px ${10 * zoom}px`,
+                    borderRadius: 6,
+                    fontSize: 11 * zoom,
+                    fontWeight: 500,
+                    border: '1px solid #fecaca',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Downstream Impact
+                </button>
+                <button
+                  onClick={() => onImpact(nodeId, 'upstream')}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    background: '#eff6ff',
+                    color: '#2563eb',
+                    padding: `${5 * zoom}px ${10 * zoom}px`,
+                    borderRadius: 6,
+                    fontSize: 11 * zoom,
+                    fontWeight: 500,
+                    border: '1px solid #bfdbfe',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Upstream Deps
+                </button>
+                {onClearHighlight && (
+                  <button
+                    onClick={onClearHighlight}
+                    style={{
+                      background: '#f3f4f6',
+                      color: '#6b7280',
+                      padding: `${5 * zoom}px ${10 * zoom}px`,
+                      borderRadius: 6,
+                      fontSize: 11 * zoom,
+                      border: '1px solid #e5e7eb',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Description */}
             {detail.props?.description && (
               <p style={{ fontSize: baseFontSize, color: '#374151', margin: '0 0 16px', lineHeight: 1.5, wordBreak: 'break-word' }}>
@@ -206,6 +282,14 @@ export default function DetailPanel({ nodeId, onClose, onNavigate }) {
                   </div>
                 ))}
               </Section>
+            )}
+
+            {/* Onboarding */}
+            {onboardingMap?.get(detail.id || nodeId) && (
+              <OnboardingSection
+                data={onboardingMap.get(detail.id || nodeId)}
+                zoom={zoom}
+              />
             )}
 
             {/* Neighbors */}
@@ -267,6 +351,97 @@ function Section({ title, children, zoom = 1 }) {
       </h4>
       {open && children}
     </div>
+  );
+}
+
+function OnboardingSection({ data, zoom = 1 }) {
+  if (!data) return null;
+  const checks = data.checks || {};
+  const checkOrder = ['repository', 'branch', 'container_image', 'pac', 'builds', 'last_built', 'nudges'];
+
+  return (
+    <Section title={`Onboarding (${data.score}%)`} zoom={zoom}>
+      {/* Score bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div
+          style={{
+            flex: 1,
+            height: 6,
+            background: '#e5e7eb',
+            borderRadius: 3,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${data.score}%`,
+              height: '100%',
+              background: data.badge_color,
+              borderRadius: 3,
+              transition: 'width 0.3s ease',
+            }}
+          />
+        </div>
+        <span style={{ fontSize: 11 * zoom, fontWeight: 600, color: data.badge_color }}>
+          {data.overall}
+        </span>
+      </div>
+
+      {/* Check steps */}
+      {checkOrder.map((key) => {
+        const check = checks[key];
+        if (!check) return null;
+        const statusInfo = CHECK_STATUS_ICONS[check.status] || CHECK_STATUS_ICONS.SKIP;
+        return (
+          <div
+            key={key}
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              padding: `${4 * zoom}px 0`,
+              fontSize: 12 * zoom,
+              borderBottom: '1px solid #f3f4f6',
+            }}
+          >
+            <span
+              style={{
+                color: statusInfo.color,
+                fontWeight: 700,
+                fontSize: 13 * zoom,
+                minWidth: 16,
+                textAlign: 'center',
+              }}
+            >
+              {statusInfo.icon}
+            </span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500 }}>{CHECK_LABELS[key] || key}</div>
+              <div style={{ color: '#6b7280', fontSize: 11 * zoom }}>{check.detail}</div>
+              {check.fix && (
+                <div style={{ color: '#f59e0b', fontSize: 11 * zoom, marginTop: 2 }}>
+                  Fix: {check.fix}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Jira link */}
+      {data.jira_key && (
+        <div style={{ marginTop: 8, fontSize: 12 * zoom }}>
+          <a
+            href={`https://issues.redhat.com/browse/${data.jira_key}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#2563eb', textDecoration: 'none' }}
+          >
+            {data.jira_key} &#8599;
+          </a>
+        </div>
+      )}
+    </Section>
   );
 }
 

@@ -1556,30 +1556,27 @@ class TestBuildAnalysisPromptCoverage:
         assert 'https://github.com/owner/repo/pull/77' in user_prompt
 
     def test_knowledge_graph_context_included(self):
-        """Lines 1241-1242: Knowledge graph context is included when available."""
+        """Lines 1237-1240: Knowledge graph context is included when available."""
         analyzer = _build_analyzer()
         analyzer.pattern_repo.get_all.return_value = []
         context = self._base_context()
 
-        mock_module = MagicMock()
-        mock_module.release_context.return_value = '\n## Knowledge Graph\nRelevant patterns found.'
+        mock_provider = MagicMock()
+        mock_provider.release_context.return_value = '\n## Knowledge Graph\nRelevant patterns found.'
 
-        with patch.dict('sys.modules', {'knowledge': MagicMock(), 'knowledge.graph_context': mock_module}):
+        with patch('knowledge.graph_provider.get_provider', return_value=mock_provider):
             _, user_prompt = analyzer.build_analysis_prompt(context)
         assert 'Knowledge Graph' in user_prompt
         assert 'Relevant patterns found' in user_prompt
 
     def test_knowledge_graph_exception_swallowed(self):
-        """Line 1242: Exception importing knowledge graph is silently handled."""
+        """Line 1237-1243: Exception from knowledge graph is silently handled."""
         analyzer = _build_analyzer()
         analyzer.pattern_repo.get_all.return_value = []
         context = self._base_context()
 
-        # Make the import raise
-        with patch.dict('sys.modules', {'knowledge': None, 'knowledge.graph_context': None}):
-            # Should not raise
+        with patch('knowledge.graph_provider.get_provider', side_effect=RuntimeError('graph unavailable')):
             _, user_prompt = analyzer.build_analysis_prompt(context)
-        # Prompt should still be valid
         assert 'record_release_analysis' in user_prompt
 
 

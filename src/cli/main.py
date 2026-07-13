@@ -1311,6 +1311,10 @@ def describe_component(ctx, name, log, output_json):
             print(bold('Konflux UI:') + ' {}'.format(cyan(data['konflux_url'])))
         if data.get('output_image'):
             print(bold('Image:') + '       {}'.format(data['output_image'][:80]))
+        from shared_config import make_system_map_url
+        map_url = make_system_map_url(name)
+        if map_url:
+            print(bold('System Map:') + ' {}'.format(cyan(map_url)))
         print()
 
         if data.get('build_logs'):

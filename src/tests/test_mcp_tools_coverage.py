@@ -348,6 +348,8 @@ class TestGetFailureExtended:
         assert result.build_logs is None
 
     @patch('mcp_server.tools._build_repo')
+    @patch('shared_config.KONFLUX_UI_BASE', 'https://konflux.example')
+    @patch('shared_config.NAMESPACE', 'test-ns')
     def test_konflux_url_fallback(self, mock_build):
         """When konflux_url is absent, it should be generated from pipelinerun_name."""
         row = {
@@ -371,7 +373,7 @@ class TestGetFailureExtended:
         mock_build.return_value.get_failure_details.return_value = row
         from mcp_server.tools import get_failure
         result = _run(get_failure, 'comp', include_logs=False)
-        assert 'pr-fallback-123' in result.konflux_url
+        assert result.konflux_url == 'https://konflux.example/ns/test-ns/pipelinerun/pr-fallback-123/logs'
 
 
 # ---------------------------------------------------------------------------
@@ -1766,15 +1768,16 @@ class TestFormatReleaseJira:
 
 class TestKonfluxUrlExtended:
 
-    def test_empty_name(self):
+    def test_empty_name_returns_empty(self):
         from mcp_server.tools import _konflux_url
-        url = _konflux_url('')
-        assert '/logs' in url
+        assert _konflux_url('') == ''
 
+    @patch('shared_config.KONFLUX_UI_BASE', 'https://konflux.example')
+    @patch('shared_config.NAMESPACE', 'ns')
     def test_special_characters(self):
         from mcp_server.tools import _konflux_url
         url = _konflux_url('pr-abc-123-xyz')
-        assert 'pr-abc-123-xyz' in url
+        assert url == 'https://konflux.example/ns/ns/pipelinerun/pr-abc-123-xyz/logs'
 
 
 # ---------------------------------------------------------------------------

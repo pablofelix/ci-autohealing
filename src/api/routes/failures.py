@@ -24,7 +24,7 @@ from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_pool, get_repository
 from repositories.triage_repository import TriageRepository
-from shared_config import JIRA_BASE_URL, JIRA_PROJECT, KONFLUX_UI_BASE, NAMESPACE
+from shared_config import JIRA_BASE_URL, JIRA_PROJECT, NAMESPACE, make_konflux_pipelinerun_url
 
 router = APIRouter(tags=["failures"])
 
@@ -33,8 +33,6 @@ def _compute_freeze_countdown(schedule):
     """Compute release timeline countdown from schedule data."""
     if not schedule:
         return None
-    from datetime import date
-    date.today()
 
     code_freeze_days = schedule.get('code_freeze_days')
     rc_days = schedule.get('initial_rc_days')
@@ -110,7 +108,7 @@ def _triage_repo():
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
+    return make_konflux_pipelinerun_url(pr_name)
 
 
 def _compute_age_signals(first_seen, last_seen):
@@ -189,7 +187,15 @@ def list_alerts(application: str):
     """All unresolved alerts (build failures + Conforma violations)."""
     from api.validators import validate_application_name
     application = validate_application_name(application)
-    triage = _build_repo().get_triage_summary(application)
+    build_repo = _build_repo()
+    known_apps = {a['application'] for a in build_repo.get_applications()}
+    if application not in known_apps:
+        from api.errors import not_found
+        not_found(
+            'Application', application,
+            suggestion='Available applications: {}. Use GET /api/v1/applications to list all.'.format(
+                ', '.join(sorted(known_apps))))
+    triage = build_repo.get_triage_summary(application)
     triage_jira_build = _triage_repo().build_jira_map(application)
     build_failures = []
     for comp in triage.get('failing_components', []):
@@ -206,12 +212,15 @@ def list_alerts(application: str):
             last_seen=ls,
             occurrence_count=comp.get('failure_count', 1),
             has_logs=comp.get('has_logs', False),
+            has_context=comp.get('has_context', False),
             has_analysis=comp.get('ai_analyzed', False),
             age_hours=age_h,
             is_new=is_new,
             status_changed=status_chg,
             jira_key=jira,
             is_nightly=comp.get('is_nightly', False),
+            failed_step=comp.get('failed_step') or None,
+            konflux_url=comp.get('konflux_url') or None,
         ))
 
     _detect_systemic_patterns(build_failures)
@@ -234,52 +243,51 @@ def list_alerts(application: str):
     )
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     conforma_violations = []
-    conforma_failing = _conforma_repo().find_unresolved_component_names(application)
+    summaries = _conforma_repo().get_violation_summaries(application)
     triage_jira = _triage_repo().build_jira_map(application)
-    for comp_name in sorted(conforma_failing):
-        details = _conforma_repo().get_violation_details(comp_name, application)
-        if details:
-            scenario = details.get('scenario', '')
-            jira_key = details.get('jira_key') or triage_jira.get(comp_name)
-            rules = extract_violation_rules(details.get('violation_summary', ''))
-            cov = compute_exception_coverage_details(
-                rules, scenario, exceptions_by_policy)
-            uv_count, _ = count_unique_violations(
-                details.get('violation_summary', ''))
-            pname = extract_policy_from_scenario(scenario)
-            c_fs = details.get('first_detected_at', datetime.utcnow())
-            c_ls = details.get('last_updated_at', datetime.utcnow())
-            c_age, c_new, c_chg = _compute_age_signals(c_fs, c_ls)
-            conforma_violations.append(FailureSummary(
-                component=comp_name,
-                status='Conforma Violation',
-                error_type=scenario,
-                first_seen=c_fs,
-                last_seen=c_ls,
-                occurrence_count=1,
-                age_hours=c_age,
-                is_new=c_new,
-                status_changed=c_chg,
-                has_logs=details.get('violation_summary') is not None,
-                has_analysis=details.get('ai_analyzed', False),
-                violations_count=details.get('violations_count', 0),
-                unique_violations=uv_count or None,
-                warnings_count=details.get('warnings_count', 0),
-                scenario=scenario,
-                category=categorize_policy(scenario),
-                policy_url=_policy_url(scenario),
-                jira_key=jira_key,
-                exception_coverage=cov['coverage'],
-                exception_coverage_stage=cov['stage'],
-                exception_coverage_prod=cov['prod'],
-                exception_env_tag=cov['env_tag'],
-                policy_env=_policy_env(pname),
-                blocks=compute_blocks(scenario, cov['stage'], cov['prod']),
-                policy_url_stage=cov['policy_url_stage'],
-                policy_url_prod=cov['policy_url_prod'],
-                uncovered_rules_stage=cov['uncovered_rules_stage'],
-                uncovered_rules_prod=cov['uncovered_rules_prod'],
-            ))
+    for details in summaries:
+        comp_name = details['component_name']
+        scenario = details.get('scenario', '')
+        jira_key = details.get('jira_key') or triage_jira.get(comp_name)
+        rules = extract_violation_rules(details.get('violation_summary', ''))
+        cov = compute_exception_coverage_details(
+            rules, scenario, exceptions_by_policy)
+        uv_count, _ = count_unique_violations(
+            details.get('violation_summary', ''))
+        pname = extract_policy_from_scenario(scenario)
+        c_fs = details.get('first_detected_at', datetime.utcnow())
+        c_ls = details.get('last_updated_at', datetime.utcnow())
+        c_age, c_new, c_chg = _compute_age_signals(c_fs, c_ls)
+        conforma_violations.append(FailureSummary(
+            component=comp_name,
+            status='Conforma Violation',
+            error_type=scenario,
+            first_seen=c_fs,
+            last_seen=c_ls,
+            occurrence_count=1,
+            age_hours=c_age,
+            is_new=c_new,
+            status_changed=c_chg,
+            has_logs=details.get('violation_summary') is not None,
+            has_analysis=details.get('ai_analyzed', False),
+            violations_count=details.get('violations_count', 0),
+            unique_violations=uv_count or None,
+            warnings_count=details.get('warnings_count', 0),
+            scenario=scenario,
+            category=categorize_policy(scenario),
+            policy_url=_policy_url(scenario),
+            jira_key=jira_key,
+            exception_coverage=cov['coverage'],
+            exception_coverage_stage=cov['stage'],
+            exception_coverage_prod=cov['prod'],
+            exception_env_tag=cov['env_tag'],
+            policy_env=_policy_env(pname),
+            blocks=compute_blocks(scenario, cov['stage'], cov['prod']),
+            policy_url_stage=cov['policy_url_stage'],
+            policy_url_prod=cov['policy_url_prod'],
+            uncovered_rules_stage=cov['uncovered_rules_stage'],
+            uncovered_rules_prod=cov['uncovered_rules_prod'],
+        ))
 
     nightly_warnings = []
     try:
@@ -293,8 +301,12 @@ def list_alerts(application: str):
                 severity=w.severity,
                 message=w.message,
             ))
-    except Exception:
-        pass
+    except Exception as exc:
+        nightly_warnings.append(NightlyWarning(
+            component_name='_system',
+            severity='warning',
+            message='Nightly check unavailable: {}'.format(str(exc)[:100]),
+        ))
 
     all_dates = ([f.last_seen for f in build_failures] +
                  [v.last_seen for v in conforma_violations])
@@ -304,8 +316,12 @@ def list_alerts(application: str):
     try:
         from api.routes.releases import get_schedule
         schedule = get_schedule(application)
-    except Exception:
-        pass
+    except Exception as exc:
+        nightly_warnings.append(NightlyWarning(
+            component_name='_system',
+            severity='warning',
+            message='Release schedule unavailable: {}'.format(str(exc)[:100]),
+        ))
 
     freeze_countdown = _compute_freeze_countdown(schedule)
 

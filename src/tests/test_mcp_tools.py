@@ -983,11 +983,16 @@ class TestPatternAndResolutionTools:
 
 class TestKonfluxUrl:
 
+    @patch('shared_config.KONFLUX_UI_BASE', 'https://konflux.example')
+    @patch('shared_config.NAMESPACE', 'my-ns')
     def test_url_format(self):
         from mcp_server.tools import _konflux_url
         url = _konflux_url('pr-abc-123')
-        assert 'pr-abc-123' in url
-        assert '/logs' in url
+        assert url == 'https://konflux.example/ns/my-ns/pipelinerun/pr-abc-123/logs'
+
+    def test_empty_pipelinerun_returns_empty(self):
+        from mcp_server.tools import _konflux_url
+        assert _konflux_url('') == ''
 
 
 # ---------------------------------------------------------------------------

@@ -98,6 +98,7 @@ def _count_code_blocks(content):
     """Count executable vs example code blocks."""
     counts = {'executable': 0, 'example': 0, 'skipped': 0}
     in_block = False
+    in_skip = False
     block_lines = []
 
     body = _strip_frontmatter(content)
@@ -105,11 +106,17 @@ def _count_code_blocks(content):
     for line in body.split('\n'):
         stripped = line.strip()
 
+        if stripped.startswith('```') and in_skip:
+            in_skip = False
+            continue
+
         if stripped.startswith('```') and not in_block:
             lang = stripped[3:].strip().split()[0] if stripped[3:].strip() else ''
-            if lang in ('bash', 'sh', 'shell', 'python', 'python3', ''):
+            if lang in ('bash', 'sh', 'shell', 'python', 'python3'):
                 in_block = True
                 block_lines = []
+            else:
+                in_skip = True
             continue
 
         if stripped.startswith('```') and in_block:

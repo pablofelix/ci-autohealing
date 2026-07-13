@@ -49,6 +49,8 @@ class FailureSummary(BaseModel):
     is_new: bool = Field(False, description="First seen in last 24h")
     status_changed: bool = Field(False, description="Status or error_type changed in last 24h")
     is_nightly: bool = Field(False, description="Most recent build was a nightly (trigger_type=nightly)")
+    failed_step: Optional[str] = Field(None, description="Pipeline step that failed (e.g. build-images, fips-check)")
+    konflux_url: Optional[str] = Field(None, description="Link to PipelineRun in Konflux")
 
 
 class BuildFailureDetails(BaseModel):

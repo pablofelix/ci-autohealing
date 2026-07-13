@@ -13,7 +13,7 @@ from mcp_server.models import (
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 from repositories.triage_repository import TriageRepository
-from shared_config import KONFLUX_UI_BASE, NAMESPACE
+from shared_config import NAMESPACE, make_konflux_pipelinerun_url
 
 router = APIRouter(tags=["violations"])
 
@@ -32,7 +32,7 @@ def _triage_jira_map(application):
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
+    return make_konflux_pipelinerun_url(pr_name)
 
 
 @router.get("/applications/{application}/violations")
@@ -58,7 +58,7 @@ def list_violations(
     from conforma.policy_tools import (
         categorize_policy,
         compute_blocks,
-        compute_coverage_by_env,
+        compute_exception_coverage_details,
         count_unique_violations,
         extract_policy_from_scenario,
         extract_violation_rules,
@@ -79,10 +79,11 @@ def list_violations(
         pname = extract_policy_from_scenario(scenario)
         v['policy_env'] = policy_env(pname)
         rules = extract_violation_rules(v.get('violation_summary', ''))
-        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
-        cov_stage = (env_cov.get('stage') or {}).get('coverage')
-        cov_prod = (env_cov.get('prod') or {}).get('coverage')
-        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
+        cov = compute_exception_coverage_details(rules, scenario, exceptions_by_policy)
+        v['exception_coverage'] = cov['coverage']
+        v['exception_coverage_stage'] = cov['stage']
+        v['exception_coverage_prod'] = cov['prod']
+        v['blocks'] = compute_blocks(scenario, cov['stage'], cov['prod'])
     return violations
 
 
@@ -114,9 +115,8 @@ def get_conforma_report(
     from conforma.policy_tools import (
         categorize_policy,
         compute_blocks,
-        compute_coverage_by_env,
+        compute_exception_coverage_details,
         count_unique_violations,
-        enrich_with_coverage,
         extract_policy_from_scenario,
         extract_violation_rules,
         fetch_exceptions_by_policy,
@@ -125,6 +125,7 @@ def get_conforma_report(
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
+    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     total_unique = 0
     groups = {}
     for v in violations:
@@ -141,15 +142,13 @@ def get_conforma_report(
             groups[cat] = {'components': 0, 'unique_violations': 0}
         groups[cat]['components'] += 1
         groups[cat]['unique_violations'] += uv_count
-    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
-    enrich_with_coverage(violations, exceptions_by_policy)
-    for v in violations:
         scenario = v.get('scenario', '')
         rules = extract_violation_rules(v.get('violation_summary', ''))
-        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
-        cov_stage = (env_cov.get('stage') or {}).get('coverage')
-        cov_prod = (env_cov.get('prod') or {}).get('coverage')
-        v['blocks'] = compute_blocks(scenario, cov_stage, cov_prod)
+        cov = compute_exception_coverage_details(rules, scenario, exceptions_by_policy)
+        v['exception_coverage'] = cov['coverage']
+        v['exception_coverage_stage'] = cov['stage']
+        v['exception_coverage_prod'] = cov['prod']
+        v['blocks'] = compute_blocks(scenario, cov['stage'], cov['prod'])
     coverage_summary = {'fully_covered': 0, 'partially_covered': 0, 'not_covered': 0}
     for v in violations:
         cov = v.get('exception_coverage')
@@ -217,12 +216,10 @@ def get_violation(component: str, application: str, include_details: bool = True
     """Full Conforma policy violation details."""
     from conforma.policy_tools import (
         compute_blocks,
-        compute_violation_coverage,
         count_unique_violations,
         extract_policy_from_scenario,
         extract_violation_rules,
         fetch_exceptions_by_policy,
-        lookup_exceptions,
     )
     from conforma.policy_tools import (
         policy_env as _policy_env,
@@ -241,30 +238,19 @@ def get_violation(component: str, application: str, include_details: bool = True
     cov_fields = {}
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     if exceptions_by_policy:
+        from conforma.policy_tools import compute_exception_coverage_details
         rules = extract_violation_rules(row.get('violation_summary', ''))
-        cov = compute_violation_coverage(
-            rules, lookup_exceptions(policy_name, scenario, exceptions_by_policy))
-        if cov:
-            cov_fields = {
-                'exception_coverage': cov['coverage'],
-                'covered_rules': cov['covered_rules'],
-                'uncovered_rules': cov['uncovered_rules'],
-                'matching_exceptions': cov['matching_exceptions'],
-            }
-        from conforma.policy_tools import (
-            compute_coverage_by_env,
-        )
-        env_cov = compute_coverage_by_env(rules, scenario, exceptions_by_policy)
-        cov_fields['exception_coverage_stage'] = (env_cov.get('stage') or {}).get('coverage')
-        cov_fields['exception_coverage_prod'] = (env_cov.get('prod') or {}).get('coverage')
-        cov_fields['exception_env_tag'] = env_cov.get('combined_tag')
-        all_rules = set(rules) if rules else set()
-        s_cov = set((env_cov.get('stage') or {}).get('covered_rules', []))
-        p_cov = set((env_cov.get('prod') or {}).get('covered_rules', []))
-        if cov_fields['exception_coverage_stage']:
-            cov_fields['uncovered_rules_stage'] = sorted(all_rules - s_cov)
-        if cov_fields['exception_coverage_prod']:
-            cov_fields['uncovered_rules_prod'] = sorted(all_rules - p_cov)
+        cov = compute_exception_coverage_details(rules, scenario, exceptions_by_policy)
+        cov_fields = {
+            'exception_coverage': cov['coverage'],
+            'exception_coverage_stage': cov['stage'],
+            'exception_coverage_prod': cov['prod'],
+            'exception_env_tag': cov['env_tag'],
+            'covered_rules': cov.get('covered_rules_stage', []) or cov.get('covered_rules_prod', []),
+            'uncovered_rules': cov.get('uncovered_rules_stage', []) or cov.get('uncovered_rules_prod', []),
+            'uncovered_rules_stage': cov.get('uncovered_rules_stage'),
+            'uncovered_rules_prod': cov.get('uncovered_rules_prod'),
+        }
 
     uv_count, uv_rules = count_unique_violations(row.get('violation_summary', ''))
     vr_list = [

@@ -250,17 +250,21 @@ class TestRowToAnalysis:
 class TestKonfluxUrl:
     """Tests for _konflux_url."""
 
-    @patch('api.routes.exports.KONFLUX_UI_BASE', 'https://konflux.example')
-    @patch('api.routes.exports.NAMESPACE', 'my-ns')
+    @patch('shared_config.KONFLUX_UI_BASE', 'https://konflux.example')
+    @patch('shared_config.NAMESPACE', 'my-ns')
     def test_builds_correct_url(self):
         url = _konflux_url('pr-abc')
         assert url == 'https://konflux.example/ns/my-ns/pipelinerun/pr-abc/logs'
 
-    @patch('api.routes.exports.KONFLUX_UI_BASE', '')
-    @patch('api.routes.exports.NAMESPACE', '')
-    def test_empty_base_and_namespace(self):
+    @patch('shared_config.KONFLUX_UI_BASE', '')
+    @patch('shared_config.NAMESPACE', '')
+    def test_empty_base_returns_empty(self):
         url = _konflux_url('pr-xyz')
-        assert url == '/ns//pipelinerun/pr-xyz/logs'
+        assert url == ''
+
+    def test_empty_pipelinerun_returns_empty(self):
+        url = _konflux_url('')
+        assert url == ''
 
 
 class TestFormatFailureDuration:
@@ -383,8 +387,8 @@ class TestFormatBuildJira:
 
     def test_uses_konflux_url_fallback(self):
         failure = _make_failure(konflux_url='')
-        with patch('api.routes.exports.KONFLUX_UI_BASE', 'https://k.example'), \
-             patch('api.routes.exports.NAMESPACE', 'ns'):
+        with patch('shared_config.KONFLUX_UI_BASE', 'https://k.example'), \
+             patch('shared_config.NAMESPACE', 'ns'):
             text = _format_build_jira(failure, None)
             assert 'https://k.example/ns/ns/pipelinerun/pr-12345/logs' in text
 
