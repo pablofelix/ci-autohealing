@@ -798,20 +798,23 @@ class AIAnalysisRepository:
                 cursor.execute("""
                     SELECT
                         COALESCE(
-                            (analysis_json->>'graph_context_used')::boolean,
+                            (a.analysis_json->>'graph_context_used')::boolean,
                             FALSE
                         ) AS with_graph,
                         COUNT(*) AS total,
-                        COUNT(*) FILTER (WHERE human_verdict = 'correct') AS correct,
-                        COUNT(*) FILTER (WHERE human_verdict = 'partial') AS partial,
-                        COUNT(*) FILTER (WHERE human_verdict = 'incorrect') AS incorrect,
-                        AVG(confidence_score) AS avg_confidence
-                    FROM ai_analysis
-                    WHERE human_verdict IS NOT NULL
-                      AND analyzed_at >= NOW() - INTERVAL '%s days'
+                        COUNT(*) FILTER (WHERE a.human_verdict = 'correct') AS correct,
+                        COUNT(*) FILTER (WHERE a.human_verdict = 'partial') AS partial,
+                        COUNT(*) FILTER (WHERE a.human_verdict = 'incorrect') AS incorrect,
+                        AVG(a.confidence_score) AS avg_confidence
+                    FROM ai_analysis a
+                    LEFT JOIN build_failures b ON a.build_failure_id = b.id
+                    LEFT JOIN conforma_results c ON a.conforma_result_id = c.id
+                    WHERE a.human_verdict IS NOT NULL
+                      AND (b.application = %s OR c.application = %s)
+                      AND a.analyzed_at >= NOW() - make_interval(days => %s)
                     GROUP BY with_graph
                     ORDER BY with_graph DESC
-                """, (days,))
+                """, (application, application, days))
                 rows = cursor.fetchall()
 
         result = {'with_graph': None, 'without_graph': None}

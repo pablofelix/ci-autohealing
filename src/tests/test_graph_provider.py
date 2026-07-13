@@ -130,3 +130,53 @@ class TestGraphContextUsedFlag:
         graph_section = ""
         analysis_json['graph_context_used'] = bool(graph_section)
         assert analysis_json['graph_context_used'] is False
+
+
+class TestGraphImpactQuery:
+    def test_query_returns_comparison_structure(self):
+        from unittest.mock import MagicMock
+
+        from repositories.ai_analysis_repository import AIAnalysisRepository
+
+        repo = AIAnalysisRepository.__new__(AIAnalysisRepository)
+        repo.db = MagicMock()
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            (True, 10, 7, 2, 1, 0.82),
+            (False, 5, 3, 1, 1, 0.75),
+        ]
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        repo.db.connection.return_value = mock_conn
+
+        result = repo.get_graph_impact_metrics("rhoai-v3-5", days=30)
+        assert 'with_graph' in result
+        assert 'without_graph' in result
+        assert result['with_graph']['total'] == 10
+        assert result['with_graph']['correct'] == 7
+        assert result['without_graph']['total'] == 5
+
+    def test_empty_results(self):
+        from unittest.mock import MagicMock
+
+        from repositories.ai_analysis_repository import AIAnalysisRepository
+
+        repo = AIAnalysisRepository.__new__(AIAnalysisRepository)
+        repo.db = MagicMock()
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn = MagicMock()
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cursor
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        repo.db.connection.return_value = mock_conn
+
+        result = repo.get_graph_impact_metrics("rhoai-v3-5", days=30)
+        assert result['with_graph'] is None
+        assert result['without_graph'] is None
