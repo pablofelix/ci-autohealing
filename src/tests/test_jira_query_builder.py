@@ -90,3 +90,21 @@ class TestJiraBlockerQueryBuilder:
     def test_unknown_app_omits_version_filter(self):
         jql = JiraBlockerQuery().for_application("unknown").build()
         assert "affectedVersion" not in jql
+
+
+class TestSignoffCategorization:
+    def test_product_signoff_detected(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('[RHOAI 3.5.0-EA2] Product Sign Off - AI Core Platform Team') == 'signoff'
+
+    def test_regular_bug_is_product(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('KServe Local Model Cache stuck in NodeDownloadPending') == 'product'
+
+    def test_infra_bug_detected(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('Jenkins CI cluster timeout on s390x') == 'infra'
+
+    def test_tfa_bug_detected(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('TFA: test-failure in smoke suite') == 'tfa'
