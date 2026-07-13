@@ -196,15 +196,18 @@ class TestFailuresEndpoints:
 
     @patch('api.routes.failures.get_repository')
     @patch('api.routes.failures.check_jira_health')
+    @patch('api.routes.failures.list_blockers')
     @patch('api.routes.releases.get_schedule')
     @patch('proactive.health_monitor.HealthMonitor')
-    def test_contract_list_alerts(self, mock_health, mock_schedule, mock_jira,
+    def test_contract_list_alerts(self, mock_health, mock_schedule,
+                                    mock_list_blockers, mock_jira,
                                     mock_get_repo, client):
         """GET /applications/{app}/alerts returns AlertsSummary-shaped response."""
         mock_build_repo = MagicMock()
         mock_conforma_repo = MagicMock()
         mock_triage_repo = MagicMock()
 
+        mock_build_repo.get_applications.return_value = [{'application': 'test-app'}]
         mock_build_repo.get_triage_summary.return_value = {
             'total': 2,
             'failing': 1,
@@ -222,7 +225,7 @@ class TestFailuresEndpoints:
                 },
             ],
         }
-        mock_conforma_repo.find_unresolved_component_names.return_value = []
+        mock_conforma_repo.get_violation_summaries.return_value = []
         mock_triage_repo.build_jira_map.return_value = {}
 
         def side_effect(repo_class):
@@ -240,6 +243,11 @@ class TestFailuresEndpoints:
         mock_get_repo.side_effect = side_effect
 
         mock_jira.return_value.status = 'valid'
+        mock_list_blockers.return_value = BlockersSummary(
+            application='test-app', project='RHOAIENG',
+            total_blockers=0, open_blockers=0, blockers=[],
+            critical_signals=[],
+        )
         mock_schedule.return_value = None
         mock_health.return_value.get_stale_nightly_builds.return_value = []
 

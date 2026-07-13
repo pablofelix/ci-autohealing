@@ -49,16 +49,13 @@ def get_map_graph() -> Dict:
     g = _graph()
     raw_nodes = g.get_all_nodes()
     raw_edges = g.get_all_edges()
-    gaps = g.get_gaps()
-
-    gap_map: dict[str, list] = {}
-    for gap in gaps:
-        gap_map.setdefault(gap["node_id"], []).append(gap)
+    gap_map = g.build_gap_map(g.get_gaps())
 
     nodes = []
     for n in raw_nodes:
         props = n.get("props", {})
         node_gaps = gap_map.get(n["id"], [])
+        filtered = g.filter_props(props)
         nodes.append({
             "id": n["id"],
             "type": n["type"],
@@ -66,8 +63,8 @@ def get_map_graph() -> Dict:
             "description": props.get("description", ""),
             "gaps": node_gaps,
             "properties": {
-                k: v for k, v in props.items()
-                if k not in ("id", "name", "description", "_source", "_seeded_at")
+                k: v for k, v in filtered.items()
+                if k not in ("id", "name", "description")
             },
         })
 
@@ -121,9 +118,8 @@ def get_map_node(node_id: str) -> Dict:
     if not detail:
         return {"error": f"Node '{node_id}' not found"}
 
-    internal = {"_source", "_seeded_at"}
     if "props" in detail:
-        detail["props"] = {k: v for k, v in detail["props"].items() if k not in internal}
+        detail["props"] = g.filter_props(detail["props"])
 
     gaps = [gap for gap in g.get_gaps() if gap["node_id"] == node_id]
     return {**detail, "gaps": gaps}

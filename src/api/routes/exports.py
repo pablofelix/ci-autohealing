@@ -15,7 +15,7 @@ from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.repository_factory import get_repository
 from security.redact import redact_secrets
-from shared_config import KONFLUX_UI_BASE, NAMESPACE
+from shared_config import make_konflux_pipelinerun_url
 
 
 def _sanitize_for_jira(text):
@@ -51,7 +51,7 @@ def _ai_repo():
 
 
 def _konflux_url(pr_name: str) -> str:
-    return f"{KONFLUX_UI_BASE}/ns/{NAMESPACE}/pipelinerun/{pr_name}/logs"
+    return make_konflux_pipelinerun_url(pr_name)
 
 
 def _row_to_analysis(row: Dict[str, Any]) -> AnalysisDetails:

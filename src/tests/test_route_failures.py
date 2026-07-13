@@ -474,6 +474,7 @@ def test_list_alerts_minimal(
     now = datetime.utcnow()
 
     build_repo = MagicMock()
+    build_repo.get_applications.return_value = [{'application': 'rhoai-v2-19'}]
     build_repo.get_triage_summary.return_value = {
         "failing_components": [
             {
@@ -490,7 +491,7 @@ def test_list_alerts_minimal(
     mock_build.return_value = build_repo
 
     conforma_repo = MagicMock()
-    conforma_repo.find_unresolved_component_names.return_value = []
+    conforma_repo.get_violation_summaries.return_value = []
     mock_conforma.return_value = conforma_repo
 
     triage_repo = MagicMock()

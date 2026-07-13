@@ -135,7 +135,7 @@ def get_health_warnings(application: str):
     from mcp_server.models import HealthWarning
     from proactive.health_monitor import HealthMonitor
     monitor = HealthMonitor(get_pool())
-    checks = monitor.run_checks()
+    checks = monitor.run_checks(application=application)
     return [
         HealthWarning(
             type=w.signal_type,

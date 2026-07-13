@@ -241,8 +241,13 @@ class ConformaAnalyzer:
         commit_section = '\n'.join(commit_info) if commit_info else "- Commit: (not available)"
 
         # Targeted knowledge graph context (circuit-breaker protected)
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().conforma_context(violation)
+        try:
+            from knowledge.graph_provider import get_provider
+            graph_section = get_provider().conforma_context(violation)
+        except Exception:
+            graph_section = ""
+        # Store for later use at save time
+        self._last_graph_section = graph_section
 
         release_context = self._get_release_context(violation)
 
@@ -903,10 +908,6 @@ Use these URLs in evidence_references when relevant:
         # Estimate cost (same as build failures)
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
-        # Track graph context usage
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().conforma_context(violation)
-
         # Save to database (these fields live in analysis_json, not DB columns)
         analysis.pop('evidence_references', None)
         analysis.pop('source_transparency', None)
@@ -919,7 +920,7 @@ Use these URLs in evidence_references when relevant:
             cost_usd=cost_usd,
             analysis_duration=duration,
             analysis_json={'tool_calls': response.tool_calls,
-                           'graph_context_used': bool(graph_section)},
+                           'graph_context_used': bool(getattr(self, '_last_graph_section', ''))},
             **analysis
         )
 

@@ -149,10 +149,10 @@ class ChangeTracker:
             old_props = old["nodes"][nid]["props"]
             new_props = new["nodes"][nid]["props"]
             if old_props != new_props:
-                changed_keys = set()
-                for k in set(list(old_props.keys()) + list(new_props.keys())):
-                    if old_props.get(k) != new_props.get(k):
-                        changed_keys.add(k)
+                changed_keys = {
+                    k for k in set(old_props) | set(new_props)
+                    if old_props.get(k) != new_props.get(k)
+                }
                 changes.append(GraphChange(
                     change_type="modified",
                     entity_type="node",
@@ -226,7 +226,10 @@ class ChangeTracker:
         if not self.pg_conn_factory:
             results = list(self._memory_changes)
             if since:
-                results = [c for c in results if c["timestamp"] >= since.isoformat()]
+                results = [
+                    c for c in results
+                    if datetime.fromisoformat(c["timestamp"]) >= since
+                ]
             if entity_id:
                 results = [c for c in results if entity_id in c["entity_id"]]
             if change_type:

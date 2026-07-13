@@ -40,7 +40,7 @@ def _extract_code_blocks(skill_md_path):
 
         if line.startswith('```') and not in_block:
             lang = line[3:].strip().split()[0] if line[3:].strip() else ''
-            if lang in ('bash', 'sh', 'shell', 'python', 'python3', ''):
+            if lang in ('bash', 'sh', 'shell', 'python', 'python3'):
                 in_block = True
                 current = []
             else:
@@ -51,7 +51,7 @@ def _extract_code_blocks(skill_md_path):
             in_block = False
             code = '\n'.join(current).strip()
             if code and not code.startswith('# ic:skip') and not code.startswith('# example'):
-                blocks.append({'lang': lang or 'bash', 'code': code})
+                blocks.append({'lang': lang, 'code': code})
             continue
 
         if in_block:
@@ -81,7 +81,8 @@ class SkillExecutor:
         return resolve_working_dir(self.skill.path, self.skill.metadata.working_dir)
 
     def _skill_md_path(self):
-        skill_md = os.path.join(self._skill_dir(), 'SKILL.md')
+        # SKILL.md lives in the skill's own directory, not the resolved working_dir
+        skill_md = os.path.join(self.skill.path, 'SKILL.md')
         if os.path.isfile(skill_md):
             return skill_md
         return None
@@ -162,9 +163,18 @@ class SkillExecutor:
         if self.skill.metadata.ic_metadata:
             declared_env = self.skill.metadata.ic_metadata.requires_env
         env = get_safe_env(declared_vars=declared_env)
-        env.update(self.env_overrides)
+
+        allowed_keys = set(declared_env) | set(env.keys())
+        for k, v in self.env_overrides.items():
+            if k in allowed_keys:
+                env[k] = str(v)
+            else:
+                logger.warning("env_overrides key %s not in declared_env, skipped", k)
         for k, v in self.params.items():
-            env[k] = str(v)
+            if k in allowed_keys:
+                env[k] = str(v)
+            else:
+                logger.warning("param key %s not in declared_env, skipped", k)
 
         all_stdout = []
         all_stderr = []

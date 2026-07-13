@@ -598,9 +598,10 @@ class BuildFailureRepository:
             row = cursor.fetchone()
             total = row[0]
             enriched = row[1]
+            pct = enriched * 100 // total if total > 0 else 0
             return {
                 'total': total, 'enriched': enriched, 'failed': row[2],
-                'pct': enriched * 100 // max(total, 1),
+                'pct': min(pct, 100),
             }
 
     def get_failure_details(self, component, application):

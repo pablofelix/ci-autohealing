@@ -211,6 +211,7 @@ class AgentExecutor:
                         result.get('summary', ''),
                         result.get('status', 'success'),
                     )
+                    break
 
                 if result.get('stdout'):
                     preview = result['stdout'][:500]

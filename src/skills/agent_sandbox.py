@@ -7,6 +7,7 @@ same interface for cluster-based execution.
 
 import logging
 import os
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -56,23 +57,50 @@ class LocalSandbox(ToolSandbox):
         self._max_output = max_output_bytes
         self._temp_dir = None
 
+    # Word-boundary regex patterns resist quoting/variable-expansion bypass
     DENIED_PATTERNS = (
-        'rm -rf /', 'rm -rf ~', 'mkfs', 'dd if=',
-        'curl ', 'wget ', 'nc ', 'ncat ',
-        '> /etc/', '> /dev/', 'chmod 777',
-        'eval $(', '| bash', '| sh',
+        (r'\brm\s+-\w*r\w*f\s+[/~]', 'recursive delete of / or ~'),
+        (r'\bmkfs\b', 'filesystem format'),
+        (r'\bdd\s+if=', 'raw disk write'),
+        (r'\bcurl\b', 'network request (curl)'),
+        (r'\bwget\b', 'network request (wget)'),
+        (r'\bnc(at)?\b', 'network connect (nc/ncat)'),
+        (r'>\s*/etc/', 'write to /etc'),
+        (r'>\s*/dev/', 'write to /dev'),
+        (r'\bchmod\s+777\b', 'world-writable permissions'),
+        (r'\beval\s*\$\(', 'eval command substitution'),
+        (r'\|\s*(ba)?sh\b', 'pipe to shell'),
+    )
+    _COMPILED_DENIED = [(re.compile(p, re.IGNORECASE), desc) for p, desc in DENIED_PATTERNS]
+
+    # Shell expansion tricks that indicate bypass attempts
+    _EVASION_PATTERNS = re.compile(
+        r"(?:"
+        r"['\"]'['\"]"          # quote-splitting: cu''rl
+        r"|\\."                 # backslash escaping: cur\l
+        r"|\$\([^)]+\)"        # command substitution: $(echo curl)
+        r"|\$\{[^}]+\}"        # variable expansion: ${cmd}
+        r"|\bbase64\b"         # base64 encoding
+        r")",
+        re.IGNORECASE,
     )
 
     def execute(self, command, timeout=60, language='bash'):
         cmd_lower = command.lower().strip()
-        for pattern in self.DENIED_PATTERNS:
-            if pattern in cmd_lower:
-                logger.warning("Sandbox denied command matching '%s': %.120s",
-                               pattern, command)
+        for pattern, desc in self._COMPILED_DENIED:
+            if pattern.search(cmd_lower):
+                logger.warning("Sandbox denied command (%s): %.120s", desc, command)
                 return SandboxResult(
                     exit_code=-1, stdout='',
-                    stderr='Command denied: matches restricted pattern "{}"'.format(pattern),
+                    stderr='Command denied: {}'.format(desc),
                 )
+
+        if self._EVASION_PATTERNS.search(command):
+            logger.warning("Sandbox denied command (evasion pattern): %.120s", command)
+            return SandboxResult(
+                exit_code=-1, stdout='',
+                stderr='Command denied: contains shell evasion patterns',
+            )
 
         if language == 'python':
             cmd = ['python3', '-c', command]

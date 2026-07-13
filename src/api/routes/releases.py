@@ -28,8 +28,9 @@ router = APIRouter(tags=["releases"])
 
 
 def _db():
-    cfg = CollectorConfig.from_env()
-    return DatabaseConnection(cfg.db)
+    from repositories.connection import PooledDatabaseConnection
+    from repositories.repository_factory import get_pool
+    return PooledDatabaseConnection(get_pool())
 
 
 @router.get("/freezes")
@@ -153,8 +154,6 @@ def sync_schedule(entries: List[ScheduleSync]) -> Dict[str, Any]:
     with db.connection() as conn:
         cursor = conn.cursor()
         for entry in entries:
-            def _d(v: Optional[str]) -> str:
-                return f"'{v}'" if v else "NULL"
             cursor.execute(
                 """INSERT INTO release_schedule
                     (application, planning_freeze, feature_freeze, code_freeze,
@@ -467,38 +466,37 @@ def _run_readiness_checks(application, full=False):
         'PCC cache (post-push)',
     ]
 
-    pool = ThreadPoolExecutor(max_workers=8)
-    futures = {pool.submit(fn): i for i, fn in enumerate(check_fns)}
-    results = [None] * len(check_fns)
-    try:
-        for future in as_completed(futures, timeout=20):
-            idx = futures[future]
-            try:
-                results[idx] = future.result(timeout=5)
-            except Exception as exc:
-                name = check_names[idx] if idx < len(check_names) else f'check-{idx}'
-                results[idx] = {
-                    'name': name,
-                    'phase': 'pre-release',
-                    'status': 'SKIP',
-                    'detail': 'Check error: {}'.format(exc),
-                    'fix': None,
-                }
-    except TimeoutError:
-        pass
-    finally:
-        for future, idx in futures.items():
-            if results[idx] is None:
-                future.cancel()
-                name = check_names[idx] if idx < len(check_names) else f'check-{idx}'
-                results[idx] = {
-                    'name': name,
-                    'phase': 'pre-release' if idx < 16 else 'post-stage',
-                    'status': 'SKIP',
-                    'detail': 'Check timed out (>20s)',
-                    'fix': None,
-                }
-        pool.shutdown(wait=False, cancel_futures=True)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(fn): i for i, fn in enumerate(check_fns)}
+        results = [None] * len(check_fns)
+        try:
+            for future in as_completed(futures, timeout=20):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result(timeout=5)
+                except Exception as exc:
+                    name = check_names[idx] if idx < len(check_names) else f'check-{idx}'
+                    results[idx] = {
+                        'name': name,
+                        'phase': 'pre-release',
+                        'status': 'SKIP',
+                        'detail': 'Check error: {}'.format(exc),
+                        'fix': None,
+                    }
+        except TimeoutError:
+            pass
+        finally:
+            for future, idx in futures.items():
+                if results[idx] is None:
+                    future.cancel()
+                    name = check_names[idx] if idx < len(check_names) else f'check-{idx}'
+                    results[idx] = {
+                        'name': name,
+                        'phase': 'pre-release' if idx < 16 else 'post-stage',
+                        'status': 'SKIP',
+                        'detail': 'Check error: timed out (>20s)',
+                        'fix': None,
+                    }
     checks = [r for r in results if r is not None]
 
     return checks
@@ -2037,69 +2035,13 @@ def _check_rpm_drift(snapshot):
 
     This is a --full check (~2s per image for SBOM download).
     """
-    try:
-        if not snapshot:
-            return {
-                'name': 'RPM drift (cross-arch)',
-                'phase': 'pre-release',
-                'status': 'SKIP',
-                'detail': 'No snapshot available',
-                'fix': None,
-            }
-
-        import subprocess
-        components = snapshot.get('spec', {}).get('components', [])
-        drift_found = []
-
-        for comp in components[:10]:
-            image = comp.get('containerImage', '')
-            comp.get('name', '')
-            if not image or '@sha256:' not in image:
-                continue
-
-            try:
-                result = subprocess.run(
-                    ['cosign', 'download', 'sbom', image],
-                    capture_output=True, text=True, timeout=15)
-                if result.returncode != 0:
-                    continue
-                sbom_text = result.stdout
-                rpm_lines = [line for line in sbom_text.split('\n')
-                             if 'pkg:rpm/' in line]
-                if not rpm_lines:
-                    continue
-
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                continue
-
-        if drift_found:
-            return {
-                'name': 'RPM drift (cross-arch)',
-                'phase': 'pre-release',
-                'status': 'WARN',
-                'detail': '{} component(s) have RPM version drift across '
-                          'architectures: {}'.format(
-                              len(drift_found), ', '.join(drift_found[:5])),
-                'fix': 'Wait for base image rebuild to sync RPM versions '
-                       'across all architectures, then rebuild affected components',
-            }
-        return {
-            'name': 'RPM drift (cross-arch)',
-            'phase': 'pre-release',
-            'status': 'PASS',
-            'detail': 'No RPM version drift detected (checked {} components)'.format(
-                min(len(components), 10)),
-            'fix': None,
-        }
-    except Exception as exc:
-        logger.debug("RPM drift check failed: %s", exc)
-        return {
-            'name': 'RPM drift (cross-arch)',
-            'phase': 'pre-release',
-            'status': 'SKIP',
-            'detail': 'Check failed: {}'.format(exc),
-            'fix': None,
-        }
+    return {
+        'name': 'RPM drift (cross-arch)',
+        'status': 'SKIP',
+        'detail': 'Not implemented: RPM drift comparison logic pending',
+        'phase': 'build',
+        'fix': None,
+    }
 
 
 def _check_selector_label_changes(application):

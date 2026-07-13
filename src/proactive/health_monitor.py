@@ -46,10 +46,10 @@ class HealthMonitor:
     def __init__(self, db):
         self.db = db
 
-    def run_checks(self):
+    def run_checks(self, application=None):
         """Run all proactive checks. Returns list of warnings."""
         warnings = []
-        warnings.extend(self.get_degrading_components())
+        warnings.extend(self.get_degrading_components(application=application))
         warnings.extend(self.get_pattern_cascades())
         warnings.extend(self.get_repeat_failures())
         warnings.extend(self.get_cve_warnings())
@@ -58,19 +58,31 @@ class HealthMonitor:
         warnings.extend(self.get_pcc_freshness_warnings())
         return warnings
 
-    def get_degrading_components(self):
+    def get_degrading_components(self, application=None):
         """Find components with health_status = warning/critical or consecutive_failures >= 2."""
         with self.db.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT component_name, application, health_status, health_score,
-                       consecutive_failures, success_rate_last_7d, success_rate_last_30d,
-                       total_failures_last_7d
-                FROM component_health
-                WHERE health_status IN ('warning', 'critical')
-                   OR consecutive_failures >= 2
-                ORDER BY health_score ASC NULLS FIRST, consecutive_failures DESC
-            """)
+            if application:
+                cursor.execute("""
+                    SELECT component_name, application, health_status, health_score,
+                           consecutive_failures, success_rate_last_7d, success_rate_last_30d,
+                           total_failures_last_7d
+                    FROM component_health
+                    WHERE (health_status IN ('warning', 'critical')
+                       OR consecutive_failures >= 2)
+                      AND application = %s
+                    ORDER BY health_score ASC NULLS FIRST, consecutive_failures DESC
+                """, (application,))
+            else:
+                cursor.execute("""
+                    SELECT component_name, application, health_status, health_score,
+                           consecutive_failures, success_rate_last_7d, success_rate_last_30d,
+                           total_failures_last_7d
+                    FROM component_health
+                    WHERE health_status IN ('warning', 'critical')
+                       OR consecutive_failures >= 2
+                    ORDER BY health_score ASC NULLS FIRST, consecutive_failures DESC
+                """)
             cols = [d[0] for d in cursor.description]
             rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
 
