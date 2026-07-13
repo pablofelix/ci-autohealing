@@ -13,6 +13,7 @@ from tekton_parsers import (
     extract_pr_number_from_annotations,
     extract_taskrun_names,
     extract_verify_taskrun_name,
+    pick_primary_failure,
 )
 
 # -- extract_taskrun_names --
@@ -282,3 +283,54 @@ def test_verify_taskrun_found():
 def test_verify_taskrun_not_found():
     assert extract_verify_taskrun_name({}) is None
     assert extract_verify_taskrun_name({'status': {'childReferences': []}}) is None
+
+
+# -- pick_primary_failure --
+
+def test_pick_primary_failure_single():
+    failures = [('fips-check', 'patchelf not linked', 'full logs')]
+    assert pick_primary_failure(failures, {}) == ('fips-check', 'patchelf not linked', 'full logs')
+
+
+def test_pick_primary_failure_prefers_build_over_sideeffect():
+    failures = [
+        ('coverity-availability-check', 'license expired', 'coverity logs'),
+        ('fips-check', 'patchelf not linked', 'fips logs'),
+    ]
+    result = pick_primary_failure(failures, {})
+    assert result[0] == 'fips-check'
+
+
+def test_pick_primary_failure_prefers_build_container():
+    failures = [
+        ('sast-snyk-check', 'snyk error', 'snyk logs'),
+        ('build-container', 'OOM killed', 'build logs'),
+    ]
+    result = pick_primary_failure(failures, {})
+    assert result[0] == 'build-container'
+
+
+def test_pick_primary_failure_condition_message_match():
+    pr_data = {'status': {'conditions': [
+        {'status': 'False', 'message': 'Tasks Completed: 5 (Failed: 1): "fips-check"'}
+    ]}}
+    failures = [
+        ('coverity-availability-check', 'license expired', 'coverity logs'),
+        ('fips-check', 'patchelf not linked', 'fips logs'),
+    ]
+    result = pick_primary_failure(failures, pr_data)
+    assert result[0] == 'fips-check'
+
+
+def test_pick_primary_failure_prefers_logs_over_no_logs():
+    failures = [
+        ('fips-check', 'condition msg only', None),
+        ('clamav-scan', 'virus found', 'full scan logs here'),
+    ]
+    result = pick_primary_failure(failures, {})
+    # Same priority tier — prefer the one with logs
+    assert result[0] == 'clamav-scan'
+
+
+def test_pick_primary_failure_empty():
+    assert pick_primary_failure([], {}) == (None, None, None)
