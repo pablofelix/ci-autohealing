@@ -1466,13 +1466,11 @@ class ReleaseFailureAnalyzer:
                     tc.setdefault('input', {})['artifact_health'] = artifact_summaries
                     break
 
-        # Track graph context usage in analysis_json
-        graph_used = bool(getattr(self, '_last_graph_section', ''))
-        if isinstance(tool_calls, list):
-            for tc in tool_calls:
-                if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
-                    tc.setdefault('input', {})['graph_context_used'] = graph_used
-                    break
+        # Track graph context usage in analysis_json (top-level for SQL queries)
+        analysis_json = {
+            'tool_calls': tool_calls,
+            'graph_context_used': bool(getattr(self, '_last_graph_section', '')),
+        }
 
         analysis_id = self.ai_repo.insert_release_analysis(
             release_name=release_name,
@@ -1481,7 +1479,7 @@ class ReleaseFailureAnalyzer:
             tokens_used=response.input_tokens + response.output_tokens,
             cost_usd=cost_usd,
             analysis_duration=duration,
-            analysis_json=tool_calls,
+            analysis_json=analysis_json,
             **analysis
         )
 

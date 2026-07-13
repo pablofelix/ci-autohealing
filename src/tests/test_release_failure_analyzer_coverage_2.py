@@ -1633,9 +1633,12 @@ class TestAnalyzeReleaseArtifactHealth:
         # Verify that tool_calls were modified to include artifact_health
         call_args = analyzer.ai_repo.insert_release_analysis.call_args
         analysis_json = call_args.kwargs.get('analysis_json') or call_args[1].get('analysis_json')
+        # analysis_json should be a dict with tool_calls list
+        assert isinstance(analysis_json, dict), "analysis_json should be a dict"
+        tool_calls = analysis_json.get('tool_calls', [])
         # The tool_calls list should have artifact_health embedded
         found_artifact_health = False
-        for tc in analysis_json:
+        for tc in tool_calls:
             if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
                 if 'artifact_health' in tc.get('input', {}):
                     found_artifact_health = True
@@ -1677,7 +1680,9 @@ class TestAnalyzeReleaseArtifactHealth:
 
         call_args = analyzer.ai_repo.insert_release_analysis.call_args
         analysis_json = call_args.kwargs.get('analysis_json') or call_args[1].get('analysis_json')
-        for tc in analysis_json:
+        assert isinstance(analysis_json, dict), "analysis_json should be a dict"
+        tool_calls = analysis_json.get('tool_calls', [])
+        for tc in tool_calls:
             if isinstance(tc, dict) and tc.get('name') == 'record_release_analysis':
                 assert 'artifact_health' not in tc.get('input', {})
 
