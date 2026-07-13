@@ -303,21 +303,15 @@ def get_readiness(
     unresolved_conforma = conforma_repo.find_unresolved_component_names(application)
     conforma_count = len(unresolved_conforma)
 
-    from conforma.policy_tools import (
-        compute_blocks,
-        compute_exception_coverage_details,
-        extract_violation_rules,
-        fetch_exceptions_by_policy,
-    )
+    from conforma.policy_tools import fetch_exceptions_by_policy
+    from conforma.exception_enrichment import enrich_with_exception_coverage
     summaries = conforma_repo.get_violation_summaries(application)
     exceptions_by_policy = fetch_exceptions_by_policy()
     blocking_components = set()
     for s in summaries:
-        rules = extract_violation_rules(s.get('violation_summary', ''))
-        cov = compute_exception_coverage_details(
-            rules, s.get('scenario', ''), exceptions_by_policy)
-        blocks = compute_blocks(s.get('scenario', ''), cov['stage'], cov['prod'])
-        if blocks not in ('none', ''):
+        cov = enrich_with_exception_coverage(
+            s.get('violation_summary', ''), s.get('scenario', ''), exceptions_by_policy)
+        if cov['blocks'] not in ('none', ''):
             blocking_components.add(s['component_name'])
     blocking_count = len(blocking_components)
 

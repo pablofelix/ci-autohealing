@@ -228,19 +228,10 @@ def list_alerts(application: str):
 
     from conforma.policy_tools import (
         categorize_policy,
-        compute_blocks,
-        compute_exception_coverage_details,
         count_unique_violations,
-        extract_policy_from_scenario,
-        extract_violation_rules,
         fetch_exceptions_by_policy,
     )
-    from conforma.policy_tools import (
-        policy_env as _policy_env,
-    )
-    from conforma.policy_tools import (
-        policy_url as _policy_url,
-    )
+    from conforma.exception_enrichment import enrich_with_exception_coverage
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     conforma_violations = []
     summaries = _conforma_repo().get_violation_summaries(application)
@@ -249,12 +240,10 @@ def list_alerts(application: str):
         comp_name = details['component_name']
         scenario = details.get('scenario', '')
         jira_key = details.get('jira_key') or triage_jira.get(comp_name)
-        rules = extract_violation_rules(details.get('violation_summary', ''))
-        cov = compute_exception_coverage_details(
-            rules, scenario, exceptions_by_policy)
+        cov = enrich_with_exception_coverage(
+            details.get('violation_summary', ''), scenario, exceptions_by_policy)
         uv_count, _ = count_unique_violations(
             details.get('violation_summary', ''))
-        pname = extract_policy_from_scenario(scenario)
         c_fs = details.get('first_detected_at', datetime.utcnow())
         c_ls = details.get('last_updated_at', datetime.utcnow())
         c_age, c_new, c_chg = _compute_age_signals(c_fs, c_ls)
@@ -275,14 +264,14 @@ def list_alerts(application: str):
             warnings_count=details.get('warnings_count', 0),
             scenario=scenario,
             category=categorize_policy(scenario),
-            policy_url=_policy_url(scenario),
+            policy_url=cov['policy_url'],
             jira_key=jira_key,
             exception_coverage=cov['coverage'],
             exception_coverage_stage=cov['stage'],
             exception_coverage_prod=cov['prod'],
             exception_env_tag=cov['env_tag'],
-            policy_env=_policy_env(pname),
-            blocks=compute_blocks(scenario, cov['stage'], cov['prod']),
+            policy_env=cov['policy_env'],
+            blocks=cov['blocks'],
             policy_url_stage=cov['policy_url_stage'],
             policy_url_prod=cov['policy_url_prod'],
             uncovered_rules_stage=cov['uncovered_rules_stage'],
