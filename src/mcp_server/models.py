@@ -51,6 +51,7 @@ class FailureSummary(BaseModel):
     is_nightly: bool = Field(False, description="Most recent build was a nightly (trigger_type=nightly)")
     failed_step: Optional[str] = Field(None, description="Pipeline step that failed (e.g. build-images, fips-check)")
     konflux_url: Optional[str] = Field(None, description="Link to PipelineRun in Konflux")
+    offboarding_note: Optional[str] = Field(None, description="Set when component is being offboarded — alert is expected noise")
 
 
 class BuildFailureDetails(BaseModel):
