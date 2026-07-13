@@ -542,7 +542,7 @@ def list_blockers(application: str) -> BlockersSummary:
             critical_signals.append('{} resolved ({}) but still open'.format(
                 b['key'], b['resolution']))
 
-        blocker_category = categorize_blocker(b.get('summary', ''))
+        blocker_category = categorize_blocker(b.get('summary', ''), b.get('labels', []))
 
         hw_keywords = ['gaudi', 'spyre', 'gpu', 'rocm', 'cuda', 'hardware']
         hw_match = [kw for kw in hw_keywords
