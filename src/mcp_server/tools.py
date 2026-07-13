@@ -2285,6 +2285,24 @@ def get_nightly_history(application: str = DEFAULT_APPLICATION, days: int = 14) 
     return repo.get_nightly_history(application, days=days)
 
 
+@mcp.tool()
+def get_nightly_chain(application: str = DEFAULT_APPLICATION) -> Dict[str, Any]:
+    """Get the nightly build chain view: GHA Trigger → Operator Build → FBC Fragment → PCC Cache.
+
+    Returns a 4-step chain timeline showing where the nightly build broke.
+    chain_status: "healthy" (all pass), "broken" (any fail), "unknown" (all skip).
+    break_point: name of first failing step, or null if healthy.
+    """
+    from config import CollectorConfig
+    from proactive.health_monitor import HealthMonitor
+    from repositories.connection import DatabaseConnection
+
+    cfg = CollectorConfig.from_env()
+    db = DatabaseConnection(cfg.db)
+    monitor = HealthMonitor(db)
+    return monitor.get_nightly_chain(application)
+
+
 # ---------------------------------------------------------------------------
 # Runtime configuration tools
 # ---------------------------------------------------------------------------
