@@ -5,10 +5,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import pytest
 from unittest.mock import patch
 
-from clients.jira_query_builder import app_to_jira_versions, JiraBlockerQuery
+import pytest
+
+from clients.jira_query_builder import JiraBlockerQuery, app_to_jira_versions
 
 
 @pytest.mark.parametrize(
@@ -108,3 +109,11 @@ class TestSignoffCategorization:
     def test_tfa_bug_detected(self):
         from clients.jira_query_builder import categorize_blocker
         assert categorize_blocker('TFA: test-failure in smoke suite') == 'tfa'
+
+    def test_tfa_detected_by_label(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('Generic blocker summary', labels=['tfa', 'blocker-process-notified']) == 'tfa'
+
+    def test_labels_none_defaults_to_product(self):
+        from clients.jira_query_builder import categorize_blocker
+        assert categorize_blocker('Generic blocker summary') == 'product'
