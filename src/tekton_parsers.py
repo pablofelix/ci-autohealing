@@ -71,63 +71,70 @@ _ERROR_PATTERNS = [
 ]
 
 
+def extract_all_errors_from_logs(logs):
+    """Extract all error messages and their categories from build logs.
+
+    Same filtering as extract_error_from_logs but returns ALL matches.
+
+    Returns:
+        List of (error_message, error_type) tuples. Empty list if none found.
+    """
+    if not logs:
+        return []
+
+    lines = logs.split('\n')
+    results = []
+    matched_lines = set()
+
+    script_indicators = [
+        r'^\s*(echo|cat|printf|print)\s+["\']',
+        r'^\s*#',
+        r'<<["\']?EOF',
+        r'^\s*function\s+',
+        r'^\s*\w+\(\)\s*{',
+    ]
+
+    metadata_patterns = [
+        r'Slack Message:',
+        r'pull request pipeline detected',
+        r'CC -.*subteam',
+        r'Status:.*\(cluster:',
+        r'Build URL:',
+        r'DEBUG INFORMATION',
+    ]
+
+    for i, line in enumerate(lines):
+        if i in matched_lines:
+            continue
+        if any(re.match(pattern, line) for pattern in script_indicators):
+            continue
+        if re.search(r'>&\d+\s*$', line):
+            continue
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in metadata_patterns):
+            continue
+
+        for pattern, error_type in _ERROR_PATTERNS:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                start = max(0, i - 2)
+                end = min(len(lines), i + 3)
+                context = '\n'.join(lines[start:end])
+                results.append((context[:500], error_type))
+                matched_lines.add(i)
+                break
+
+    return results
+
+
 def extract_error_from_logs(logs):
     """Extract an error message and its category from build logs.
-
-    Filters out script source code, metadata, and Slack messages.
-    Only matches actual execution errors.
 
     Returns:
         (error_message, error_type) or (None, None) if no error found.
     """
-    if not logs:
-        return None, None
-
-    # Split into lines for context-aware filtering
-    lines = logs.split('\n')
-
-    # Patterns that indicate script source code (not execution)
-    script_indicators = [
-        r'^\s*(echo|cat|printf|print)\s+["\']',  # echo "ERROR..."
-        r'^\s*#',                                  # Comments
-        r'<<["\']?EOF',                            # Heredocs
-        r'^\s*function\s+',                        # Function definitions
-        r'^\s*\w+\(\)\s*{',                        # Function definitions (bash)
-    ]
-
-    # Patterns to skip (metadata, not actual errors)
-    metadata_patterns = [
-        r'Slack Message:',                         # Slack notifications
-        r'pull request pipeline detected',         # PR detection messages
-        r'CC -.*subteam',                          # Slack mentions
-        r'Status:.*\(cluster:',                    # Status messages
-        r'Build URL:',                             # Metadata URLs
-        r'DEBUG INFORMATION',                      # Debug sections
-    ]
-
-    for i, line in enumerate(lines):
-        # Skip if this looks like script source code
-        if any(re.match(pattern, line) for pattern in script_indicators):
-            continue
-
-        # Skip if line ends with >&2 or similar (script redirects)
-        if re.search(r'>&\d+\s*$', line):
-            continue
-
-        # Skip metadata/notification messages
-        if any(re.search(pattern, line, re.IGNORECASE) for pattern in metadata_patterns):
-            continue
-
-        # Now try to match error patterns on execution output only
-        for pattern, error_type in _ERROR_PATTERNS:
-            match = re.search(pattern, line, re.IGNORECASE)
-            if match:
-                # Get some context (2 lines before and after)
-                start = max(0, i - 2)
-                end = min(len(lines), i + 3)
-                context = '\n'.join(lines[start:end])
-                return context[:500], error_type
-
+    errors = extract_all_errors_from_logs(logs)
+    if errors:
+        return errors[0]
     return None, None
 
 
