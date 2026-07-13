@@ -131,6 +131,59 @@ def extract_error_from_logs(logs):
     return None, None
 
 
+_TASK_PRIORITY = {
+    'build-container': 0,
+    'build-images': 0,
+    'build-image-index': 0,
+    'fips-check': 1,
+    'verify-conforma': 1,
+    'sast-snyk-check': 2,
+    'clamav-scan': 2,
+    'rpms-signature-scan': 2,
+    'coverity-availability-check': 3,
+    'sast-coverity-check': 3,
+}
+
+_DEFAULT_PRIORITY = 2
+
+
+def pick_primary_failure(failures, pr_data):
+    """Pick the most relevant failure from a list of failed TaskRuns.
+
+    Heuristic:
+    1. Match task name mentioned in PipelineRun condition message
+    2. Prefer build-critical tasks over side-effect tasks
+    3. Prefer failures with actual logs over condition-only messages
+    4. Fall back to first in list
+
+    Args:
+        failures: list of (task_name, error_msg, logs) tuples
+        pr_data: PipelineRun dict for condition message parsing
+
+    Returns:
+        (task_name, error_msg, logs) or (None, None, None) if empty
+    """
+    if not failures:
+        return (None, None, None)
+    if len(failures) == 1:
+        return failures[0]
+
+    conditions = pr_data.get('status', {}).get('conditions', [])
+    if conditions:
+        msg = conditions[-1].get('message', '')
+        for task_name, error_msg, logs in failures:
+            if task_name and '"{}"'.format(task_name) in msg:
+                return (task_name, error_msg, logs)
+
+    def sort_key(entry):
+        task_name, _, logs = entry
+        priority = _TASK_PRIORITY.get(task_name, _DEFAULT_PRIORITY)
+        has_logs = 0 if logs else 1
+        return (has_logs, priority)
+
+    return sorted(failures, key=sort_key)[0]
+
+
 def extract_failed_step_from_logs(logs):
     """Extract the failed step name from TaskRun/Step markers in logs."""
     if not logs:
