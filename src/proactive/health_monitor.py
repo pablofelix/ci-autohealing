@@ -29,6 +29,170 @@ def _nightly_component_for_app(application):
     return '{}-fbc-fragment-v{}'.format(prefix, version)
 
 
+def _correlate_nightly_chain(status, history):
+    """Correlate nightly status + history into a 4-step chain view.
+
+    Pure function — no DB or API calls.
+    """
+    steps = []
+    fbc_component = status.get('fbc_component', '')
+
+    # Step 1: GHA Trigger
+    gha = status.get('gha_validation')
+    if gha:
+        conclusion = gha.get('conclusion', 'unknown')
+        gha_status = 'pass' if conclusion == 'success' else 'fail'
+        steps.append({
+            'name': 'GHA Trigger',
+            'status': gha_status,
+            'timestamp': gha.get('created_at'),
+            'detail': 'trigger-nightlies.yaml {}'.format(conclusion),
+            'url': gha.get('url'),
+        })
+    else:
+        steps.append({
+            'name': 'GHA Trigger',
+            'status': 'skip',
+            'timestamp': None,
+            'detail': 'no GHA data (token missing?)',
+            'url': None,
+        })
+
+    # Step 2: Operator Build — nightly builds excluding FBC fragment
+    nightly_builds = history.get('nightly_builds', [])
+    operator_builds = [b for b in nightly_builds if b['component_name'] != fbc_component]
+    if operator_builds:
+        failed = [b for b in operator_builds if b.get('status') == 'Failed']
+        total = len(operator_builds)
+        if failed:
+            steps.append({
+                'name': 'Operator Build',
+                'status': 'fail',
+                'timestamp': str(operator_builds[0].get('build_completion_time', '')) or None,
+                'detail': '{}/{} failed'.format(len(failed), total),
+                'url': None,
+            })
+        else:
+            steps.append({
+                'name': 'Operator Build',
+                'status': 'pass',
+                'timestamp': str(operator_builds[0].get('build_completion_time', '')) or None,
+                'detail': '{}/{} passed'.format(total, total),
+                'url': None,
+            })
+    else:
+        steps.append({
+            'name': 'Operator Build',
+            'status': 'skip',
+            'timestamp': None,
+            'detail': 'no recent nightly builds',
+            'url': None,
+        })
+
+    # Step 3: FBC Fragment
+    fbc_health = status.get('fbc_health')
+    fbc_builds = [b for b in nightly_builds if b['component_name'] == fbc_component]
+    if fbc_health:
+        fbc_st = fbc_health.get('current_status', 'unknown')
+        fbc_step = {
+            'name': 'FBC Fragment',
+            'status': 'pass' if fbc_st == 'Succeeded' else 'fail',
+            'timestamp': str(fbc_builds[0]['build_completion_time']) if fbc_builds else None,
+            'detail': '{} build {}'.format(fbc_component, 'succeeded' if fbc_st == 'Succeeded' else 'failed'),
+            'url': None,
+        }
+        blockers = status.get('blockers', [])
+        if blockers:
+            fbc_step['blockers'] = [b['component'] for b in blockers]
+        steps.append(fbc_step)
+    elif fbc_builds:
+        fbc_st = fbc_builds[0].get('status', 'unknown')
+        steps.append({
+            'name': 'FBC Fragment',
+            'status': 'pass' if fbc_st == 'Succeeded' else 'fail',
+            'timestamp': str(fbc_builds[0]['build_completion_time']),
+            'detail': '{} build {}'.format(fbc_component, fbc_st.lower()),
+            'url': None,
+        })
+    else:
+        steps.append({
+            'name': 'FBC Fragment',
+            'status': 'skip',
+            'timestamp': None,
+            'detail': 'no FBC data',
+            'url': None,
+        })
+
+    # Step 4: PCC Cache
+    pcc = status.get('pcc_freshness')
+    if pcc:
+        pcc_st = pcc.get('status', 'unknown')
+        if pcc_st == 'fresh':
+            steps.append({
+                'name': 'PCC Cache',
+                'status': 'pass',
+                'timestamp': None,
+                'detail': '{} versions cached'.format(pcc.get('cached_versions', 0)),
+                'url': None,
+            })
+        elif pcc_st == 'stale':
+            steps.append({
+                'name': 'PCC Cache',
+                'status': 'fail',
+                'timestamp': None,
+                'detail': 'cache stale',
+                'url': None,
+            })
+        else:
+            steps.append({
+                'name': 'PCC Cache',
+                'status': 'skip',
+                'timestamp': None,
+                'detail': 'PCC status unknown',
+                'url': None,
+            })
+    else:
+        steps.append({
+            'name': 'PCC Cache',
+            'status': 'skip',
+            'timestamp': None,
+            'detail': 'PCC check unavailable',
+            'url': None,
+        })
+
+    # Derive chain_date from GHA or first build
+    chain_date = None
+    if gha and gha.get('created_at'):
+        chain_date = gha['created_at'][:10]
+    elif nightly_builds:
+        ts = nightly_builds[0].get('build_completion_time')
+        if ts:
+            chain_date = str(ts)[:10]
+
+    # Derive chain_status
+    statuses = [s['status'] for s in steps]
+    if all(s == 'skip' for s in statuses):
+        chain_status = 'unknown'
+    elif any(s == 'fail' for s in statuses):
+        chain_status = 'broken'
+    else:
+        chain_status = 'healthy'
+
+    break_point = None
+    if chain_status == 'broken':
+        for s in steps:
+            if s['status'] == 'fail':
+                break_point = s['name']
+                break
+
+    return {
+        'chain_date': chain_date,
+        'steps': steps,
+        'chain_status': chain_status,
+        'break_point': break_point,
+    }
+
+
 @dataclass
 class HealthWarning:
     """A proactive warning about a component or pattern."""
@@ -43,8 +207,9 @@ class HealthWarning:
 class HealthMonitor:
     """Detects degrading components and cross-app pattern cascades."""
 
-    def __init__(self, db):
+    def __init__(self, db, default_app='rhoai-v3-5'):
         self.db = db
+        self.default_app = default_app
 
     def run_checks(self, application=None):
         """Run all proactive checks. Returns list of warnings."""
@@ -452,6 +617,17 @@ class HealthMonitor:
             'gha_validation': gha_validation,
             'pcc_freshness': pcc_freshness,
         }
+
+    def get_nightly_chain(self, application=None):
+        """Get the nightly build chain view — 4-step timeline."""
+        application = application or self.default_app
+        status = self.get_nightly_status(application)
+        from repositories.build_failure_repository import BuildFailureRepository
+        build_repo = BuildFailureRepository(self.db)
+        history = build_repo.get_nightly_history(application, days=3)
+        result = _correlate_nightly_chain(status, history)
+        result['application'] = application
+        return result
 
     def get_pcc_freshness_warnings(self):
         """Generate HealthWarning entries if the PCC cache is stale."""
