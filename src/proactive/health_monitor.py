@@ -64,11 +64,13 @@ def _correlate_nightly_chain(status, history):
     if operator_builds:
         failed = [b for b in operator_builds if b.get('status') == 'Failed']
         total = len(operator_builds)
+        ts = operator_builds[0].get('build_completion_time')
+        timestamp = ts.isoformat() if hasattr(ts, 'isoformat') else (str(ts) if ts else None)
         if failed:
             steps.append({
                 'name': 'Operator Build',
                 'status': 'fail',
-                'timestamp': str(operator_builds[0].get('build_completion_time', '')) or None,
+                'timestamp': timestamp,
                 'detail': '{}/{} failed'.format(len(failed), total),
                 'url': None,
             })
@@ -76,7 +78,7 @@ def _correlate_nightly_chain(status, history):
             steps.append({
                 'name': 'Operator Build',
                 'status': 'pass',
-                'timestamp': str(operator_builds[0].get('build_completion_time', '')) or None,
+                'timestamp': timestamp,
                 'detail': '{}/{} passed'.format(total, total),
                 'url': None,
             })
@@ -94,10 +96,12 @@ def _correlate_nightly_chain(status, history):
     fbc_builds = [b for b in nightly_builds if b['component_name'] == fbc_component]
     if fbc_health:
         fbc_st = fbc_health.get('current_status', 'unknown')
+        ts = fbc_builds[0]['build_completion_time'] if fbc_builds else None
+        timestamp = ts.isoformat() if hasattr(ts, 'isoformat') else (str(ts) if ts else None)
         fbc_step = {
             'name': 'FBC Fragment',
             'status': 'pass' if fbc_st == 'Succeeded' else 'fail',
-            'timestamp': str(fbc_builds[0]['build_completion_time']) if fbc_builds else None,
+            'timestamp': timestamp,
             'detail': '{} build {}'.format(fbc_component, 'succeeded' if fbc_st == 'Succeeded' else 'failed'),
             'url': None,
         }
@@ -107,10 +111,12 @@ def _correlate_nightly_chain(status, history):
         steps.append(fbc_step)
     elif fbc_builds:
         fbc_st = fbc_builds[0].get('status', 'unknown')
+        ts = fbc_builds[0]['build_completion_time']
+        timestamp = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
         steps.append({
             'name': 'FBC Fragment',
             'status': 'pass' if fbc_st == 'Succeeded' else 'fail',
-            'timestamp': str(fbc_builds[0]['build_completion_time']),
+            'timestamp': timestamp,
             'detail': '{} build {}'.format(fbc_component, fbc_st.lower()),
             'url': None,
         })
@@ -207,9 +213,8 @@ class HealthWarning:
 class HealthMonitor:
     """Detects degrading components and cross-app pattern cascades."""
 
-    def __init__(self, db, default_app='rhoai-v3-5'):
+    def __init__(self, db):
         self.db = db
-        self.default_app = default_app
 
     def run_checks(self, application=None):
         """Run all proactive checks. Returns list of warnings."""
@@ -618,9 +623,8 @@ class HealthMonitor:
             'pcc_freshness': pcc_freshness,
         }
 
-    def get_nightly_chain(self, application=None):
+    def get_nightly_chain(self, application):
         """Get the nightly build chain view — 4-step timeline."""
-        application = application or self.default_app
         status = self.get_nightly_status(application)
         from repositories.build_failure_repository import BuildFailureRepository
         build_repo = BuildFailureRepository(self.db)

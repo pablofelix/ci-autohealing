@@ -186,3 +186,13 @@ class TestStepDetails:
         history = _make_history(builds=[_make_build('odh-operator-v3-5')])
         result = _correlate_nightly_chain(status, history)
         assert '15 versions cached' in result['steps'][3]['detail']
+
+    def test_fbc_health_without_builds(self):
+        """FBC health data exists but no FBC builds in history — timestamp should be None."""
+        status = _make_status(fbc_status='Succeeded')
+        history = _make_history(builds=[_make_build('odh-operator-v3-5')])
+        result = _correlate_nightly_chain(status, history)
+        fbc_step = result['steps'][2]
+        assert fbc_step['name'] == 'FBC Fragment'
+        assert fbc_step['status'] == 'pass'
+        assert fbc_step['timestamp'] is None
