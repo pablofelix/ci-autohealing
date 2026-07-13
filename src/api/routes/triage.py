@@ -2,9 +2,10 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
+from api.errors import not_found, validation_error
 from repositories.repository_factory import get_repository
 from repositories.triage_repository import TriageRepository
 
@@ -66,7 +67,7 @@ def get_triage_item(application: str, item_id: int) -> Dict[str, Any]:
     repo = _triage_repo()
     item = repo.get_by_id(item_id)
     if not item:
-        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+        not_found("Triage item", f"#{item_id}")
     return item
 
 
@@ -78,8 +79,7 @@ def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
     if req.add_to_id:
         existing = repo.get_by_id(req.add_to_id)
         if not existing:
-            raise HTTPException(status_code=404,
-                                detail=f"Triage item #{req.add_to_id} not found")
+            not_found("Triage item", f"#{req.add_to_id}")
         components = list(existing['components'])
         if req.component not in components:
             components.append(req.component)
@@ -116,12 +116,12 @@ def update_triage_item(application: str, item_id: int, req: UpdateRequest) -> Di
     repo = _triage_repo()
     existing = repo.get_by_id(item_id)
     if not existing:
-        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+        not_found("Triage item", f"#{item_id}")
 
     updates = {k: v for k, v in req.model_dump().items()
                if v is not None and k != 'slack_thread_url'}
     if not updates and not req.slack_thread_url:
-        raise HTTPException(status_code=400, detail="No updates provided")
+        validation_error("No updates provided")
 
     if updates:
         repo.update_item(item_id, **updates)
@@ -137,7 +137,7 @@ def resolve_triage_item(application: str, item_id: int, req: ResolveRequest) -> 
     repo = _triage_repo()
     existing = repo.get_by_id(item_id)
     if not existing:
-        raise HTTPException(status_code=404, detail=f"Triage item #{item_id} not found")
+        not_found("Triage item", f"#{item_id}")
 
     repo.resolve_item(item_id, resolution=req.resolution, pr_url=req.resolution_pr_url)
 
