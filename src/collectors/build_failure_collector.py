@@ -30,6 +30,7 @@ from tekton_parsers import (
     extract_failed_step_from_pipelinerun,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
+    pick_primary_failure,
 )
 
 logger = setup_logger(__name__)
@@ -305,9 +306,10 @@ class BuildFailureCollector:
         return None
 
     def _find_failed_taskrun(self, pr_name, pr_data):
-        """Find the TaskRun that actually failed and extract its error and logs.
+        """Find the primary failed TaskRun and extract its error and logs.
 
-        Tries KubeArchive first, then falls back to Tekton Results.
+        Collects ALL failed TaskRuns, then picks the most relevant one
+        using pick_primary_failure heuristic.
 
         Returns:
             Tuple of (failed_task_name, error_from_taskrun, failed_task_logs)
@@ -316,6 +318,7 @@ class BuildFailureCollector:
             return None, None, None
 
         child_refs = pr_data.get('status', {}).get('childReferences', [])
+        failures = []
 
         for ref in child_refs:
             if ref.get('kind') != 'TaskRun':
@@ -347,12 +350,15 @@ class BuildFailureCollector:
                         if not error_msg and condition_msg:
                             error_msg = condition_msg
 
-                        return task_name, error_msg, tr_logs
+                        failures.append((task_name, error_msg, tr_logs))
             except Exception as e:
                 logger.debug("Could not fetch TaskRun %s: %s", tr_name, e)
                 continue
 
-        # Fallback 1: Tekton Results (has records KubeArchive may have lost)
+        if failures:
+            return pick_primary_failure(failures, pr_data)
+
+        # Fallback 1: Tekton Results
         try:
             task_name, logs, _ = self.tekton_results.find_failed_taskrun(pr_name)
             if task_name:
