@@ -242,6 +242,22 @@ def extract_pr_number_from_annotations(annotations):
     return None
 
 
+def extract_failed_task_names_from_conditions(message):
+    """Parse failed task names from a PipelineRun condition message.
+
+    Tekton formats: 'Tasks Completed: N (Failed: M): "task1", "task2"'
+
+    Returns:
+        List of task names, or empty list.
+    """
+    if not message:
+        return []
+    match = re.search(r'Failed:\s*(\d+)', message)
+    if not match or match.group(1) == '0':
+        return []
+    return re.findall(r'"([^"]+)"', message)
+
+
 def extract_pipelinerun_metadata(pr_data, namespace, application_name):
     """Extract all useful metadata from a PipelineRun dict.
 
@@ -290,12 +306,18 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
     start_time = status.get('startTime')
     completion_time = status.get('completionTime')
 
+    # Extract failed tasks from conditions message, fallback to all tasks
+    conditions = status.get('conditions', [])
     failed_tasks = []
-    for ref in status.get('childReferences', []):
-        if ref.get('kind') == 'TaskRun':
-            task_name = ref.get('pipelineTaskName')
-            if task_name:
-                failed_tasks.append(task_name)
+    if conditions:
+        msg = conditions[-1].get('message', '')
+        failed_tasks = extract_failed_task_names_from_conditions(msg)
+    if not failed_tasks:
+        for ref in status.get('childReferences', []):
+            if ref.get('kind') == 'TaskRun':
+                task_name = ref.get('pipelineTaskName')
+                if task_name:
+                    failed_tasks.append(task_name)
 
     # Extract pipeline output results (IMAGE_URL, IMAGE_DIGEST, etc.)
     pr_results = status.get('results', [])
@@ -308,7 +330,6 @@ def extract_pipelinerun_metadata(pr_data, namespace, application_name):
 
     # Task completion summary from conditions message
     task_summary = None
-    conditions = status.get('conditions', [])
     if conditions:
         msg = conditions[-1].get('message', '')
         if 'Tasks Completed' in msg:

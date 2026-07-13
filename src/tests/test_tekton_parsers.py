@@ -10,6 +10,7 @@ from tekton_parsers import (
     extract_error_from_logs,
     extract_failed_step_from_logs,
     extract_failed_step_names,
+    extract_failed_task_names_from_conditions,
     extract_pipelinerun_metadata,
     extract_pr_number_from_annotations,
     extract_taskrun_names,
@@ -32,6 +33,24 @@ def test_extract_taskrun_names_empty():
     assert extract_taskrun_names({}) == []
     assert extract_taskrun_names({'status': {}}) == []
     assert extract_taskrun_names({'status': {'childReferences': []}}) == []
+
+
+# -- extract_failed_task_names_from_conditions --
+
+def test_extract_failed_task_names_from_conditions():
+    msg = 'Tasks Completed: 10 (Failed: 2, Cancelled 0): "fips-check", "coverity-availability-check"'
+    result = extract_failed_task_names_from_conditions(msg)
+    assert result == ['fips-check', 'coverity-availability-check']
+
+
+def test_extract_failed_task_names_no_failures():
+    msg = 'Tasks Completed: 10 (Failed: 0, Cancelled 0)'
+    assert extract_failed_task_names_from_conditions(msg) == []
+
+
+def test_extract_failed_task_names_empty():
+    assert extract_failed_task_names_from_conditions('') == []
+    assert extract_failed_task_names_from_conditions(None) == []
 
 
 # -- extract_failed_step_names --
@@ -215,6 +234,25 @@ def test_extract_metadata_full():
     assert result['commit_message'] == 'Fix bug'
     assert result['commit_author'] == 'user1'
     assert result['branch'] == 'main'
+
+
+def test_extract_pipelinerun_metadata_failed_tasks():
+    pr_data = {
+        'metadata': {'annotations': {}, 'name': 'pr-1', 'namespace': 'ns'},
+        'spec': {'params': []},
+        'status': {
+            'childReferences': [
+                {'kind': 'TaskRun', 'name': 'tr-1', 'pipelineTaskName': 'build-container'},
+                {'kind': 'TaskRun', 'name': 'tr-2', 'pipelineTaskName': 'fips-check'},
+                {'kind': 'TaskRun', 'name': 'tr-3', 'pipelineTaskName': 'coverity-availability-check'},
+            ],
+            'conditions': [
+                {'status': 'False', 'message': 'Tasks Completed: 3 (Failed: 1): "fips-check"'}
+            ],
+        },
+    }
+    result = extract_pipelinerun_metadata(pr_data, 'ns', 'app')
+    assert result['failed_tasks'] == ['fips-check']
 
 
 # -- classify_pipelinerun_status --
