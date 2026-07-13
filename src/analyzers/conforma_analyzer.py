@@ -240,12 +240,9 @@ class ConformaAnalyzer:
 
         commit_section = '\n'.join(commit_info) if commit_info else "- Commit: (not available)"
 
-        # Targeted knowledge graph context (fails silently if Neo4j unavailable)
-        try:
-            from knowledge.graph_context import conforma_context
-            graph_section = conforma_context(violation)
-        except Exception:
-            graph_section = ""
+        # Targeted knowledge graph context (circuit-breaker protected)
+        from knowledge.graph_provider import get_provider
+        graph_section = get_provider().conforma_context(violation)
 
         release_context = self._get_release_context(violation)
 
@@ -906,6 +903,10 @@ Use these URLs in evidence_references when relevant:
         # Estimate cost (same as build failures)
         cost_usd = (response.input_tokens * 0.000003) + (response.output_tokens * 0.000015)
 
+        # Track graph context usage
+        from knowledge.graph_provider import get_provider
+        graph_section = get_provider().conforma_context(violation)
+
         # Save to database (these fields live in analysis_json, not DB columns)
         analysis.pop('evidence_references', None)
         analysis.pop('source_transparency', None)
@@ -917,7 +918,8 @@ Use these URLs in evidence_references when relevant:
             tokens_used=response.input_tokens + response.output_tokens,
             cost_usd=cost_usd,
             analysis_duration=duration,
-            analysis_json=response.tool_calls,
+            analysis_json={'tool_calls': response.tool_calls,
+                           'graph_context_used': bool(graph_section)},
             **analysis
         )
 
