@@ -791,6 +791,47 @@ class AIAnalysisRepository:
             row = cursor.fetchone()
             return {'analyses': row[0], 'tokens': row[1], 'cost_usd': row[2]}
 
+    def get_graph_impact_metrics(self, application, days=30):
+        """Compare accuracy for analyses with vs without graph context."""
+        with self.db.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT
+                        COALESCE(
+                            (analysis_json->>'graph_context_used')::boolean,
+                            FALSE
+                        ) AS with_graph,
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE human_verdict = 'correct') AS correct,
+                        COUNT(*) FILTER (WHERE human_verdict = 'partial') AS partial,
+                        COUNT(*) FILTER (WHERE human_verdict = 'incorrect') AS incorrect,
+                        AVG(confidence_score) AS avg_confidence
+                    FROM ai_analysis
+                    WHERE human_verdict IS NOT NULL
+                      AND analyzed_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY with_graph
+                    ORDER BY with_graph DESC
+                """, (days,))
+                rows = cursor.fetchall()
+
+        result = {'with_graph': None, 'without_graph': None}
+        for row in rows:
+            used, total, correct, partial, incorrect, avg_conf = row
+            accuracy = (correct + partial * 0.5) / total if total else None
+            entry = {
+                'total': total,
+                'correct': correct,
+                'partial': partial,
+                'incorrect': incorrect,
+                'accuracy': accuracy,
+                'avg_confidence': float(avg_conf) if avg_conf else None,
+            }
+            if used:
+                result['with_graph'] = entry
+            else:
+                result['without_graph'] = entry
+        return result
+
     def get_analysis_by_component(self, component, application, analysis_type='auto'):
         """Latest AI analysis for a component. Used by MCP/API."""
         with self.db.connection() as conn:

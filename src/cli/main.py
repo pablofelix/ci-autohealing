@@ -3022,8 +3022,9 @@ def ai_stats(fixes):
 @ai.command('quality')
 @click.option('--calibration', is_flag=True, help='Show calibration analysis')
 @click.option('--trend', is_flag=True, help='Show weekly accuracy trend (last 12 weeks)')
+@click.option('--graph-impact', is_flag=True, help='Compare accuracy with vs without graph context')
 @click.option('--days', type=int, default=30, help='Days window for metrics (default 30)')
-def ai_quality(calibration, trend, days):
+def ai_quality(calibration, trend, graph_impact, days):
     """AI analysis quality metrics — accuracy from verdicts.
 
     Shows accuracy, verdict breakdown, and cost efficiency from human verdicts.
@@ -3102,6 +3103,15 @@ def ai_quality(calibration, trend, days):
             _show_calibration_dashboard(ai_repo, bold, cyan, green, red, yellow,
                                         section_header)
 
+    if graph_impact and not is_cluster():
+        if 'ai_repo' not in dir():
+            from cli.db import get_repo, require_db
+            from repositories.ai_analysis_repository import AIAnalysisRepository
+            if not require_db():
+                return
+            ai_repo = get_repo(AIAnalysisRepository)
+        _show_graph_impact(ai_repo, bold, cyan, green, red, yellow, section_header, days)
+
     if trend and not is_cluster():
         if 'ai_repo' not in dir():
             from cli.db import get_repo, require_db
@@ -3142,6 +3152,35 @@ def _show_quality_trend(ai_repo, bold, cyan, green, red, yellow, section_header)
             color(acc_str),
             cost_str,
         ))
+    print()
+
+
+def _show_graph_impact(ai_repo, bold, cyan, green, red, yellow, section_header, days):
+    """Show accuracy comparison: analyses with vs without graph context."""
+    section_header('Graph Context Impact (last {} days)'.format(days))
+    print()
+    data = ai_repo.get_graph_impact_metrics(cfg.APPLICATION_NAME, days=days)
+
+    for label, key in [('With graph context', 'with_graph'),
+                       ('Without graph context', 'without_graph')]:
+        entry = data.get(key)
+        if not entry:
+            print('  {}: no data'.format(label))
+            continue
+        acc = entry['accuracy']
+        acc_str = '{}%'.format(int(acc * 100)) if acc is not None else '-'
+        conf = entry['avg_confidence']
+        conf_str = '{:.0f}%'.format(conf * 100) if conf else '-'
+        color = green if acc and acc >= 0.8 else yellow if acc and acc >= 0.6 else red
+        print('  {}:  {} analyses | accuracy: {} | avg confidence: {}'.format(
+            cyan(label), entry['total'], color(acc_str), conf_str))
+
+    wg = data.get('with_graph')
+    wog = data.get('without_graph')
+    if wg and wog and wg['accuracy'] is not None and wog['accuracy'] is not None:
+        lift = wg['accuracy'] - wog['accuracy']
+        sign = '+' if lift >= 0 else ''
+        print('  Lift: {}{}% accuracy'.format(sign, int(lift * 100)))
     print()
 
 
