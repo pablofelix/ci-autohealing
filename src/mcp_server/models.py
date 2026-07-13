@@ -51,6 +51,7 @@ class FailureSummary(BaseModel):
     is_nightly: bool = Field(False, description="Most recent build was a nightly (trigger_type=nightly)")
     failed_step: Optional[str] = Field(None, description="Pipeline step that failed (e.g. build-images, fips-check)")
     konflux_url: Optional[str] = Field(None, description="Link to PipelineRun in Konflux")
+    offboarding_note: Optional[str] = Field(None, description="Set when component is being offboarded — alert is expected noise")
 
 
 class BuildFailureDetails(BaseModel):
@@ -177,7 +178,7 @@ class BlockerAlert(BaseModel):
     hours_since_update: float = Field(..., description="Hours since last update")
     resolution: Optional[str] = None
     labels: List[str] = []
-    category: str = Field('product', description="Blocker category: product (bug), tfa (test failure), infra (infrastructure)")
+    category: str = Field('product', description="Blocker category: product (bug), tfa (test failure), infra (infrastructure), signoff (Product Sign-Off)")
     signals: List[str] = Field(default_factory=list, description="Alert signals: unassigned_24h, stale_48h, verified_not_closed, hardware_blocked")
 
 
@@ -190,6 +191,7 @@ class BlockersSummary(BaseModel):
     product_blockers: int = Field(0, description="Product bug blockers (not TFA or infra)")
     tfa_blockers: int = Field(0, description="TFA (Test Failure Analysis) test-failure blockers")
     infra_blockers: int = Field(0, description="Infrastructure/CI blockers")
+    signoff_blockers: int = Field(0, description="Product Sign-Off blocker tickets (not bugs)")
     blockers: List[BlockerAlert]
     critical_signals: List[str] = Field(default_factory=list, description="Top-level alerts for AI context")
 

@@ -303,8 +303,8 @@ def get_readiness(
     unresolved_conforma = conforma_repo.find_unresolved_component_names(application)
     conforma_count = len(unresolved_conforma)
 
-    from conforma.policy_tools import fetch_exceptions_by_policy
     from conforma.exception_enrichment import enrich_with_exception_coverage
+    from conforma.policy_tools import fetch_exceptions_by_policy
     summaries = conforma_repo.get_violation_summaries(application)
     exceptions_by_policy = fetch_exceptions_by_policy()
     blocking_components = set()

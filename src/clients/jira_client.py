@@ -253,17 +253,22 @@ class JiraClient:
         except (KeyError, TypeError):
             return None
 
-    def search_blockers(self, project, fix_versions=None, max_results=50):
-        """Search for Blocker-priority issues in a project.
+    def search_blockers(self, project=None, fix_versions=None,
+                        jql_override=None, max_results=50):
+        """Search for Blocker-priority issues.
 
-        Returns list of dicts with key, summary, status, assignee, created, updated,
-        priority, resolution, and labels.
+        When jql_override is provided, uses it directly. Otherwise builds
+        a simple project+priority query (legacy behavior).
         """
-        jql_parts = ['project = "{}" AND priority = Blocker'.format(project)]
-        if fix_versions:
-            versions = ', '.join('"{}"'.format(v) for v in fix_versions)
-            jql_parts.append('fixVersion IN ({})'.format(versions))
-        jql = ' AND '.join(jql_parts) + ' ORDER BY updated DESC'
+        if jql_override:
+            jql = jql_override
+        else:
+            jql_parts = ['project = "{}" AND priority = Blocker'.format(
+                project or self._project)]
+            if fix_versions:
+                versions = ', '.join('"{}"'.format(v) for v in fix_versions)
+                jql_parts.append('fixVersion IN ({})'.format(versions))
+            jql = ' AND '.join(jql_parts) + ' ORDER BY updated DESC'
 
         fields = 'summary,status,assignee,created,updated,priority,resolution,labels'
         data = self._get('search?jql={}&fields={}&maxResults={}'.format(

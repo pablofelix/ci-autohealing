@@ -226,12 +226,17 @@ def list_alerts(application: str):
     _detect_systemic_patterns(build_failures)
     unmapped = _detect_unmapped_upstream(build_failures)
 
+    offboarded = _triage_repo().get_offboarded_components(application)
+    for f in build_failures:
+        if f.component in offboarded:
+            f.offboarding_note = offboarded[f.component]
+
+    from conforma.exception_enrichment import enrich_with_exception_coverage
     from conforma.policy_tools import (
         categorize_policy,
         count_unique_violations,
         fetch_exceptions_by_policy,
     )
-    from conforma.exception_enrichment import enrich_with_exception_coverage
     exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
     conforma_violations = []
     summaries = _conforma_repo().get_violation_summaries(application)
@@ -477,6 +482,8 @@ def list_blockers(application: str) -> BlockersSummary:
     """Jira blocker analysis: age, assignment, staleness signals."""
     import os
 
+    from clients.jira_query_builder import JiraBlockerQuery, categorize_blocker
+
     try:
         from clients.jira_client import JiraClient
         jira = JiraClient(
@@ -485,7 +492,8 @@ def list_blockers(application: str) -> BlockersSummary:
             token=os.environ.get('JIRA_TOKEN', ''),
             project=JIRA_PROJECT,
         )
-        raw_blockers = jira.search_blockers(JIRA_PROJECT)
+        jql = JiraBlockerQuery().for_application(application).build()
+        raw_blockers = jira.search_blockers(jql_override=jql)
     except Exception:
         return BlockersSummary(
             application=application, project=JIRA_PROJECT,
@@ -534,15 +542,7 @@ def list_blockers(application: str) -> BlockersSummary:
             critical_signals.append('{} resolved ({}) but still open'.format(
                 b['key'], b['resolution']))
 
-        tfa_indicators = ['tfa', 'test-failure', 'test failure analysis',
-                          'testfailure', 'automation']
-        blocker_category = 'product'
-        if any(ind in summary_lower or ind in labels_lower
-               for ind in tfa_indicators):
-            blocker_category = 'tfa'
-        elif any(ind in summary_lower
-                 for ind in ['infra', 'cluster', 'jenkins', 'ci ']):
-            blocker_category = 'infra'
+        blocker_category = categorize_blocker(b.get('summary', ''), b.get('labels', []))
 
         hw_keywords = ['gaudi', 'spyre', 'gpu', 'rocm', 'cuda', 'hardware']
         hw_match = [kw for kw in hw_keywords
@@ -569,6 +569,7 @@ def list_blockers(application: str) -> BlockersSummary:
     product_count = sum(1 for b in blockers if b.category == 'product')
     tfa_count = sum(1 for b in blockers if b.category == 'tfa')
     infra_count = sum(1 for b in blockers if b.category == 'infra')
+    signoff_count = sum(1 for b in blockers if b.category == 'signoff')
 
     return BlockersSummary(
         application=application,
@@ -578,6 +579,7 @@ def list_blockers(application: str) -> BlockersSummary:
         product_blockers=product_count,
         tfa_blockers=tfa_count,
         infra_blockers=infra_count,
+        signoff_blockers=signoff_count,
         blockers=blockers,
         critical_signals=critical_signals,
     )

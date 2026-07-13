@@ -10,9 +10,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.errors import register_error_handlers
 from api.routes import triage
 
 app = FastAPI()
+register_error_handlers(app)
 app.include_router(triage.router, prefix="/api/v1")
 client = TestClient(app)
 
@@ -172,7 +174,7 @@ def test_update_triage_item_no_updates(mock_repo):
 
     resp = client.put("/api/v1/applications/rhoai/triage/1", json={})
 
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 # --- POST /applications/{app}/triage/{item_id}/resolve ---
