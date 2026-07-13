@@ -6,9 +6,10 @@ from fastapi.testclient import TestClient
 
 
 def _make_app():
+    from fastapi import FastAPI
+
     from api.errors import register_error_handlers
     from api.routes.triage import router
-    from fastapi import FastAPI
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(router, prefix="/api")
