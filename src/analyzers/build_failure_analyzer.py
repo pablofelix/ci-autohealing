@@ -133,6 +133,18 @@ ANALYSIS_TOOL = {
 SYSTEM_PROMPT = load_prompt('build_failure_analyzer')
 
 
+def classify_failure_nature(component_health):
+    """Classify failure as structural or unknown based on build history.
+
+    Rule 1 only: component has never built successfully = structural.
+    """
+    if not component_health:
+        return 'unknown'
+    if not component_health.get('has_ever_succeeded', True):
+        return 'structural'
+    return 'unknown'
+
+
 class BuildFailureAnalyzer:
     """Analyzes build failures using an LLM provider."""
 
