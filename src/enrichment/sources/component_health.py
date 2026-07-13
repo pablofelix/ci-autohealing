@@ -75,6 +75,7 @@ class ComponentHealthSource(ContextSource):
                     last_success_date = last_cond.get('lastTransitionTime')
                     last_success_sha = (
                         annotations.get('build.appstudio.redhat.com/commit_sha')
+                        or annotations.get('build.appstudio.openshift.io/commit_sha')
                         or annotations.get('pipelinesascode.tekton.dev/sha', '')
                     )
             else:
