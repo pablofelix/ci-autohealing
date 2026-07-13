@@ -28,7 +28,11 @@ class ConfigRepository:
     def get_all(self):
         with self.db.connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT key, value, updated_at, updated_by FROM runtime_config ORDER BY key")
+            try:
+                cur.execute("SELECT key, value, updated_at, updated_by FROM runtime_config ORDER BY key")
+            except Exception:
+                conn.rollback()
+                return []
             cols = ['key', 'value', 'updated_at', 'updated_by']
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
