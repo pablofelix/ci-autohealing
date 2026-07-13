@@ -104,3 +104,21 @@ class JiraBlockerQuery:
     @property
     def _ga_excluded_components(self):
         return _GA_EXCLUDED_COMPONENTS
+
+
+def categorize_blocker(summary):
+    """Categorize a blocker by its summary text.
+
+    Returns 'signoff' for Product Sign Off tickets, 'tfa' for test failure
+    analysis, 'infra' for infrastructure issues, 'product' for everything else.
+    """
+    lower = summary.lower()
+    if 'product sign off' in lower:
+        return 'signoff'
+    tfa_indicators = ['tfa', 'test-failure', 'test failure analysis',
+                      'testfailure', 'automation']
+    if any(ind in lower for ind in tfa_indicators):
+        return 'tfa'
+    if any(ind in lower for ind in ['infra', 'cluster', 'jenkins', 'ci ']):
+        return 'infra'
+    return 'product'

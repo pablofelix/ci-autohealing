@@ -477,6 +477,8 @@ def list_blockers(application: str) -> BlockersSummary:
     """Jira blocker analysis: age, assignment, staleness signals."""
     import os
 
+    from clients.jira_query_builder import JiraBlockerQuery, categorize_blocker
+
     try:
         from clients.jira_client import JiraClient
         jira = JiraClient(
@@ -485,7 +487,8 @@ def list_blockers(application: str) -> BlockersSummary:
             token=os.environ.get('JIRA_TOKEN', ''),
             project=JIRA_PROJECT,
         )
-        raw_blockers = jira.search_blockers(JIRA_PROJECT)
+        jql = JiraBlockerQuery().for_application(application).build()
+        raw_blockers = jira.search_blockers(jql_override=jql)
     except Exception:
         return BlockersSummary(
             application=application, project=JIRA_PROJECT,
@@ -534,15 +537,7 @@ def list_blockers(application: str) -> BlockersSummary:
             critical_signals.append('{} resolved ({}) but still open'.format(
                 b['key'], b['resolution']))
 
-        tfa_indicators = ['tfa', 'test-failure', 'test failure analysis',
-                          'testfailure', 'automation']
-        blocker_category = 'product'
-        if any(ind in summary_lower or ind in labels_lower
-               for ind in tfa_indicators):
-            blocker_category = 'tfa'
-        elif any(ind in summary_lower
-                 for ind in ['infra', 'cluster', 'jenkins', 'ci ']):
-            blocker_category = 'infra'
+        blocker_category = categorize_blocker(b.get('summary', ''))
 
         hw_keywords = ['gaudi', 'spyre', 'gpu', 'rocm', 'cuda', 'hardware']
         hw_match = [kw for kw in hw_keywords
@@ -569,6 +564,7 @@ def list_blockers(application: str) -> BlockersSummary:
     product_count = sum(1 for b in blockers if b.category == 'product')
     tfa_count = sum(1 for b in blockers if b.category == 'tfa')
     infra_count = sum(1 for b in blockers if b.category == 'infra')
+    signoff_count = sum(1 for b in blockers if b.category == 'signoff')
 
     return BlockersSummary(
         application=application,
@@ -578,6 +574,7 @@ def list_blockers(application: str) -> BlockersSummary:
         product_blockers=product_count,
         tfa_blockers=tfa_count,
         infra_blockers=infra_count,
+        signoff_blockers=signoff_count,
         blockers=blockers,
         critical_signals=critical_signals,
     )
