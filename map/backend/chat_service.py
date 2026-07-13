@@ -318,35 +318,52 @@ def _build_panoramic_context(data):
 
 
 def _create_provider():
-    """Create LLM provider from environment variables."""
-    import sys
-    src_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'src')
-    if src_dir not in sys.path:
-        sys.path.insert(0, os.path.abspath(src_dir))
-
-    from config import LLMConfig
-    from clients.llm_provider import create_llm_provider
-
-    provider = os.getenv('LLM_PROVIDER', '')
-    if not provider:
+    """Create LLM provider, falling back to direct Anthropic SDK if ic modules unavailable."""
+    provider_name = os.getenv('LLM_PROVIDER', '')
+    if not provider_name:
         if os.getenv('ANTHROPIC_VERTEX_PROJECT_ID'):
-            provider = 'vertex_ai'
+            provider_name = 'vertex_ai'
         elif os.getenv('ANTHROPIC_API_KEY'):
-            provider = 'anthropic'
+            provider_name = 'anthropic'
 
-    if not provider:
+    if not provider_name:
         return None
 
     default_model = 'claude-sonnet-4-6'
 
-    config = LLMConfig(
-        provider=provider,
-        model=os.getenv('LLM_MODEL', default_model),
-        project_id=os.getenv('VERTEX_PROJECT_ID') or os.getenv('ANTHROPIC_VERTEX_PROJECT_ID'),
-        region=os.getenv('VERTEX_REGION') or os.getenv('CLOUD_ML_REGION', 'us-east5'),
-        api_key=os.getenv('ANTHROPIC_API_KEY'),
-    )
-    return create_llm_provider(config)
+    try:
+        import sys
+        src_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'src')
+        if src_dir not in sys.path:
+            sys.path.insert(0, os.path.abspath(src_dir))
+
+        from config import LLMConfig
+        from clients.llm_provider import create_llm_provider
+
+        config = LLMConfig(
+            provider=provider_name,
+            model=os.getenv('LLM_MODEL', default_model),
+            project_id=os.getenv('VERTEX_PROJECT_ID') or os.getenv('ANTHROPIC_VERTEX_PROJECT_ID'),
+            region=os.getenv('VERTEX_REGION') or os.getenv('CLOUD_ML_REGION', 'us-east5'),
+            api_key=os.getenv('ANTHROPIC_API_KEY'),
+        )
+        return create_llm_provider(config)
+    except (ImportError, ModuleNotFoundError):
+        logger.info("ic LLM modules not available, using direct Anthropic SDK")
+        return _create_anthropic_fallback()
+
+
+def _create_anthropic_fallback():
+    """Direct Anthropic SDK provider when ic modules aren't available."""
+    try:
+        import anthropic
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            return None
+        return anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        logger.warning("Neither ic LLM modules nor anthropic SDK available")
+        return None
 
 
 class ChatService:
