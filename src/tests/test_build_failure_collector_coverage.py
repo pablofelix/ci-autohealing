@@ -651,6 +651,46 @@ class TestFindFailedTaskrun:
         assert task == 'build'
         assert error == 'OOMKilled'
 
+    def test_find_failed_taskrun_picks_primary_over_first(self, collector):
+        """When multiple TaskRuns fail, pick the primary (build-critical) one."""
+        coverity_tr = {
+            'status': {
+                'conditions': [{'status': 'False', 'message': 'coverity failed'}],
+                'podName': 'coverity-pod',
+            }
+        }
+        fips_tr = {
+            'status': {
+                'conditions': [{'status': 'False', 'message': 'fips failed'}],
+                'podName': 'fips-pod',
+            }
+        }
+        success_tr = {
+            'status': {
+                'conditions': [{'status': 'True', 'message': 'ok'}],
+                'podName': 'ok-pod',
+            }
+        }
+
+        pr_data = {'status': {'childReferences': [
+            {'kind': 'TaskRun', 'name': 'pr-coverity-check', 'pipelineTaskName': 'coverity-availability-check'},
+            {'kind': 'TaskRun', 'name': 'pr-build', 'pipelineTaskName': 'build-container'},
+            {'kind': 'TaskRun', 'name': 'pr-fips-check-0', 'pipelineTaskName': 'fips-check'},
+        ], 'conditions': []}}
+
+        def mock_get_taskrun(name, **kwargs):
+            return {
+                'pr-coverity-check': coverity_tr,
+                'pr-build': success_tr,
+                'pr-fips-check-0': fips_tr,
+            }.get(name)
+
+        collector.kubearchive.get_taskrun = mock_get_taskrun
+        collector.kubearchive.get_pod_logs = lambda *a, **kw: 'ERROR: some error'
+
+        task_name, error_msg, logs = collector._find_failed_taskrun('pr-name', pr_data)
+        assert task_name == 'fips-check'
+
 
 # ===========================================================================
 # 10. get_comprehensive_logs
