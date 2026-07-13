@@ -5,6 +5,7 @@ from tekton_parsers import (
     build_taskrun_detail,
     classify_build_status,
     classify_pipelinerun_status,
+    extract_all_errors_from_logs,
     extract_conforma_component_info,
     extract_error_from_logs,
     extract_failed_step_from_logs,
@@ -118,6 +119,36 @@ def test_extract_error_from_logs_timeout():
 def test_extract_error_from_logs_truncates():
     msg, _ = extract_error_from_logs("ERROR: " + "x" * 1000)
     assert len(msg) <= 510
+
+
+# -- extract_all_errors_from_logs --
+
+def test_extract_all_errors_multiple():
+    logs = (
+        'time="12:00" level=info msg="starting"\n'
+        'FAILED: Coverity license expired\n'
+        'time="12:01" level=info msg="checking fips"\n'
+        'ERROR: executable is not dynamically linked\n'
+    )
+    errors = extract_all_errors_from_logs(logs)
+    assert len(errors) == 2
+    assert 'Coverity license expired' in errors[0][0]
+    assert errors[0][1] == 'Test Failure'
+    assert 'not dynamically linked' in errors[1][0]
+    assert errors[1][1] == 'Build Error'
+
+
+def test_extract_all_errors_none():
+    assert extract_all_errors_from_logs('all good\nno errors') == []
+    assert extract_all_errors_from_logs('') == []
+    assert extract_all_errors_from_logs(None) == []
+
+
+def test_extract_all_errors_skips_metadata():
+    logs = 'Slack Message: FAILED build\nERROR: real error here'
+    errors = extract_all_errors_from_logs(logs)
+    assert len(errors) == 1
+    assert 'real error' in errors[0][0]
 
 
 # -- extract_failed_step_from_logs --
