@@ -66,9 +66,9 @@ Goal: full visibility into the nightly build chain, and proactive detection of c
 **Nightly build chain tracking:**
 - [x] Add `ic nightly-history [app]` — timeline of recent nightly outcomes
 - [x] Alerting: surface broken nightly in `ic get alerts` and MCP `list_alerts()`
-- [ ] Monitor GitHub Actions trigger in `rhods-devops-infra` (nightly cron workflow status)
-- [ ] Track the full chain: GHA trigger → validator tests → operator build → FBC fragment
-- [ ] Parse `#rhoai-build-notifications` Slack messages for build success/failure signals
+- [x] Monitor GitHub Actions trigger in `rhods-devops-infra` (nightly cron workflow status)
+- [x] Track the full chain: GHA trigger → operator build → FBC fragment → PCC cache (`ic nightly` chain view)
+- [ ] Parse `#rhoai-build-notifications` Slack messages for build success/failure signals (blocked — no Slack token for ic, deferred until slk ingests to Neo4j)
 
 ---
 
