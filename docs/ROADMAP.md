@@ -857,6 +857,16 @@ Reported and discovered during system audit on 2026-07-10:
 *Infrastructure:*
 - [x] MCP server stale process: long-running Claude sessions accumulate stale MCP server processes. Fixed by killing stale process; new process spawned with current code
 
+**Phase 10f.1 — Map-IC Decoupling & Quality Measurement (done 2026-07-13):**
+
+- [x] GraphProvider ABC with DirectGraphProvider wrapping graph_context.py
+- [x] Circuit breaker (3 failures → 5 min cooldown) + explicit timeouts
+- [x] graph_context_used flag tracked in analysis_json for every analysis
+- [x] `ic ai quality --graph-impact` — A/B accuracy comparison with/without graph context
+- [x] chat_service LLM import fallback (ImportError → direct Anthropic SDK)
+- [x] Moved map test files from src/tests/ to map/tests/
+- [x] C-ready: GraphProvider interface supports future HttpGraphProvider swap
+
 **Phase 10g — System Audit Findings (2026-07-10):**
 
 Comprehensive 3-perspective audit (Triage Engineer, Code Quality, Learner).

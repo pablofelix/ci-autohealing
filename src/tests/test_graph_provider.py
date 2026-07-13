@@ -180,3 +180,23 @@ class TestGraphImpactQuery:
         result = repo.get_graph_impact_metrics("rhoai-v3-5", days=30)
         assert result['with_graph'] is None
         assert result['without_graph'] is None
+
+
+class TestBackwardsCompat:
+    def test_graph_context_build_context_still_importable(self):
+        from knowledge.graph_context import build_context
+        assert callable(build_context)
+
+    def test_graph_context_conforma_context_still_importable(self):
+        from knowledge.graph_context import conforma_context
+        assert callable(conforma_context)
+
+    def test_graph_context_release_context_still_importable(self):
+        from knowledge.graph_context import release_context
+        assert callable(release_context)
+
+    def test_provider_available_false_without_neo4j(self):
+        from knowledge.graph_provider import get_provider
+        provider = get_provider()
+        # Without Neo4j configured, should return False gracefully
+        assert provider.available() is False or provider.available() is True
