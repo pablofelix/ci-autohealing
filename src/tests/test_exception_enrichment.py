@@ -1,5 +1,5 @@
 """Verify shared exception-coverage enrichment function."""
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 @patch("conforma.exception_enrichment.policy_env", return_value="stage")
