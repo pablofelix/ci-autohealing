@@ -3842,41 +3842,43 @@ def nightly(ctx, application, output_json):
         return
 
     monitor = HealthMonitor(db)
+    chain = monitor.get_nightly_chain(app)
     status = monitor.get_nightly_status(app)
 
     if output_json:
-        print(json_mod.dumps(status, indent=2, default=str))
+        merged = {**status, 'chain': chain}
+        print(json_mod.dumps(merged, indent=2, default=str))
         return
 
-    section_header('Nightly Status: {}'.format(app))
+    # Chain timeline header
+    chain_date = chain.get('chain_date') or 'unknown'
+    section_header('Nightly Chain (last run: {})'.format(chain_date))
     print()
 
-    fbc = status.get('fbc_health')
-    fbc_name = status.get('fbc_component', '')
-    if fbc:
-        score = fbc.get('health_score')
-        score_str = '{}%'.format(score) if score is not None else 'N/A'
-        st = fbc.get('current_status') or 'unknown'
-        color = green if st == 'Succeeded' else red if st == 'Failed' else yellow
-        print(bold('FBC Fragment: ') + fbc_name)
-        print('  Status: {}  Health: {}'.format(color(st), score_str))
-        last = fbc.get('last_successful_build')
-        if last:
-            print('  Last success: {}'.format(str(last)[:16]))
-    else:
-        print(bold('FBC Fragment: ') + fbc_name)
-        print('  ' + dim('No health data found'))
+    status_icons = {'pass': green('✓'), 'fail': red('✗'), 'skip': dim('—')}
+    status_labels = {'pass': green, 'fail': red, 'skip': dim}
 
-    if status.get('fbc_image'):
-        print('  Image: {}'.format(status['fbc_image'][:80]))
+    for i, step in enumerate(chain.get('steps', []), 1):
+        icon = status_icons.get(step['status'], dim('?'))
+        label_fn = status_labels.get(step['status'], dim)
+        ts = ''
+        if step.get('timestamp'):
+            ts = step['timestamp'][11:16] + ' UTC  ' if len(step['timestamp']) >= 16 else ''
+        print('  {}. {:<18}{} {}  {}'.format(
+            i, step['name'], icon, label_fn(step.get('detail', '')), dim(ts)))
+        if step.get('blockers'):
+            print('     └─ {} blockers: {}'.format(
+                len(step['blockers']), ', '.join(step['blockers'])))
 
-    conforma = status.get('fbc_conforma')
-    if conforma and (conforma.get('violations_count', 0) > 0 or conforma.get('warnings_count', 0) > 0):
-        print('  Conforma: {} violations, {} warnings'.format(
-            conforma['violations_count'], conforma['warnings_count']))
+    # GHA URL
+    gha = status.get('gha_validation')
+    if gha and gha.get('url'):
+        print()
+        print(dim('GHA: {}'.format(gha['url'])))
 
     print()
 
+    # Existing detail sections below the chain
     blockers = status.get('blockers', [])
     if blockers:
         print(bold(red('{} blocker(s):'.format(len(blockers)))))
@@ -3888,43 +3890,23 @@ def nightly(ctx, application, output_json):
                 print('    {}'.format(dim(b['root_cause_summary'])))
             if b.get('last_successful_build'):
                 print('    Last success: {}'.format(str(b['last_successful_build'])[:16]))
-    else:
-        print(green('No build blockers'))
 
-    gha = status.get('gha_validation')
-    if gha:
-        conclusion = gha.get('conclusion', 'unknown')
-        gha_color = green if conclusion == 'success' else red if conclusion == 'failure' else yellow
-        print(bold('GHA Validation:') + ' {} ({})'.format(
-            gha_color(conclusion), gha.get('created_at', '')[:10]))
-        if gha.get('url'):
-            print('  {}'.format(dim(gha['url'])))
+    conforma = status.get('fbc_conforma')
+    if conforma and (conforma.get('violations_count', 0) > 0 or conforma.get('warnings_count', 0) > 0):
+        print()
+        print('  Conforma: {} violations, {} warnings'.format(
+            conforma['violations_count'], conforma['warnings_count']))
 
     pcc = status.get('pcc_freshness')
-    if pcc:
-        pcc_status = pcc.get('status', 'unknown')
-        if pcc_status == 'stale':
-            missing = pcc.get('missing_versions', [])
-            print(bold(red('PCC Cache: STALE')) +
-                  ' — {} version(s) in registry not in cache'.format(len(missing)))
-            if missing:
-                print('  Missing: {}'.format(', '.join(missing[:10])))
-            print('  ' + yellow('FBC fragment builds will produce catalogs missing these versions'))
-            print('  ' + dim('Fix: run regen-pcc-cache workflow in RHOAI-Build-Config'))
-        elif pcc_status == 'fresh':
-            print(bold('PCC Cache:') + ' ' + green('fresh') +
-                  ' ({} versions cached)'.format(pcc.get('cached_versions', 0)))
-        else:
-            print(bold('PCC Cache:') + ' ' + dim('unknown (check skipped)'))
-
-        last_regen = pcc.get('last_regen')
-        if last_regen:
-            regen_date = last_regen.get('date', '')[:10]
-            regen_conclusion = last_regen.get('conclusion', 'unknown')
-            regen_color = green if regen_conclusion == 'success' else red
-            print('  Last regen: {} ({})'.format(regen_color(regen_conclusion), regen_date))
-            if last_regen.get('url'):
-                print('  {}'.format(dim(last_regen['url'])))
+    if pcc and pcc.get('status') == 'stale':
+        missing = pcc.get('missing_versions', [])
+        print()
+        print(bold(red('PCC Cache: STALE')) +
+              ' — {} version(s) in registry not in cache'.format(len(missing)))
+        if missing:
+            print('  Missing: {}'.format(', '.join(missing[:10])))
+        print('  ' + yellow('FBC fragment builds will produce catalogs missing these versions'))
+        print('  ' + dim('Fix: run regen-pcc-cache workflow in RHOAI-Build-Config'))
 
     print()
     print(cyan('Tip:') + ' Use {} for details on a blocker'.format(bold('ic describe <component>')))
