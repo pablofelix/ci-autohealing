@@ -554,7 +554,7 @@ class BuildFailureAnalyzer:
                         except (json.JSONDecodeError, TypeError):
                             pass
 
-                if not succeeded and not failed_logs:
+                if not succeeded:
                     logs = tr.get_taskrun_logs(record_name)
                     if not logs:
                         msg = last_cond.get('message', '')
@@ -562,7 +562,13 @@ class BuildFailureAnalyzer:
                         if msg:
                             logs = '{}: {}'.format(reason, msg)
                     if logs:
-                        failed_logs = logs
+                        marker = '=== Failed TaskRun: {}{} ==='.format(
+                            task,
+                            ' [{}]'.format(platform) if platform else '')
+                        if failed_logs is None:
+                            failed_logs = '{}\n{}'.format(marker, logs)
+                        else:
+                            failed_logs += '\n\n{}\n{}'.format(marker, logs)
                         logger.info("Fetched TaskRun logs for '%s' (%s): %d chars",
                                     task, platform or 'no-platform', len(logs))
 
