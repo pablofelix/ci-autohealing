@@ -168,16 +168,18 @@ class TektonResultsClient:
         return None
 
     def find_failed_taskrun(self, pipelinerun_name):
-        """Find the failed TaskRun in a PipelineRun and fetch its logs.
+        """Find the primary failed TaskRun in a PipelineRun and fetch its logs.
 
-        When no logs are available (e.g. PodCreationFailed, ImagePullFailed),
-        falls back to the TaskRun condition message as the log content.
+        Collects all failed TaskRuns, then picks the most relevant one.
 
         Returns:
             (task_name, logs, record_name) or (None, None, None)
         """
+        from tekton_parsers import pick_primary_failure
+
         taskruns = self.query_taskrun_records(pipelinerun_name)
 
+        failures = []
         for tr_data, record_name in taskruns:
             conditions = tr_data.get('status', {}).get('conditions', [])
             if not conditions:
@@ -194,10 +196,24 @@ class TektonResultsClient:
                 condition_reason = conditions[-1].get('reason', '')
                 if condition_msg:
                     logs = "{}: {}".format(condition_reason, condition_msg)
-            logger.info("Found failed TaskRun via Tekton Results: %s (task: %s)", record_name, task_name)
-            return task_name, logs, record_name
 
-        return None, None, None
+            failures.append((task_name, logs, record_name))
+
+        if not failures:
+            return None, None, None
+
+        pr_data = {}
+        primary = pick_primary_failure(
+            [(t, l, None) for t, l, _ in failures], pr_data
+        )
+        primary_task = primary[0]
+        for task_name, logs, record_name in failures:
+            if task_name == primary_task:
+                logger.info("Found primary failed TaskRun via Tekton Results: %s (task: %s)",
+                            record_name, task_name)
+                return task_name, logs, record_name
+
+        return failures[0][0], failures[0][1], failures[0][2]
 
     def query_component_build_history(self, application, component, page_size=10):
         """Query build history for a component, returning decoded PipelineRuns

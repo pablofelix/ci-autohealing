@@ -1347,3 +1347,40 @@ class TestDelegationMethods:
         result = collector.extract_failed_step_from_logs('some logs')
         mock_extract.assert_called_once_with('some logs')
         assert result == 'build'
+
+
+# ===========================================================================
+# Test TektonResultsClient.find_failed_taskrun
+# ===========================================================================
+
+class TestTektonResultsFindFailed:
+    """Test that TektonResultsClient.find_failed_taskrun picks the primary failure."""
+
+    def test_tekton_results_find_failed_picks_primary(self):
+        from clients.tekton_results import TektonResultsClient
+
+        tr_client = TektonResultsClient.__new__(TektonResultsClient)
+
+        coverity_td = {
+            'metadata': {'labels': {'tekton.dev/pipelineTask': 'coverity-availability-check'}},
+            'status': {'conditions': [{'status': 'False', 'message': 'license expired'}]},
+        }
+        fips_td = {
+            'metadata': {'labels': {'tekton.dev/pipelineTask': 'fips-check'}},
+            'status': {'conditions': [{'status': 'False', 'message': 'fips failed'}]},
+        }
+        success_td = {
+            'metadata': {'labels': {'tekton.dev/pipelineTask': 'build-container'}},
+            'status': {'conditions': [{'status': 'True', 'message': 'ok'}]},
+        }
+
+        with patch.object(tr_client, 'query_taskrun_records', return_value=[
+            (coverity_td, 'record-coverity'),
+            (success_td, 'record-build'),
+            (fips_td, 'record-fips'),
+        ]):
+            with patch.object(tr_client, 'get_taskrun_logs', side_effect=lambda r: 'logs for ' + r):
+                task_name, logs, record_name = tr_client.find_failed_taskrun('pr-name')
+
+        assert task_name == 'fips-check'
+        assert record_name == 'record-fips'
