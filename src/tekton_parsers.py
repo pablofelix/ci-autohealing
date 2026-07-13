@@ -152,8 +152,8 @@ def pick_primary_failure(failures, pr_data):
 
     Heuristic:
     1. Match task name mentioned in PipelineRun condition message
-    2. Prefer build-critical tasks over side-effect tasks
-    3. Prefer failures with actual logs over condition-only messages
+    2. Prefer failures with actual logs over condition-only messages
+    3. Prefer build-critical tasks over side-effect tasks
     4. Fall back to first in list
 
     Args:
