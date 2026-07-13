@@ -54,6 +54,8 @@ class CircuitBreaker:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
             if self._state == self.HALF_OPEN or self._failure_count >= self._threshold:
+                if self._state != self.OPEN:
+                    logger.warning("Graph context circuit breaker opened after %d failures", self._threshold)
                 self._state = self.OPEN
 
 
@@ -101,8 +103,9 @@ class DirectGraphProvider(GraphProvider):
             result = fn(*args)
             self._breaker.record_success()
             return result or ""
-        except Exception:
+        except Exception as e:
             self._breaker.record_failure()
+            logger.debug("Graph context call failed: %s", e)
             return ""
 
     def policy_rules(self, rule_names):
