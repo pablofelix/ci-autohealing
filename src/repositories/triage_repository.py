@@ -246,6 +246,28 @@ class TriageRepository:
                 'resolved': row[2], 'total': row[3],
             }
 
+    def get_offboarded_components(self, application):
+        """Build component->note map from resolved triage items with 'offboard' in resolution."""
+        offboarded = {}
+        try:
+            items = self.get_all(application)
+            for item in items:
+                if item.get('status') != 'resolved':
+                    continue
+                resolution = item.get('resolution', '') or ''
+                if 'offboard' not in resolution.lower():
+                    continue
+                resolved_at = item.get('resolved_at', '')
+                note = 'Offboarding in progress — pending CR deletion (triage #{} resolved {})'.format(
+                    item['id'],
+                    str(resolved_at)[:10] if resolved_at else 'unknown',
+                )
+                for comp in item.get('components', []):
+                    offboarded[comp] = note
+        except Exception:
+            pass
+        return offboarded
+
     def auto_resolve_for_component(self, component_name, application,
                                     commit_sha=None, pipelinerun=None):
         """Auto-resolve triage items when all their components have passing builds."""
