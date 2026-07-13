@@ -591,8 +591,8 @@ class BuildFailureRepository:
             cursor.execute("""
                 SELECT
                     COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND is_resolved = FALSE),
-                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enriched_context IS NOT NULL),
-                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enrichment_error IS NOT NULL)
+                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enriched_context IS NOT NULL AND is_resolved = FALSE),
+                    COUNT(*) FILTER (WHERE commit_sha IS NOT NULL AND enrichment_error IS NOT NULL AND is_resolved = FALSE)
                 FROM build_failures WHERE application = %s
             """, (application,))
             row = cursor.fetchone()
