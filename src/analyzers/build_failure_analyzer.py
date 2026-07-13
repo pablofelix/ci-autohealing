@@ -259,6 +259,7 @@ class BuildFailureAnalyzer:
         try:
             from enrichment.enrichment_orchestrator import EnrichmentOrchestrator
             from enrichment.sources.build_history import BuildHistorySource
+            from enrichment.sources.component_health import ComponentHealthSource
             from enrichment.sources.dependency_context import DependencyContextSource
             from enrichment.sources.open_prs import OpenPRsSource
             from enrichment.sources.related_failures import RelatedFailuresSource
@@ -268,6 +269,7 @@ class BuildFailureAnalyzer:
             orchestrator.register_source(RelatedFailuresSource(self.config, self.db))
             orchestrator.register_source(BuildHistorySource(self.config, self._github_client))
             orchestrator.register_source(OpenPRsSource(self.config, self._github_client))
+            orchestrator.register_source(ComponentHealthSource(self.config))
 
             logger.info("Auto-enriching context for %s", failure.get('component_name'))
             result = orchestrator.enrich_failure(failure)
@@ -934,25 +936,29 @@ Use these URLs in evidence_references when relevant:
 
     def _format_commit_context(self, commit_context, enriched_context=None):
         """Format commit context and enriched context into prompt text."""
-        if not commit_context:
-            return "\n## Commit Context\n(Not available — commit diff not fetched yet)\n"
-
-        if isinstance(commit_context, str):
-            try:
-                commit_context = json.loads(commit_context)
-            except (json.JSONDecodeError, TypeError):
-                return "\n## Commit Context\n(Not available)\n"
-
         if enriched_context and isinstance(enriched_context, str):
             try:
                 enriched_context = json.loads(enriched_context)
             except (json.JSONDecodeError, TypeError):
                 enriched_context = None
 
-        sections = ["\n## Commit Context"]
+        if not commit_context:
+            sections = ["\n## Commit Context\n(Not available — commit diff not fetched yet)"]
+            # Still process enriched_context even if commit_context is None
+            if enriched_context:
+                sections = ["\n## Commit Context"]
+            else:
+                return "\n## Commit Context\n(Not available — commit diff not fetched yet)\n"
+        else:
+            if isinstance(commit_context, str):
+                try:
+                    commit_context = json.loads(commit_context)
+                except (json.JSONDecodeError, TypeError):
+                    return "\n## Commit Context\n(Not available)\n"
+            sections = ["\n## Commit Context"]
 
         # Commit diff
-        commit = commit_context.get('commit')
+        commit = commit_context.get('commit') if commit_context else None
         if commit:
             files = commit.get('files', [])
             stats = commit.get('stats', {})
@@ -982,7 +988,7 @@ Use these URLs in evidence_references when relevant:
                     )
 
         # PR info
-        pr = commit_context.get('pr')
+        pr = commit_context.get('pr') if commit_context else None
         if pr:
             sections.append(
                 "\n### Pull Request #{}: {}".format(
@@ -996,7 +1002,7 @@ Use these URLs in evidence_references when relevant:
                 sections.append(body)
 
         # Dockerfile
-        dockerfile = commit_context.get('dockerfile')
+        dockerfile = commit_context.get('dockerfile') if commit_context else None
         if dockerfile:
             sections.append(
                 "\n### Dockerfile ({})\n```dockerfile\n{}\n```".format(
@@ -1006,7 +1012,7 @@ Use these URLs in evidence_references when relevant:
             )
 
         # Tekton configs
-        tekton = commit_context.get('tekton_configs', {})
+        tekton = commit_context.get('tekton_configs', {}) if commit_context else {}
         if tekton:
             sections.append("\n### Tekton Pipeline Configs")
             for fname, content in tekton.items():
@@ -1089,6 +1095,34 @@ Use these URLs in evidence_references when relevant:
                             merged_label,
                         )
                     )
+
+            component_health = enriched_context.get('component_health')
+            if component_health:
+                nature = classify_failure_nature(component_health)
+                sections.append("\n### Component Build Health")
+
+                if nature == 'structural':
+                    sections.append("- Has ever built successfully: No")
+                    sections.append("- Total builds observed: {}".format(
+                        component_health.get('total_builds', 0)))
+                    sections.append("- Consecutive failures: {}".format(
+                        component_health.get('consecutive_failures', 0)))
+                    sections.append("")
+                    sections.append(
+                        "STRUCTURAL FAILURE: This component has NEVER built successfully. "
+                        "This is NOT a transient issue — do NOT recommend rebuild or retry. "
+                        "Identify the structural root cause: wrong base image, unreachable registry, "
+                        "missing pipeline config, incomplete onboarding, or misconfigured Dockerfile."
+                    )
+                else:
+                    sections.append("- Has ever built successfully: Yes")
+                    if component_health.get('last_success_date'):
+                        sections.append("- Last success: {} ({})".format(
+                            component_health['last_success_date'],
+                            component_health.get('last_success_sha', '')[:8],
+                        ))
+                    sections.append("- Consecutive failures since: {}".format(
+                        component_health.get('consecutive_failures', 0)))
 
         return '\n'.join(sections) + '\n'
 
