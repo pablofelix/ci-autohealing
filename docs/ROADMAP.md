@@ -863,20 +863,29 @@ Comprehensive 3-perspective audit (Triage Engineer, Code Quality, Learner).
 Total: 2 critical, 10 major, 12 minor/documentation issues.
 
 *Critical — P0 (blocks correct operation):*
-- [ ] `/alerts` endpoint hangs: N+1 query (41 per-component DB calls) + synchronous Jira/K8s/GitHub API calls → 60s+ response, starves all uvicorn workers, entire API becomes unresponsive. Fix: replace `find_unresolved_component_names()` + per-component loop with `get_violation_summaries()` (1 query, already used in MCP tools). Move external calls to ThreadPoolExecutor or make them lazy/optional. (`failures.py:237-240`)
-- [ ] `_check_rpm_drift` is a no-op: `drift_found = []` declared but never appended to — function always returns PASS regardless of actual RPM drift, giving false confidence in release readiness checks. Either implement the drift comparison or remove the check. (`releases.py:2027-2102`)
+- [x] `/alerts` endpoint hangs: N+1 query → replaced with batch `get_violation_summaries()` (42→1 DB queries). (`failures.py:244`)
+- [x] `_check_rpm_drift` is a no-op → now returns SKIP "Not implemented" instead of false PASS. (`releases.py:2038-2044`)
 
 *Major — P1 (degrades accuracy or reliability):*
-- [ ] Health warnings endpoint ignores application filter: `GET /applications/{app}/health/warnings` never passes `application` to `monitor.run_checks()` → returns warnings for ALL applications. (`applications.py:132-147`)
-- [ ] `releases.py _db()` creates new DB connection per request instead of using the shared pool (`get_pool()`), causing connection leaks. All other route files use `get_repository()`. (`releases.py:30-33`)
-- [ ] No request-level timeout middleware: one slow request blocks all uvicorn workers → entire API unresponsive. Need FastAPI middleware to abort after 30s.
-- [ ] Nightly warnings silently swallowed: `except Exception: pass` in `list_alerts()` makes it impossible to distinguish "no issues" from "check failed". (`failures.py:284-297`)
-- [ ] ThreadPoolExecutor not context-managed in readiness checks — if `futures` dict creation fails, pool leaks threads. (`releases.py:470-501`)
-- [ ] Dead code `_d()` function in `sync_schedule()` — unused SQL value formatter, potential SQL injection pattern. (`releases.py:156-157`)
-- [ ] Dead `date.today()` call discarded in `_compute_freeze_countdown`. (`failures.py:37`)
-- [ ] Nonexistent application returns empty 200 instead of 404 — `/alerts`, `/readiness`, `/nightly` silently succeed with zero results. `ValidatedApp` dependency exists in `validators.py` but is never used. Only 2 of 30+ endpoints validate application names.
+- [x] Health warnings endpoint ignores application filter → threaded `application` through `run_checks()` → `get_degrading_components()`. (`health_monitor.py`)
+- [x] `releases.py _db()` bypasses pool → uses `PooledDatabaseConnection(get_pool())` now. (`releases.py:30-33`)
+- [x] No request-level timeout middleware → 30s timeout in `api/middleware.py`, 504 on exceed
+- [x] Nightly warnings silently swallowed → surfaces as NightlyWarning with error message. (`failures.py:302-307`)
+- [x] ThreadPoolExecutor not context-managed → uses `with` statement now. (`releases.py:469+`)
+- [x] Dead code `_d()` in `sync_schedule()` → deleted
+- [x] Dead `date.today()` in `_compute_freeze_countdown` → deleted
+- [x] Nonexistent application returns 200 → `list_alerts()` now returns 404 with available apps suggestion. (`failures.py:192-198`)
 - [ ] Inconsistent error responses: `triage.py` uses `HTTPException`, `violations.py`/`failures.py` use `ICError` — two different error shapes coexist.
 - [ ] Duplicate exception-aware conforma counting logic in `failures.py:220-282` and `releases.py:306-323` — extract to shared function.
+
+*False positives & false negatives — P1 (data trustworthiness):*
+- [x] False negative: `_check_rpm_drift` always PASS → now SKIP "Not implemented" (honest signal)
+- [ ] False positive: v3.4 shows build failures from 1375h+ ago as if active — no archival/expiry of old release data. Triage engineer wastes time investigating ancient failures
+- [x] False positive: health warnings mix releases → now filters by application (`health_monitor.py`)
+- [x] False negative: readiness SKIP distinction → "Check error: timed out (>20s)" vs generic SKIP (`releases.py:497`)
+- [x] False negative: nonexistent app → `list_alerts()` now returns 404 with available apps (`failures.py:192-198`)
+- [x] False negative: nightly warnings swallowed → surfaces as NightlyWarning (`failures.py:302-307`)
+- [ ] False negative: repository methods return defaults on DB error — a database outage makes every endpoint report "zero failures, zero violations" instead of raising an alarm. The system looks healthiest when it's most broken
 
 *Minor / Documentation — P2:*
 - [ ] `releases.py` is 2,562 lines (god module) — should split into readiness_checks.py, release_details.py, freeze_schedule.py
@@ -892,20 +901,75 @@ Total: 2 critical, 10 major, 12 minor/documentation issues.
 - [ ] Repository methods silently return defaults on error — a DB outage reports "zero failures"
 - [ ] Architecture doc lacks data-flow narrative (what happens when a build fails, step by step)
 
-*Pending audit work:*
-- [ ] Triage Engineer perspective: endpoint-by-endpoint data correctness testing (was blocked by API starvation on 2026-07-10). Requires: (1) restart API server `kill 870200`, (2) re-run triage audit across rhoai-v3-5-ea-2, rhoai-v3-5, rhoai-v3-4
-- [ ] Verify health endpoint fix is live (code fixed at `applications.py:129` but server not restarted)
+*Triage Engineer audit findings (completed 2026-07-10, full audit with live API):*
 
-*Fix priority order for next session:*
-1. Restart API server (pick up health endpoint fix)
-2. Fix `/alerts` N+1 query (P0 — root cause of server starvation)
-3. Add request timeout middleware (P0 — prevents future starvation)
-4. Fix health warnings application filter (P1)
-5. Fix `_db()` connection pool bypass (P1)
-6. Remove dead code (`_d()`, `date.today()`, `_check_rpm_drift`)
-7. Add application validation to remaining endpoints (P1)
-8. Run Triage Engineer audit with healthy API
-9. Fix remaining P1 and P2 issues
+Critical:
+- [x] **BUG-T02**: `/api/v1/jira/health` route shadowed — FIXED: reordered routers in `routes/__init__.py` (failures before external)
+- [ ] **BUG-T03**: `/api/v1/config` returns 500 — infrastructure issue (runtime_config table missing when DB unavailable)
+- [x] **BUG-T04**: Exception coverage inconsistent — FIXED: unified all 3 violations endpoints to use `compute_exception_coverage_details`
+
+Major:
+- [x] **BUG-T05**: Dashboard enrichment 2400% — FIXED: added `total > 0` guard + `min(pct, 100)` cap
+- [ ] **BUG-T06**: Working components returns v3.4 data under EA2 — data ingestion bug in worker, not API code
+- [x] **BUG-T07**: No `failed_step` in alerts — FIXED: added `failed_step` and `konflux_url` to FailureSummary model + builder
+- [x] **BUG-T08**: Null fields in failures — FIXED: populated `has_context`, `failed_step`, `konflux_url` in alerts builder
+- [ ] **BUG-T09**: Error misattribution — data quality issue in stored build records, not API code
+- [ ] **BUG-T10**: Exception coverage=None — correct behavior when cluster exceptions can't be fetched (no false claims)
+- [ ] **BUG-T11**: EA2 last_sync stale — worker scheduling issue, not API code
+- [ ] **BUG-T12**: Old failures not auto-resolved — needs auto-resolution policy feature (not a bug fix)
+- [ ] v3.4 `/health` returns 500 Internal Server Error
+- [ ] v3.5 `/dashboard` returns 500; EA2 `/dashboard` times out
+- [ ] EA2 `/violations/report` returns 500
+- [ ] PCC freshness broken: `registry_versions: 0`, `status: "unknown"` for all releases
+- [ ] Violation rules have empty `title`/`solution` fields — 11 rules with no fix guidance
+- [ ] Jira token expired (HTTP 401) — blocker_count: 0 is untrustworthy
+- [ ] `age_hours: null` on all v3.5 failures; stale endpoint has no `age_hours` field
+
+Minor:
+- [ ] **BUG-T13**: Daily stats 35 days behind — data ingestion/scheduling issue
+- [ ] **BUG-T16**: Violations report 3MB — needs pagination (feature)
+- [x] **BUG-T17**: Export broken namespace link (`/ns//pipelinerun/`) — FIXED: deduplicated `_konflux_url` across 4 files to use `make_konflux_pipelinerun_url` (returns empty when NAMESPACE missing)
+- [ ] **BUG-T18**: AI quality metrics 0 verdicts — feedback loop adoption issue, code is correct
+- [ ] FBC history shows 0 builds for EA2
+- [ ] Stale component diagnosis is 100% generic — all get "No specific cause identified"
+- [ ] Policy bindings/exceptions endpoints return empty but exceptions/lifecycle shows 1465
+- [ ] No cross-release comparison endpoint
+- [ ] Violations endpoint lacks exception coverage fields from alerts
+- [ ] Triage snyk exception data inconsistency (expired 2026-06-24 vs active until 2026-09-30)
+
+*Pending:*
+- [ ] Verify health endpoint fix is live (code fixed at `applications.py:129` but server not restarted)
+- [ ] Re-test endpoints that 500'd or timed out after API restart + P0 fixes
+
+*Fix progress (2026-07-10 session):*
+1. [x] Restart API server — done (PID 1936816, health endpoint live)
+2. [x] Fix `/alerts` N+1 query — replaced per-component `get_violation_details()` loop with batch `get_violation_summaries()` (42→1 DB queries) in `failures.py:244`
+3. [x] Add request timeout middleware (30s) — `api/middleware.py`, wraps all endpoints, 504 on timeout
+4. [x] Fix health warnings application filter — threaded `application` param through `run_checks()` → `get_degrading_components()` in `health_monitor.py`
+5. [x] Fix `_db()` connection pool bypass — uses `PooledDatabaseConnection(get_pool())` now in `releases.py:30-33`
+6. [x] Remove dead code — `_d()` deleted from `sync_schedule`, `date.today()` removed from `_compute_freeze_countdown`
+7. [x] Fix `_check_rpm_drift` false PASS — now returns `SKIP` with "Not implemented" instead of always PASS
+8. [x] Add application validation — `list_alerts()` now returns 404 for nonexistent apps with available apps suggestion
+9. [x] Fix nightly warnings swallowed — `except Exception: pass` replaced with NightlyWarning surfacing in `failures.py:302-307`
+10. [x] Fix schedule errors swallowed — same pattern, `failures.py:317-322`
+11. [x] Fix ThreadPoolExecutor — context-managed with `with` statement in readiness checks
+12. [x] Fix timeout SKIP distinction — `"Check error: timed out (>20s)"` vs generic SKIP
+13. [ ] Fix 500 errors (v3.4 health, v3.5 dashboard, EA2 violations/report)
+14. [ ] Populate violation rule title/solution fields
+15. [ ] Fix PCC freshness check to actually query registry
+16. [ ] Re-test all endpoints with healthy API (tests running, 1 failure fixed so far)
+
+*Performance issues identified:*
+- [ ] `/alerts` endpoint: N+1 query (41 DB calls) + synchronous Jira/K8s/GitHub API calls → 60s+ response (being fixed)
+- [ ] `/health` endpoint: 28-30s response — full DB scan per component in `get_component_health_summary()`
+- [ ] `/readiness` endpoint: 120s+ — 17 checks including K8s API, registry, GitHub calls, all with 20s individual timeouts
+- [ ] `/triage` endpoint: 56s for full report generation
+- [ ] `/nightly` endpoint: 12s — `get_nightly_status()` slow
+- [ ] `/fbc-history` endpoint: 10s
+- [ ] No async endpoints — all I/O-bound operations block uvicorn thread pool
+- [ ] No circuit breaker for external calls (Jira, K8s, GitHub) — when external service is down, dependent endpoints hang until timeout
+- [ ] Server starvation: slow endpoints consume all workers, blocking even `/health`
+- [x] Request timeout middleware (30s) — prevents indefinite worker starvation
 
 **Phase 11 — Resolution Visualization (planned):**
 - [ ] Resolution timeline component showing IC fix workflow steps

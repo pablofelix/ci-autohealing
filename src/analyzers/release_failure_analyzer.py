@@ -1234,10 +1234,13 @@ class ReleaseFailureAnalyzer:
             sections.append(pattern_section)
 
         # Targeted knowledge graph context (circuit-breaker protected)
-        from knowledge.graph_provider import get_provider
-        graph_section = get_provider().release_context(context)
-        if graph_section:
-            sections.append(graph_section)
+        try:
+            from knowledge.graph_provider import get_provider
+            graph_section = get_provider().release_context(context)
+            if graph_section:
+                sections.append(graph_section)
+        except Exception:
+            graph_section = ""
         # Store for later use at save time
         self._last_graph_section = graph_section
 

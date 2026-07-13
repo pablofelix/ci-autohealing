@@ -66,6 +66,24 @@ tasks:
     cmds:
       - python3 -m pytest src/tests/ --cov --cov-fail-under={{.COV_MIN | default "85"}} -q --tb=no
 
+  test-playwright:
+    desc: Run Playwright E2E tests for the system map frontend
+    dir: map/frontend
+    cmds:
+      - npx playwright test {{.CLI_ARGS}}
+
+  test-playwright-headed:
+    desc: Run Playwright tests in headed browser (visible)
+    dir: map/frontend
+    cmds:
+      - npx playwright test --headed {{.CLI_ARGS}}
+
+  test-map:
+    desc: Run all map tests (pytest BDD + Playwright E2E)
+    cmds:
+      - python3 -m pytest map/tests/ -x -q --tb=short --ignore=map/tests/test_e2e_system_map.py
+      - cd map/frontend && npx playwright test
+
   test-watchdog:
     desc: Start file-watching test daemon
     cmds:

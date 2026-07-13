@@ -134,6 +134,24 @@ Inventory of all user-facing capabilities across CLI (`ic`), MCP tools, and API 
 | DB status | `ic db status` | — | — |
 | DB query | `ic db query` | — | — |
 
+## System Map (Neo4j Infrastructure Graph)
+
+| Capability | CLI | MCP Tool | API |
+|---|---|---|---|
+| Full graph (nodes + edges) | — | `get_map_graph()` | `GET /api/map/graph` |
+| Search nodes | — | `search_map_nodes(query, type)` | `GET /api/map/search?q=...` |
+| Node detail + neighbors | — | `get_map_node(node_id)` | `GET /api/map/node/{node_id}` |
+| Shortest path | — | `find_map_path(from, to)` | `GET /api/map/path/{from}/{to}` |
+| Impact analysis (blast radius) | — | `get_map_impact(node_id, max_depth, direction)` | `GET /api/map/impact/{node_id}` |
+| Infrastructure gaps | — | `get_map_gaps()` | `GET /api/map/gaps` |
+| Graph statistics | — | `get_map_stats()` | `GET /api/map/stats` |
+| Live CI/CD status overlay | — | `get_map_live_status(application)` | `GET /api/map/live-status` |
+| Auto-seed from cluster | — | `seed_map_from_cluster(application)` | `POST /api/map/seed/cluster` |
+| Drift detection | — | `get_map_drift()` | `GET /api/map/drift` |
+| Change history | — | `get_map_changes(since, entity_id, change_type)` | `GET /api/map/changes` |
+| System Map deep-link | `ic describe component <comp>` | — | — |
+| React Flow frontend | `http://localhost:3001` | — | — |
+
 ---
 
 ## Capability Counts
@@ -141,5 +159,7 @@ Inventory of all user-facing capabilities across CLI (`ic`), MCP tools, and API 
 | Surface | Count |
 |---|---|
 | CLI commands (visible) | ~55 |
-| MCP tools | 72 |
-| API endpoints | ~45 |
+| MCP tools (IC) | 72 |
+| MCP tools (System Map) | 11 |
+| API endpoints (IC) | ~45 |
+| API endpoints (System Map) | 14 |
