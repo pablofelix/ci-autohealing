@@ -1,6 +1,7 @@
 """Repository for build_failures table operations."""
 
 import json
+import logging
 
 from clients.blob_store import (
     get_blob_store,
@@ -8,6 +9,8 @@ from clients.blob_store import (
     resolve_blob_fields,
     should_offload,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BuildFailureRepository:
@@ -57,7 +60,8 @@ class BuildFailureRepository:
                     (application,)
                 )
                 return {row[0] for row in cursor.fetchall()}
-        except Exception:
+        except Exception as e:
+            logger.warning("find_unresolved_component_names failed for %s: %s", application, e)
             return set()
 
     def find_failing_component_names(self, application):
@@ -80,7 +84,8 @@ class BuildFailureRepository:
                     (application,)
                 )
                 return {row[0] for row in cursor.fetchall()}
-        except Exception:
+        except Exception as e:
+            logger.warning("find_failing_component_names failed for %s: %s", application, e)
             return None
 
     def count_unresolved(self, component_name, application):
@@ -98,7 +103,8 @@ class BuildFailureRepository:
                     (component_name, application)
                 )
                 return cursor.fetchone()[0]
-        except Exception:
+        except Exception as e:
+            logger.warning("count_unresolved failed for %s in %s: %s", component_name, application, e)
             return 0
 
     def get_last_status(self, component_name, application):
@@ -118,7 +124,8 @@ class BuildFailureRepository:
                 )
                 row = cursor.fetchone()
                 return row[0] if row else None
-        except Exception:
+        except Exception as e:
+            logger.warning("get_last_status failed for %s in %s: %s", component_name, application, e)
             return None
 
     def mark_resolved(self, component_name, application, namespace, resolution_pr_name,
@@ -146,7 +153,8 @@ class BuildFailureRepository:
                     (resolution_url, resolution_commit_sha, component_name, application)
                 )
                 return cursor.rowcount > 0
-        except Exception:
+        except Exception as e:
+            logger.warning("mark_resolved failed for %s in %s: %s", component_name, application, e)
             return False
 
     def mark_resolved_deleted(self, component_name, application):
@@ -169,7 +177,8 @@ class BuildFailureRepository:
                     (component_name, application)
                 )
                 return cursor.rowcount > 0
-        except Exception:
+        except Exception as e:
+            logger.warning("mark_resolved_deleted failed for %s in %s: %s", component_name, application, e)
             return False
 
     def update_failure_nature(self, failure_id, nature):
@@ -186,7 +195,8 @@ class BuildFailureRepository:
                     (nature, failure_id)
                 )
                 return cursor.rowcount > 0
-        except Exception:
+        except Exception as e:
+            logger.warning("update_failure_nature failed for failure_id %s: %s", failure_id, e)
             return False
 
     def get_unresolved_failure(self, component_name, application):
@@ -206,7 +216,8 @@ class BuildFailureRepository:
                     (component_name, application)
                 )
                 return cursor.fetchone()
-        except Exception:
+        except Exception as e:
+            logger.warning("get_unresolved_failure failed for %s in %s: %s", component_name, application, e)
             return None
 
     def record_successful_build(self, component_name, pr_name, pr_uid,
@@ -235,7 +246,8 @@ class BuildFailureRepository:
                      repository, repo_url, branch, 'Succeeded', True)
                 )
                 return True
-        except Exception:
+        except Exception as e:
+            logger.warning("record_successful_build failed for %s: %s", component_name, e)
             return False
 
     def upsert_failure(self, pr_name, pr_uid, component_name, application, namespace,
@@ -354,7 +366,8 @@ class BuildFailureRepository:
                          json.dumps(blob_refs), d.get('trigger_type', 'push'))
                     )
                     return True
-        except Exception:
+        except Exception as e:
+            logger.warning("upsert_failure failed for %s: %s", component_name, e)
             raise
 
     def update_component_health(self, component_name):
