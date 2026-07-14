@@ -37,6 +37,14 @@ def _konflux_url(pr_name: str) -> str:
     return make_konflux_pipelinerun_url(pr_name)
 
 
+def _humanize_rule_code(code: str) -> str:
+    """Derive human-readable title from a rule code like 'slsa_build_build_service.exists'."""
+    if not code:
+        return ""
+    parts = code.replace("_", " ").replace(".", ": ", 1).replace(".", " ")
+    return parts.strip().title()
+
+
 @router.get("/applications/{application}/violations")
 def list_violations(
     application: str,
@@ -204,7 +212,7 @@ def list_violation_rules(
             if rule not in rules_map:
                 rules_map[rule] = {
                     'rule': rule,
-                    'title': '',
+                    'title': _humanize_rule_code(rule),
                     'solution': '',
                     'components': set(),
                     'violation_rows': 0,
