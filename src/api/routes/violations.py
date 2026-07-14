@@ -1,5 +1,6 @@
 """Conforma violation endpoints."""
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,7 @@ from repositories.repository_factory import get_repository
 from repositories.triage_repository import TriageRepository
 from shared_config import NAMESPACE, make_konflux_pipelinerun_url
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["violations"])
 
 
@@ -33,6 +35,14 @@ def _triage_jira_map(application):
 
 def _konflux_url(pr_name: str) -> str:
     return make_konflux_pipelinerun_url(pr_name)
+
+
+def _humanize_rule_code(code: str) -> str:
+    """Derive human-readable title from a rule code like 'slsa_build_build_service.exists'."""
+    if not code:
+        return ""
+    parts = code.replace("_", " ").replace(".", ": ", 1).replace(".", " ")
+    return parts.strip().title()
 
 
 @router.get("/applications/{application}/violations")
@@ -68,7 +78,11 @@ def list_violations(
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
-    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    try:
+        exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    except Exception as e:
+        logger.warning("Could not fetch exceptions: %s", e)
+        exceptions_by_policy = {}
     for v in violations:
         if not v.get('jira_key'):
             v['jira_key'] = jira_map.get(v.get('component_name'))
@@ -125,7 +139,11 @@ def get_conforma_report(
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
-    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    try:
+        exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    except Exception as e:
+        logger.warning("Could not fetch exceptions: %s", e)
+        exceptions_by_policy = {}
     total_unique = 0
     groups = {}
     for v in violations:
@@ -194,7 +212,7 @@ def list_violation_rules(
             if rule not in rules_map:
                 rules_map[rule] = {
                     'rule': rule,
-                    'title': '',
+                    'title': _humanize_rule_code(rule),
                     'solution': '',
                     'components': set(),
                     'violation_rows': 0,
