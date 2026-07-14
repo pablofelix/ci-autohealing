@@ -157,7 +157,40 @@ Verify each component has:
   - All nudge PRs in RHOAI-Build-Config are merged
   - No pending auto-merge failures in critical repos
 
-### 6.2 Release Timeline Tracking
+### 6.2 Release Pipeline Duration Monitoring (FBC Contribution Timeouts)
+
+**Current gap**: IC sees Release CRs as "completed" or "failed" but has no visibility into individual task durations within the release pipeline. When the `fbc-contribution` (aka `add-fbc-contribution-to-index-image`) task times out at 4+ hours (normally 10-15 min), IC cannot detect or diagnose the issue.
+
+**Real incident (July 2026, rhoai-3.5-ea-2)**: FBC releases for OCP 4.20/4.21 timed out at 4+ hours. Root causes identified by Chai (from Slack/Jira cross-reference):
+- IIB (Index Image Builder) queue overload — 354 pending requests (KONFLUX-12016)
+- Serial FBC processing — 1 fragment per IIB request × 26 fragments × 4 OCP versions = hours (KONFLUX-9427)
+- Incorrect internal service timeout (KONFLUX-8890, RELEASE-1682)
+- OOM kills on `add-contribution` step (memory limit too low)
+
+**IC data already available**: Release CR durations show anomalies — the July 3 release `rhoai-v3-5-ea-2-stage-1783073621` took 1h33m vs ~27 min for others on the same snapshot. This signal exists but IC doesn't analyze it.
+
+**Proposed improvement**:
+- Track release pipeline duration per Release CR and flag anomalies (>2× rolling average)
+- Monitor PipelineRun task-level durations in `rhtap-releng-tenant` namespace (requires cross-namespace access or releng API)
+- Baseline per release plan type: components-stage ~27 min, FBC-prod ~45 min, charts-stage ~4 min
+- Alert when any release exceeds its type's P95 duration
+- Surface IIB queue health if accessible (fbc-operations API endpoint)
+- Track retry patterns: same snapshot released multiple times = previous attempts failed/timed out
+
+**Diagnostic context for AI analyzer**:
+- When a release takes >2× baseline, include in analysis: "Release duration anomaly: expected ~27 min, actual 1h33m"
+- Cross-reference with known Konflux issues: IIB queue overload, internal timeout bugs
+- Link to relevant Jira tickets: KONFLUX-12016, KONFLUX-9427, KONFLUX-8890
+
+**ReleasePlanAdmission configuration to monitor**:
+- `pipelineRef.params.fbcPublishingCredentials` timeout settings
+- `iibServiceConfigSecret` IIB request/build timeouts (default 3000s each)
+- `addFBCContribution.timeout` (pipeline timeout, currently 4h0m0s)
+- Memory overrides for `add-contribution` step (should be 4Gi to avoid OOM)
+
+**Data sources**: Release CRs (already tracked), PipelineRun CRDs in `rhtap-releng-tenant`, ReleasePlanAdmission CRDs, IIB API (if accessible)
+
+### 6.3 Release Timeline Tracking
 
 **Current gap**: IC has `get_release_schedule` but doesn't proactively warn about upcoming milestones.
 

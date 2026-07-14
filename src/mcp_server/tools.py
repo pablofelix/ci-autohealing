@@ -8,7 +8,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from functools import wraps
-from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar, Union
 
 from mcp_server import mcp
 from mcp_server.models import (
@@ -508,7 +508,7 @@ def analyze_failure(
     component: str,
     application: str = DEFAULT_APPLICATION,
     force: bool = False,
-):
+) -> Union[AnalysisDetails, Dict[str, str]]:
     """Run AI analysis on a component's build failure.
 
     Triggers the full analysis pipeline (context fetch, enrichment, LLM call).
