@@ -76,6 +76,11 @@ class TestBuildEventHandler(unittest.TestCase):
         self.assertEqual(call_kwargs.kwargs['status'], 'Failed')
 
     def test_handles_success(self):
+        self.build_repo.get_unresolved_failure.return_value = {
+            'id': 1,
+            'failure_nature': None,
+            'failed_step_name': '',
+        }
         pr = _make_pipelinerun('pr-2', 'uid-2', 'comp-b', 'True', 'Succeeded')
         self.handler.handle({'type': 'MODIFIED', 'object': pr})
         self.build_repo.record_successful_build.assert_called_once()
@@ -135,6 +140,68 @@ class TestBuildEventHandler(unittest.TestCase):
         self.build_repo.upsert_failure.return_value = False
         handler.handle({'type': 'MODIFIED', 'object': pr})
         analyzer.analyze.assert_not_called()
+
+    def test_structural_failure_not_auto_resolved(self):
+        """Structural failure (failure_nature='structural') must NOT be resolved on success."""
+        self.build_repo.get_unresolved_failure.return_value = {
+            'id': 10,
+            'failure_nature': 'structural',
+            'failed_step_name': '',
+        }
+        pr = _make_pipelinerun('pr-ok', 'uid-ok', 'comp-a', 'True', 'Succeeded')
+        self.handler.handle({'type': 'MODIFIED', 'object': pr})
+        self.build_repo.record_successful_build.assert_called_once()
+        self.build_repo.mark_resolved.assert_not_called()
+
+    def test_step_mismatch_not_auto_resolved(self):
+        """If the failed step didn't run in the success build, do NOT resolve."""
+        self.build_repo.get_unresolved_failure.return_value = {
+            'id': 11,
+            'failure_nature': None,
+            'failed_step_name': 'fips-check',
+        }
+        pr = _make_pipelinerun('pr-ok', 'uid-ok', 'comp-a', 'True', 'Succeeded')
+        pr['status']['childReferences'] = [
+            {'name': 'pr-ok-build-container', 'pipelineTaskName': 'build-container'},
+            {'name': 'pr-ok-prefetch', 'pipelineTaskName': 'prefetch-dependencies'},
+        ]
+        self.handler.handle({'type': 'MODIFIED', 'object': pr})
+        self.build_repo.record_successful_build.assert_called_once()
+        self.build_repo.mark_resolved.assert_not_called()
+
+    def test_normal_failure_auto_resolved(self):
+        """Normal transient failure (unknown nature, no step mismatch) resolves as before."""
+        self.build_repo.get_unresolved_failure.return_value = {
+            'id': 12,
+            'failure_nature': 'unknown',
+            'failed_step_name': 'prefetch-dependencies',
+        }
+        pr = _make_pipelinerun('pr-ok', 'uid-ok', 'comp-a', 'True', 'Succeeded')
+        pr['status']['childReferences'] = [
+            {'name': 'pr-ok-prefetch', 'pipelineTaskName': 'prefetch-dependencies'},
+            {'name': 'pr-ok-build', 'pipelineTaskName': 'build-container'},
+        ]
+        self.handler.handle({'type': 'MODIFIED', 'object': pr})
+        self.build_repo.mark_resolved.assert_called_once()
+
+    def test_no_failed_step_auto_resolved(self):
+        """Failure with no failed_step_name resolves as before (backwards compat)."""
+        self.build_repo.get_unresolved_failure.return_value = {
+            'id': 13,
+            'failure_nature': None,
+            'failed_step_name': '',
+        }
+        pr = _make_pipelinerun('pr-ok', 'uid-ok', 'comp-a', 'True', 'Succeeded')
+        self.handler.handle({'type': 'MODIFIED', 'object': pr})
+        self.build_repo.mark_resolved.assert_called_once()
+
+    def test_no_unresolved_failure_still_records_success(self):
+        """When there's no unresolved failure, record success but skip mark_resolved."""
+        self.build_repo.get_unresolved_failure.return_value = None
+        pr = _make_pipelinerun('pr-ok', 'uid-ok', 'comp-a', 'True', 'Succeeded')
+        self.handler.handle({'type': 'MODIFIED', 'object': pr})
+        self.build_repo.record_successful_build.assert_called_once()
+        self.build_repo.mark_resolved.assert_not_called()
 
 
 class TestComponentEventHandler(unittest.TestCase):

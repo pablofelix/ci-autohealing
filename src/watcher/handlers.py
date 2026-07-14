@@ -84,6 +84,28 @@ class BuildEventHandler:
             component, pr_name, uid, self.application,
             self.namespace, repo_url, branch,
         )
+
+        pending = self.build_repo.get_unresolved_failure(component, self.application)
+        if not pending:
+            logger.info("[%s] Build succeeded (no pending failure): %s (%s)",
+                        self.application, component, pr_name)
+            return
+
+        if pending.get('failure_nature') == 'structural':
+            logger.warning("[%s] Skipping auto-resolve for structural failure: %s",
+                           self.application, component)
+            return
+
+        failed_step = pending.get('failed_step_name', '')
+        if failed_step:
+            child_refs = pr_data.get('status', {}).get('childReferences', [])
+            completed_tasks = {ref.get('pipelineTaskName', '') for ref in child_refs}
+            if failed_step not in completed_tasks:
+                logger.warning(
+                    "[%s] Skipping auto-resolve: step '%s' did not run in %s",
+                    self.application, failed_step, pr_name)
+                return
+
         self.build_repo.mark_resolved(
             component, self.application, self.namespace, pr_name,
         )

@@ -1195,6 +1195,11 @@ Use these URLs in evidence_references when relevant:
         self._ensure_enrichment(failure)
         self._ensure_logs(failure)
 
+        enrichment = failure.get('enrichment_context', {})
+        component_health = enrichment.get('component_health', {})
+        nature = classify_failure_nature(component_health)
+        self.build_repo.update_failure_nature(failure['id'], nature)
+
         system_prompt, user_prompt = self.build_analysis_prompt(failure)
 
         # Create Langfuse trace

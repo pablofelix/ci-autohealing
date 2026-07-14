@@ -172,6 +172,43 @@ class BuildFailureRepository:
         except Exception:
             return False
 
+    def update_failure_nature(self, failure_id, nature):
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE build_failures
+                    SET failure_nature = %s,
+                        last_updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (nature, failure_id)
+                )
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    def get_unresolved_failure(self, component_name, application):
+        try:
+            with self.db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, failure_nature, failed_step_name
+                    FROM build_failures
+                    WHERE component_name = %s
+                      AND application = %s
+                      AND is_resolved = FALSE
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (component_name, application)
+                )
+                return cursor.fetchone()
+        except Exception:
+            return None
+
     def record_successful_build(self, component_name, pr_name, pr_uid,
                                 application, namespace, repo_url, branch):
         """Record a successful build. Returns False if already recorded."""
