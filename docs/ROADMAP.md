@@ -70,6 +70,15 @@ Goal: full visibility into the nightly build chain, and proactive detection of c
 - [x] Track the full chain: GHA trigger → operator build → FBC fragment → PCC cache (`ic nightly` chain view)
 - [ ] Parse `#rhoai-build-notifications` Slack messages for build success/failure signals (blocked — no Slack token for ic, deferred until slk ingests to Neo4j)
 
+**Release pipeline duration monitoring (FBC contribution timeouts):**
+- [ ] Track release pipeline duration per Release CR, flag anomalies (>2× rolling average for release plan type)
+- [ ] Baseline durations per type: components-stage ~27 min, FBC-prod ~45 min, charts-stage ~4 min
+- [ ] Alert when release exceeds P95 for its type (e.g., 1h33m vs 27 min baseline = IIB queue issue)
+- [ ] Surface retry patterns: same snapshot released multiple times = previous attempts failed/timed out
+- [ ] Cross-reference with known Konflux issues (KONFLUX-12016 IIB queue, KONFLUX-9427 serial FBC, KONFLUX-8890 internal timeout)
+- [ ] Monitor ReleasePlanAdmission timeout configs: `addFBCContribution.timeout`, IIB request/build timeouts, memory overrides
+- [ ] (stretch) Monitor PipelineRun task-level durations in `rhtap-releng-tenant` namespace for per-task visibility
+
 ---
 
 ## Phase 4: Skill Execution & Composition (done)
