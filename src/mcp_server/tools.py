@@ -502,6 +502,49 @@ def get_analysis(
     return _row_to_analysis(row)
 
 
+@mcp.tool()
+@async_tool
+def analyze_failure(
+    component: str,
+    application: str = DEFAULT_APPLICATION,
+    force: bool = False,
+):
+    """Run AI analysis on a component's build failure.
+
+    Triggers the full analysis pipeline (context fetch, enrichment, LLM call).
+    Use force=True to re-analyze even if an analysis already exists.
+    Takes 90-180 seconds. Returns the same schema as get_analysis.
+
+    Args:
+        component: Component name to analyze
+        application: Which application version
+        force: Re-analyze even if analysis exists
+    """
+    from config import CollectorConfig
+    config = CollectorConfig.from_env()
+    if not config.llm:
+        return {'error': 'llm_not_configured', 'message': 'Set LLM_PROVIDER env var.'}
+
+    try:
+        from analyzers.build_failure_analyzer import BuildFailureAnalyzer
+        from clients.llm_provider import create_llm_provider
+        llm = create_llm_provider(config.llm)
+        analyzer = BuildFailureAnalyzer(config=config, llm=llm, db=_db_connection())
+        analyzer.run(
+            component_filter=component,
+            force=force,
+            application=application,
+            limit=1,
+        )
+    except Exception as e:
+        return {'error': 'analysis_failed', 'message': str(e)}
+
+    row = _ai_repo().get_analysis_by_component(component, application, 'build')
+    if not row:
+        return {'error': 'no_analysis_produced', 'message': 'No analysis result after run.'}
+    return _row_to_analysis(row)
+
+
 def _extract_from_analysis_json(analysis_json):
     """Extract evidence_references, source_transparency, and fix_action_type from analysis_json JSONB."""
     evidence = []
