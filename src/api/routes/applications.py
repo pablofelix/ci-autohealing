@@ -1,9 +1,11 @@
 """Application endpoints."""
 
+import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
+from api.errors import ICError
 from mcp_server.models import (
     ApplicationInfo,
     DashboardResponse,
@@ -17,6 +19,7 @@ from repositories.error_pattern_repository import ErrorPatternRepository
 from repositories.repository_factory import get_pool, get_repository
 from repositories.resolution_attempt_repository import ResolutionAttemptRepository
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["applications"])
 
 
@@ -99,34 +102,50 @@ def get_triage(application: str):
 @router.get("/applications/{application}/dashboard", response_model=DashboardResponse)
 def get_dashboard(application: str):
     """Full dashboard: analysis queue, patterns, costs."""
-    build_repo = _build_repo()
-    ai_repo = _ai_repo()
+    try:
+        build_repo = _build_repo()
+        ai_repo = _ai_repo()
 
-    overview = build_repo.get_overview_stats(application)
-    enrichment = build_repo.get_enrichment_coverage(application)
-    overview['enrichment'] = enrichment
+        overview = build_repo.get_overview_stats(application)
+        enrichment = build_repo.get_enrichment_coverage(application)
+        overview['enrichment'] = enrichment
 
-    ai_status = ai_repo.get_extended_status(application)
-    cost = ai_repo.get_cost_summary()
+        ai_status = ai_repo.get_extended_status(application)
+        cost = ai_repo.get_cost_summary()
 
-    patterns = get_repository(ErrorPatternRepository).get_library_summary()
-    fixes = get_repository(ResolutionAttemptRepository).get_outcome_summary()
+        patterns = get_repository(ErrorPatternRepository).get_library_summary()
+        fixes = get_repository(ResolutionAttemptRepository).get_outcome_summary()
 
-    return DashboardResponse(
-        application=application,
-        overview=overview,
-        ai_status={**ai_status, 'cost_30d': cost},
-        patterns=patterns,
-        fixes=fixes,
-    )
+        return DashboardResponse(
+            application=application,
+            overview=overview,
+            ai_status={**ai_status, 'cost_30d': cost},
+            patterns=patterns,
+            fixes=fixes,
+        )
+    except Exception as e:
+        logger.error("Dashboard endpoint failed for %s: %s", application, e)
+        raise ICError(
+            500, "internal_error",
+            f"Dashboard data unavailable: {e}",
+            suggestion="Check database connectivity and repository access"
+        )
 
 
 @router.get("/applications/{application}/health")
 def get_health(application: str) -> List[Dict[str, Any]]:
     """Component health scores and status."""
-    from proactive.health_monitor import HealthMonitor
-    monitor = HealthMonitor(get_pool())
-    return monitor.get_component_health_summary(application=application) or []
+    try:
+        from proactive.health_monitor import HealthMonitor
+        monitor = HealthMonitor(get_pool())
+        return monitor.get_component_health_summary(application=application) or []
+    except Exception as e:
+        logger.error("Health endpoint failed for %s: %s", application, e)
+        raise ICError(
+            500, "internal_error",
+            f"Health check failed: {e}",
+            suggestion="Check database connectivity"
+        )
 
 
 @router.get("/applications/{application}/health/warnings")

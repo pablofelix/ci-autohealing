@@ -1,5 +1,6 @@
 """Conforma violation endpoints."""
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,7 @@ from repositories.repository_factory import get_repository
 from repositories.triage_repository import TriageRepository
 from shared_config import NAMESPACE, make_konflux_pipelinerun_url
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["violations"])
 
 
@@ -68,7 +70,11 @@ def list_violations(
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
-    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    try:
+        exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    except Exception as e:
+        logger.warning("Could not fetch exceptions: %s", e)
+        exceptions_by_policy = {}
     for v in violations:
         if not v.get('jira_key'):
             v['jira_key'] = jira_map.get(v.get('component_name'))
@@ -125,7 +131,11 @@ def get_conforma_report(
     repo = _conforma_repo()
     violations = repo.get_violation_summaries(application)
     jira_map = _triage_jira_map(application)
-    exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    try:
+        exceptions_by_policy = fetch_exceptions_by_policy(NAMESPACE)
+    except Exception as e:
+        logger.warning("Could not fetch exceptions: %s", e)
+        exceptions_by_policy = {}
     total_unique = 0
     groups = {}
     for v in violations:

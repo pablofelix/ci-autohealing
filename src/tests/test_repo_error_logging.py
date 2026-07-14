@@ -90,7 +90,7 @@ def test_upsert_failure_logs_on_error(repo_with_broken_db, caplog):
                 "pr-123", "uid-123", "comp", "rhoai-v3-5", "default",
                 "https://github.com/foo/bar.git", "main", "Failed"
             )
-            assert False, "Expected exception to be raised"
+            raise AssertionError("Expected exception to be raised")
         except Exception:  # noqa: B014
             pass
     assert any("upsert_failure" in r.message for r in caplog.records)
