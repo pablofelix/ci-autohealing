@@ -504,6 +504,41 @@ def get_analysis(
 
 @mcp.tool()
 @async_tool
+def review_analysis(
+    component: str,
+    application: str = DEFAULT_APPLICATION,
+    type: Literal["auto", "build", "conforma"] = "auto",
+) -> Dict[str, Any]:
+    """Get existing AI analysis for a component and review its quality.
+
+    Auto-detects whether it's a build failure or Conforma violation unless specified.
+    Returns a review verdict (pass/warn/fail) with flags for any issues found.
+
+    Args:
+        component: Component name
+        application: Which version to query
+        type: "auto", "build", or "conforma"
+    """
+    analysis_row = _ai_repo().get_analysis_by_component(component, application, type)
+    if not analysis_row:
+        return {'error': 'no_analysis', 'message': f'No analysis found for {component}'}
+
+    failure = _build_repo().get_failure_details(component, application)
+    if not failure:
+        return {'error': 'no_failure', 'message': f'No active failure found for {component}'}
+
+    from analyzers.analysis_reviewer import review_analysis as run_review
+    result = run_review(analysis_row, failure)
+    return {
+        'component': component,
+        'verdict': result.verdict,
+        'flags': [{'check': f.check, 'severity': f.severity, 'message': f.message} for f in result.flags],
+        'summary': result.summary,
+    }
+
+
+@mcp.tool()
+@async_tool
 def analyze_failure(
     component: str,
     application: str = DEFAULT_APPLICATION,
@@ -524,6 +559,16 @@ def analyze_failure(
     config = CollectorConfig.from_env()
     if not config.llm:
         return {'error': 'llm_not_configured', 'message': 'Set LLM_PROVIDER env var.'}
+
+    if not force:
+        existing = _ai_repo().get_analysis_by_component(component, application, 'build')
+        if existing:
+            failure = _build_repo().get_failure_details(component, application)
+            if (failure
+                    and existing.get('analyzed_at')
+                    and failure.get('last_updated_at')
+                    and failure['last_updated_at'] > existing['analyzed_at']):
+                force = True
 
     try:
         from analyzers.build_failure_analyzer import BuildFailureAnalyzer
