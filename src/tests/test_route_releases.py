@@ -14,9 +14,11 @@ from fastapi.testclient import TestClient
 from api.errors import register_error_handlers
 from api.routes.releases import (
     _build_manual_checks,
+    _check_blockers,
     _check_fbc_health,
     _check_gha_nightly,
     _check_integration_tests,
+    _check_jira_health,
     _check_nudge_propagation,
     _check_pcc,
     _check_policy_consistency,
@@ -1146,6 +1148,268 @@ def test_readiness_conforma_no_exceptions_available(
     assert data["conforma_violations"] == 1
     assert data["conforma_blockers"] == 1
     assert data["verdict"] == "NOT_READY"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Jira Health Check Tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_check_jira_health_valid():
+    """Jira health check returns PASS when token is valid."""
+    with patch('clients.jira_client.JiraClient') as MockJira:
+        MockJira.return_value.check_token_health.return_value = {
+            'status': 'valid',
+            'user': 'test-user',
+            'message': 'Token valid, authenticated as test-user',
+        }
+        result = _check_jira_health()
+
+    assert result['name'] == 'Jira API health'
+    assert result['phase'] == 'pre-release'
+    assert result['status'] == 'PASS'
+    assert 'valid' in result['detail'].lower()
+
+
+def test_check_jira_health_expired():
+    """Jira health check returns FAIL when token is expired."""
+    with patch('clients.jira_client.JiraClient') as MockJira:
+        MockJira.return_value.check_token_health.return_value = {
+            'status': 'expired',
+            'user': None,
+            'message': 'Jira token expired or invalid (HTTP 401)',
+        }
+        result = _check_jira_health()
+
+    assert result['status'] == 'FAIL'
+    assert result['fix'] is not None
+    assert 'regenerate' in result['fix'].lower() or 'token' in result['fix'].lower()
+
+
+def test_check_jira_health_missing():
+    """Jira health check returns WARN when no token configured."""
+    with patch('clients.jira_client.JiraClient') as MockJira:
+        MockJira.return_value.check_token_health.return_value = {
+            'status': 'missing',
+            'user': None,
+            'message': 'JIRA_TOKEN environment variable is not set',
+        }
+        result = _check_jira_health()
+
+    assert result['status'] == 'WARN'
+
+
+def test_check_jira_health_unreachable():
+    """Jira health check returns WARN when Jira API is unreachable."""
+    with patch('clients.jira_client.JiraClient') as MockJira:
+        MockJira.return_value.check_token_health.return_value = {
+            'status': 'unreachable',
+            'user': None,
+            'message': 'Jira API unreachable: connection refused',
+        }
+        result = _check_jira_health()
+
+    assert result['status'] == 'WARN'
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Jira Blocker Check Tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_check_blockers_with_results():
+    """Blocker check returns FAIL with category breakdown when blockers exist."""
+    with patch('clients.jira_client.JiraClient') as MockJira, \
+         patch('clients.jira_query_builder.JiraBlockerQuery') as MockQuery, \
+         patch('clients.jira_query_builder.categorize_blocker') as mock_cat:
+        MockQuery.return_value.for_application.return_value.build.return_value = 'jql'
+        MockJira.return_value.search_blockers.return_value = [
+            {'key': 'RHOAIENG-100', 'summary': 'Build fails', 'status': 'Open',
+             'status_category': 'new', 'labels': []},
+            {'key': 'RHOAIENG-101', 'summary': 'TFA: test failure',
+             'status': 'Open', 'status_category': 'new', 'labels': []},
+            {'key': 'RHOAIENG-102', 'summary': 'Product Sign Off',
+             'status': 'Closed', 'status_category': 'done', 'labels': []},
+        ]
+        mock_cat.side_effect = ['product', 'tfa']
+        result = _check_blockers('rhoai-v3-5-ea-2')
+
+    assert result['status'] == 'FAIL'
+    assert '2 open blocker' in result['detail']
+    summary = result['blocker_summary']
+    assert summary['total'] == 3
+    assert summary['open'] == 2
+    assert summary['by_category']['product'] == 1
+    assert summary['by_category']['tfa'] == 1
+
+
+def test_check_blockers_none():
+    """Blocker check returns PASS when no blockers found."""
+    with patch('clients.jira_client.JiraClient') as MockJira, \
+         patch('clients.jira_query_builder.JiraBlockerQuery') as MockQuery:
+        MockQuery.return_value.for_application.return_value.build.return_value = 'jql'
+        MockJira.return_value.search_blockers.return_value = []
+        result = _check_blockers('rhoai-v3-5-ea-2')
+
+    assert result['status'] == 'PASS'
+    assert '0' in result['detail']
+    assert result['blocker_summary']['total'] == 0
+
+
+def test_check_blockers_jira_unavailable():
+    """Blocker check returns SKIP when Jira is unavailable."""
+    with patch('clients.jira_client.JiraClient') as MockJira, \
+         patch('clients.jira_query_builder.JiraBlockerQuery') as MockQuery:
+        MockQuery.return_value.for_application.return_value.build.return_value = 'jql'
+        MockJira.return_value.search_blockers.side_effect = Exception('connection refused')
+        result = _check_blockers('rhoai-v3-5-ea-2')
+
+    assert result['status'] == 'SKIP'
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# FBC Health DB Fallback Tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_fbc_health_db_fallback_pass():
+    """FBC health returns PASS from DB when cluster unreachable and last build succeeded."""
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    mock_cursor.fetchone.return_value = ('Success', 95, None, '2026-07-14T10:00:00Z')
+
+    with patch('proactive.health_monitor._nightly_component_for_app', return_value='fbc-fragment-v3-5'):
+        result = _check_fbc_health(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'PASS'
+    assert 'from DB' in result['detail']
+    assert 'cluster unreachable' in result['detail']
+
+
+def test_fbc_health_db_fallback_fail():
+    """FBC health returns FAIL from DB when cluster unreachable and last build failed."""
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    mock_cursor.fetchone.return_value = ('Failed', 30, '2026-07-14T09:00:00Z', '2026-07-13T10:00:00Z')
+
+    with patch('proactive.health_monitor._nightly_component_for_app', return_value='fbc-fragment-v3-5'):
+        result = _check_fbc_health(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'FAIL'
+    assert 'from DB' in result['detail']
+
+
+def test_fbc_health_db_fallback_no_data():
+    """FBC health returns SKIP from DB when no DB record exists."""
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    mock_cursor.fetchone.return_value = None
+
+    with patch('proactive.health_monitor._nightly_component_for_app', return_value='fbc-fragment-v3-5'):
+        result = _check_fbc_health(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'SKIP'
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Stale Components DB Fallback Tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_stale_components_db_fallback_stale():
+    """Stale check returns WARN from DB when cluster unreachable and stale commits found."""
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    mock_cursor.description = [('component_name',), ('repository_url',), ('branch',), ('commit_sha',)]
+    mock_cursor.fetchall.return_value = [
+        ('comp-a', 'https://github.com/org/repo-a', 'release-3.5', 'aaa111aaa111aaa111'),
+        ('comp-b', 'https://github.com/org/repo-b', 'release-3.5', 'bbb222bbb222bbb222'),
+    ]
+
+    with patch('clients.github_client.parse_github_repo', side_effect=[('org', 'repo-a'), ('org', 'repo-b')]), \
+         patch('clients.github_client.GitHubClient') as MockGH:
+        MockGH.return_value.get_ref_sha.side_effect = ['ccc333ccc333ccc333', 'bbb222bbb222bbb222']
+        result = _check_stale_components(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'WARN'
+    assert 'from DB' in result['detail']
+    assert 'comp-a' in result['detail']
+
+
+def test_stale_components_db_fallback_fresh():
+    """Stale check returns PASS from DB when all commits match."""
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    mock_cursor.description = [('component_name',), ('repository_url',), ('branch',), ('commit_sha',)]
+    mock_cursor.fetchall.return_value = [
+        ('comp-a', 'https://github.com/org/repo-a', 'release-3.5', 'aaa111aaa111aaa111'),
+    ]
+
+    with patch('clients.github_client.parse_github_repo', return_value=('org', 'repo-a')), \
+         patch('clients.github_client.GitHubClient') as MockGH:
+        MockGH.return_value.get_ref_sha.return_value = 'aaa111aaa111aaa111'
+        result = _check_stale_components(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'PASS'
+    assert 'from DB' in result['detail']
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Snapshot Freshness DB Fallback Tests
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_snapshot_freshness_db_fallback_stale():
+    """Snapshot freshness returns WARN from DB when oldest build >24h."""
+    from datetime import UTC, datetime, timedelta
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    old_ts = datetime.now(UTC) - timedelta(hours=48)
+    mock_cursor.fetchall.return_value = [
+        ('stale-comp', old_ts),
+    ]
+
+    result = _check_snapshot_freshness(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'WARN'
+    assert 'from DB' in result['detail']
+
+
+def test_snapshot_freshness_db_fallback_fresh():
+    """Snapshot freshness returns PASS from DB when all builds <24h."""
+    from datetime import UTC, datetime, timedelta
+    mock_monitor = MagicMock()
+    mock_db = MagicMock()
+    mock_cursor = MagicMock()
+    mock_db.connection.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+    mock_db.connection.return_value.__exit__ = MagicMock(return_value=False)
+    recent_ts = datetime.now(UTC) - timedelta(hours=2)
+    mock_cursor.fetchall.return_value = [
+        ('fresh-comp', recent_ts),
+    ]
+
+    result = _check_snapshot_freshness(mock_monitor, 'rhoai-v3-5', k8s_reachable=False, db=mock_db)
+
+    assert result['status'] == 'PASS'
+    assert 'from DB' in result['detail']
 
 
 # Run the tests if this file is executed directly

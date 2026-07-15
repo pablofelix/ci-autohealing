@@ -313,8 +313,8 @@ class TestTriageRepository:
     def test_get_by_id_found(self):
         repo, cursor = self._make_repo()
         cursor.fetchone.return_value = (
-            1, 'group', ['comp-a'], 'root cause', 'step-build',
-            'new', [], 'JIRA-1', 'notes', None, None, None,
+            1, 'group', ['comp-a'], 'build', 'root cause', 'step-build',
+            'new', [], [], 'JIRA-1', 'notes', None, None, None,
             '2026-01-01', '2026-01-01', 'test-app',
         )
         result = repo.get_by_id(1)

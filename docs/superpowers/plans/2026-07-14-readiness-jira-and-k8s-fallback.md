@@ -1,6 +1,6 @@
 # Release Readiness: Jira Checks + K8s DB Fallback — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add Jira health + blocker checks to release readiness, and add DB-backed fallback for 3 K8s-dependent checks so they produce useful results when the cluster is unreachable.
 
@@ -37,7 +37,7 @@
 - Produces: Two new check result dicts in the `checks` list
 - Produces: `jira_blockers` dict and `jira_health` string in readiness response
 
-- [ ] **Step 1: Write failing tests for `_check_jira_health()`**
+- [x] **Step 1: Write failing tests for `_check_jira_health()`**
 
 Add to `src/tests/test_route_releases.py`:
 
@@ -102,7 +102,7 @@ def test_check_jira_health_unreachable():
     assert result['status'] == 'WARN'
 ```
 
-- [ ] **Step 2: Write failing tests for `_check_blockers()`**
+- [x] **Step 2: Write failing tests for `_check_blockers()`**
 
 ```python
 def test_check_blockers_with_results():
@@ -148,12 +148,12 @@ def test_check_blockers_jira_unavailable():
     assert 'blocker_summary' not in result or result.get('blocker_summary') is None
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "jira_health or check_blockers"`
 Expected: FAIL — `_check_jira_health` and `_check_blockers` not yet defined.
 
-- [ ] **Step 4: Implement `_check_jira_health()` and `_check_blockers()`**
+- [x] **Step 4: Implement `_check_jira_health()` and `_check_blockers()`**
 
 Add imports at top of `src/api/routes/releases.py` (near existing imports):
 
@@ -259,7 +259,7 @@ def _check_blockers(application):
         }
 ```
 
-- [ ] **Step 5: Wire new checks into `_run_readiness_checks()`**
+- [x] **Step 5: Wire new checks into `_run_readiness_checks()`**
 
 In `_run_readiness_checks()`, add to `check_fns` list (after the existing pre-release checks, before post-stage):
 
@@ -274,7 +274,7 @@ Add to `check_names` list in the corresponding position:
 'Jira API health', 'Jira release blockers',
 ```
 
-- [ ] **Step 6: Extract Jira fields into readiness response**
+- [x] **Step 6: Extract Jira fields into readiness response**
 
 In `get_readiness()`, after the checks loop, extract the blocker summary and jira health:
 
@@ -298,12 +298,12 @@ Add to the return dict:
 'jira_health': jira_health,
 ```
 
-- [ ] **Step 7: Run tests to verify they pass**
+- [x] **Step 7: Run tests to verify they pass**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "jira_health or check_blockers"`
 Expected: 7 PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/api/routes/releases.py src/tests/test_route_releases.py
@@ -325,7 +325,7 @@ git commit -m "feat: add Jira health + blocker checks to release readiness"
 - Consumes: `component_health` table columns: `component_name`, `current_status`, `health_score`, `last_failed_build`, `last_successful_build`
 - Produces: PASS/FAIL result with `"(from DB — cluster unreachable)"` suffix instead of SKIP
 
-- [ ] **Step 1: Write failing tests for DB fallback**
+- [x] **Step 1: Write failing tests for DB fallback**
 
 Add to `src/tests/test_route_releases.py`:
 
@@ -361,12 +361,12 @@ def test_fbc_health_db_fallback_fail():
     assert 'failed' in result['detail'].lower()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "fbc_health_db_fallback"`
 Expected: FAIL — `_check_fbc_health` doesn't accept `db` parameter yet.
 
-- [ ] **Step 3: Implement DB fallback in `_check_fbc_health()`**
+- [x] **Step 3: Implement DB fallback in `_check_fbc_health()`**
 
 Change signature from `def _check_fbc_health(monitor, application, k8s_reachable=True):`
 to `def _check_fbc_health(monitor, application, k8s_reachable=True, db=None):`.
@@ -421,12 +421,12 @@ Update the lambda in `_run_readiness_checks()` from:
 to:
 `lambda: _check_fbc_health(monitor, application, k8s_reachable, db),`
 
-- [ ] **Step 4: Verify existing tests still pass (no regression)**
+- [x] **Step 4: Verify existing tests still pass (no regression)**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "fbc_health"`
 Expected: All existing + new tests pass. The existing `test_check_fbc_health_k8s_unreachable` still passes because `db` defaults to `None`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/routes/releases.py src/tests/test_route_releases.py
@@ -449,7 +449,7 @@ git commit -m "feat: add DB fallback for FBC health check when K8s unreachable"
 - Consumes: `parse_github_repo(url)` from `src/clients/github_client.py`
 - Produces: WARN/PASS result with `"(from DB — cluster unreachable)"` suffix instead of SKIP
 
-- [ ] **Step 1: Write failing test for stale components DB fallback**
+- [x] **Step 1: Write failing test for stale components DB fallback**
 
 ```python
 def test_stale_components_db_fallback():
@@ -477,12 +477,12 @@ def test_stale_components_db_fallback():
     assert 'comp-a' in result['detail']
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "stale_components_db_fallback"`
 Expected: FAIL
 
-- [ ] **Step 3: Implement DB fallback in `_check_stale_components()`**
+- [x] **Step 3: Implement DB fallback in `_check_stale_components()`**
 
 Change signature from `def _check_stale_components(monitor, application, k8s_reachable=True):`
 to `def _check_stale_components(monitor, application, k8s_reachable=True, db=None):`.
@@ -561,12 +561,12 @@ Update the lambda in `_run_readiness_checks()` from:
 to:
 `lambda: _check_stale_components(monitor, application, k8s_reachable, db),`
 
-- [ ] **Step 4: Verify all stale tests pass**
+- [x] **Step 4: Verify all stale tests pass**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "stale"`
 Expected: All existing + new tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/routes/releases.py src/tests/test_route_releases.py
@@ -587,7 +587,7 @@ git commit -m "feat: add DB fallback for stale components check when K8s unreach
 - Consumes: `component_health` table columns: `component_name`, `last_successful_build`, `application`
 - Produces: WARN/PASS result with `"(from DB — cluster unreachable)"` suffix instead of SKIP
 
-- [ ] **Step 1: Write failing tests for snapshot freshness DB fallback**
+- [x] **Step 1: Write failing tests for snapshot freshness DB fallback**
 
 ```python
 from datetime import timezone
@@ -632,12 +632,12 @@ def test_snapshot_freshness_db_fallback_fresh():
     assert 'from DB' in result['detail']
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "snapshot_freshness_db_fallback"`
 Expected: FAIL
 
-- [ ] **Step 3: Implement DB fallback in `_check_snapshot_freshness()`**
+- [x] **Step 3: Implement DB fallback in `_check_snapshot_freshness()`**
 
 Change signature from `def _check_snapshot_freshness(monitor, application, k8s_reachable=True):`
 to `def _check_snapshot_freshness(monitor, application, k8s_reachable=True, db=None):`.
@@ -697,12 +697,12 @@ Update the lambda in `_run_readiness_checks()` from:
 to:
 `lambda: _check_snapshot_freshness(monitor, application, k8s_reachable, db),`
 
-- [ ] **Step 4: Verify all snapshot tests pass**
+- [x] **Step 4: Verify all snapshot tests pass**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short -k "snapshot_freshness"`
 Expected: All existing + new tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api/routes/releases.py src/tests/test_route_releases.py
@@ -716,17 +716,17 @@ git commit -m "feat: add DB fallback for snapshot freshness check when K8s unrea
 **Files:**
 - No new files
 
-- [ ] **Step 1: Run full release route test suite**
+- [x] **Step 1: Run full release route test suite**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/test_route_releases.py -x -q --tb=short`
 Expected: All tests pass (existing + 12 new)
 
-- [ ] **Step 2: Run full project test suite**
+- [x] **Step 2: Run full project test suite**
 
 Run: `PYTHONPATH=src python3 -m pytest src/tests/ -x -q --tb=short`
 Expected: All tests pass, no regressions.
 
-- [ ] **Step 3: Verify the check count**
+- [x] **Step 3: Verify the check count**
 
 Count total checks in `_run_readiness_checks()` — should now be 23 (was 21) in base mode, 27 (was 25) in full mode.
 

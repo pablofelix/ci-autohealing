@@ -3,7 +3,7 @@
 import logging
 import os
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -15,6 +15,7 @@ from repositories.build_failure_repository import BuildFailureRepository
 from repositories.conforma_repository import ConformaRepository
 from repositories.connection import DatabaseConnection
 from repositories.repository_factory import get_repository
+from shared_config import JIRA_BASE_URL, JIRA_PROJECT
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +331,14 @@ def get_readiness(
     schedule = get_schedule(application)
 
     checks = _run_readiness_checks(application, full=full)
+
+    jira_blockers = None
+    jira_health = None
     for check in checks:
+        if check['name'] == 'Jira release blockers' and 'blocker_summary' in check:
+            jira_blockers = check.pop('blocker_summary')
+        if check['name'] == 'Jira API health':
+            jira_health = check['status'].lower()
         if check['status'] == 'FAIL':
             blockers.append('{}: {}'.format(check['name'], check['detail']))
         elif check['status'] == 'WARN':
@@ -357,6 +365,8 @@ def get_readiness(
         'risks': risks,
         'schedule': schedule,
         'checks': checks,
+        'jira_blockers': jira_blockers,
+        'jira_health': jira_health,
         'manual_checks': _build_manual_checks(application),
     }
 
@@ -413,11 +423,11 @@ def _run_readiness_checks(application, full=False):
 
     check_fns = [
         # ── Pre-release checks ──
-        lambda: _check_fbc_health(monitor, application, k8s_reachable),
+        lambda: _check_fbc_health(monitor, application, k8s_reachable, db),
         lambda: _check_pcc(monitor),
         lambda: _check_gha_nightly(monitor, application),
-        lambda: _check_stale_components(monitor, application, k8s_reachable),
-        lambda: _check_snapshot_freshness(monitor, application, k8s_reachable),
+        lambda: _check_stale_components(monitor, application, k8s_reachable, db),
+        lambda: _check_snapshot_freshness(monitor, application, k8s_reachable, db),
         lambda: _check_fbc_artifacts(application, snapshot),
         lambda: _check_chains_signing(k8s, application),
         lambda: _check_snapshot_completeness(k8s, snapshot, application),
@@ -430,6 +440,8 @@ def _run_readiness_checks(application, full=False):
         lambda: _check_cross_product_images(snapshot),
         lambda: _check_tutorial_validation(),
         lambda: _check_its_scoping(db, application, kfx, namespace),
+        lambda: _check_jira_health(),
+        lambda: _check_blockers(application),
         # ── Post-stage checks ──
         lambda: _check_stage_release_health(kfx, application),
         lambda: _check_prod_rpa_exists(rpas),
@@ -455,6 +467,7 @@ def _run_readiness_checks(application, full=False):
         'Test coverage regression', 'OCP compatibility',
         'Cross-product images', 'Tutorial validation',
         'ITS scoping (Konflux)',
+        'Jira API health', 'Jira release blockers',
         'Stage release health', 'Prod RPA exists',
         'Snapshot drift', 'Release pipeline completeness',
         'PCC cache (post-push)',
@@ -499,16 +512,52 @@ def _run_readiness_checks(application, full=False):
 # ─── Pre-release checks ────────────────────────────────────────────────
 
 
-def _check_fbc_health(monitor, application, k8s_reachable=True):
+def _check_fbc_health(monitor, application, k8s_reachable=True, db=None):
     """Check if the FBC (File-Based Catalog) fragment nightly build is healthy."""
     try:
         if not k8s_reachable:
+            if not db:
+                return {
+                    'name': 'FBC fragment health',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'K8s cluster unreachable',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            from proactive.health_monitor import _nightly_component_for_app
+            fbc_name = _nightly_component_for_app(application)
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT current_status, health_score, last_failed_build, last_successful_build
+                    FROM component_health
+                    WHERE component_name = %s
+                """, (fbc_name,))
+                row = cursor.fetchone()
+            if not row:
+                return {
+                    'name': 'FBC fragment health',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'No DB data for FBC fragment',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            current_status, score, last_fail, last_success = row
+            if current_status == 'Failed':
+                return {
+                    'name': 'FBC fragment health',
+                    'phase': 'pre-release',
+                    'status': 'FAIL',
+                    'detail': 'FBC fragment last build failed (from DB — cluster unreachable)',
+                    'fix': 'Check FBC fragment build logs: ic describe {}'.format(fbc_name),
+                }
             return {
                 'name': 'FBC fragment health',
                 'phase': 'pre-release',
-                'status': 'SKIP',
-                'detail': 'K8s cluster unreachable',
-                'fix': 'Verify VPN/kubeconfig and retry',
+                'status': 'PASS',
+                'detail': 'FBC fragment healthy, score {} (from DB — cluster unreachable)'.format(
+                    score or 'N/A'),
+                'fix': None,
             }
         status = monitor.get_nightly_status(application)
         fbc = status.get('fbc_health')
@@ -640,16 +689,69 @@ def _check_gha_nightly(monitor, application):
         }
 
 
-def _check_stale_components(monitor, application, k8s_reachable=True):
+def _check_stale_components(monitor, application, k8s_reachable=True, db=None):
     """Check for components with untriggered commits."""
     try:
         if not k8s_reachable:
+            if not db:
+                return {
+                    'name': 'Stale components',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'K8s cluster unreachable',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            from clients.github_client import GitHubClient, parse_github_repo
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT ON (bf.component_name)
+                        bf.component_name, bf.repository_url, bf.branch, bf.commit_sha
+                    FROM build_failures bf
+                    WHERE bf.application = %s
+                      AND bf.repository_url IS NOT NULL
+                      AND bf.branch IS NOT NULL
+                      AND bf.commit_sha IS NOT NULL
+                    ORDER BY bf.component_name, bf.first_detected_at DESC
+                """, (application,))
+                components = [dict(zip([d[0] for d in cursor.description], row))
+                              for row in cursor.fetchall()]
+            if not components:
+                return {
+                    'name': 'Stale components',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'No component build history in DB',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            gh = GitHubClient(token=os.environ.get('GITHUB_TOKEN', ''))
+            stale = []
+            for comp in components:
+                parsed = parse_github_repo(comp['repository_url'])
+                if not parsed:
+                    continue
+                try:
+                    head = gh.get_ref_sha(parsed[0], parsed[1], comp['branch'])
+                except Exception:
+                    continue
+                if head and comp['commit_sha'] and head[:12] != comp['commit_sha'][:12]:
+                    stale.append(comp['component_name'])
+            if stale:
+                return {
+                    'name': 'Stale components',
+                    'phase': 'pre-release',
+                    'status': 'WARN',
+                    'detail': '{} component(s) with newer commits (from DB — cluster unreachable): {}'.format(
+                        len(stale), ', '.join(stale[:5])),
+                    'fix': 'Run ic get stale for details',
+                }
             return {
                 'name': 'Stale components',
                 'phase': 'pre-release',
-                'status': 'SKIP',
-                'detail': 'K8s cluster unreachable',
-                'fix': 'Verify VPN/kubeconfig and retry',
+                'status': 'PASS',
+                'detail': '{} components checked (from DB — cluster unreachable)'.format(
+                    len(components)),
+                'fix': None,
             }
         result = monitor.get_stale_components(application, diagnose=False)
         stale_count = result.get('stale_count', 0)
@@ -682,16 +784,54 @@ def _check_stale_components(monitor, application, k8s_reachable=True):
         }
 
 
-def _check_snapshot_freshness(monitor, application, k8s_reachable=True):
+def _check_snapshot_freshness(monitor, application, k8s_reachable=True, db=None):
     """Check if the snapshot contains the latest successful builds."""
     try:
         if not k8s_reachable:
+            if not db:
+                return {
+                    'name': 'Snapshot freshness',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'K8s cluster unreachable',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT component_name, last_successful_build
+                    FROM component_health
+                    WHERE application = %s
+                      AND last_successful_build IS NOT NULL
+                    ORDER BY last_successful_build ASC
+                    LIMIT 5
+                """, (application,))
+                rows = cursor.fetchall()
+            if not rows:
+                return {
+                    'name': 'Snapshot freshness',
+                    'phase': 'pre-release',
+                    'status': 'SKIP',
+                    'detail': 'No build history in DB',
+                    'fix': 'Verify VPN/kubeconfig and retry',
+                }
+            oldest_name, oldest_ts = rows[0]
+            age_hours = (datetime.now(UTC) - oldest_ts).total_seconds() / 3600
+            if age_hours > 24:
+                return {
+                    'name': 'Snapshot freshness',
+                    'phase': 'pre-release',
+                    'status': 'WARN',
+                    'detail': '{} oldest successful build {:.0f}h ago (from DB — cluster unreachable)'.format(
+                        oldest_name, age_hours),
+                    'fix': 'Trigger rebuild or check for build failures',
+                }
             return {
                 'name': 'Snapshot freshness',
                 'phase': 'pre-release',
-                'status': 'SKIP',
-                'detail': 'K8s cluster unreachable',
-                'fix': 'Verify VPN/kubeconfig and retry',
+                'status': 'PASS',
+                'detail': 'All components built within 24h (from DB — cluster unreachable)',
+                'fix': None,
             }
         result = monitor.check_snapshot_freshness(application)
         stale_count = result.get('stale_count', 0)
@@ -1869,6 +2009,104 @@ def _check_pcc_post_push(monitor):
         return {
             'name': 'PCC cache (post-push)',
             'phase': 'post-stage',
+            'status': 'SKIP',
+            'detail': 'Check failed: {}'.format(exc),
+            'fix': None,
+        }
+
+
+# ─── Jira checks ──────────────────────────────────────────────────────
+
+
+def _check_jira_health():
+    """Check Jira API token validity."""
+    try:
+        from clients.jira_client import JiraClient
+        jira = JiraClient(
+            base_url=JIRA_BASE_URL,
+            email=os.environ.get('JIRA_EMAIL', ''),
+            token=os.environ.get('JIRA_TOKEN', ''),
+            project=JIRA_PROJECT,
+        )
+        health = jira.check_token_health()
+        status_map = {
+            'valid': 'PASS',
+            'expired': 'FAIL',
+            'forbidden': 'FAIL',
+            'missing': 'WARN',
+            'unreachable': 'WARN',
+        }
+        fix = None
+        if health['status'] in ('expired', 'forbidden'):
+            fix = 'Regenerate token: Jira > Profile > Personal Access Tokens'
+        return {
+            'name': 'Jira API health',
+            'phase': 'pre-release',
+            'status': status_map.get(health['status'], 'SKIP'),
+            'detail': health['message'],
+            'fix': fix,
+        }
+    except Exception as exc:
+        logger.debug("Jira health check failed: %s", exc)
+        return {
+            'name': 'Jira API health',
+            'phase': 'pre-release',
+            'status': 'SKIP',
+            'detail': 'Check failed: {}'.format(exc),
+            'fix': None,
+        }
+
+
+def _check_blockers(application):
+    """Check Jira release blockers with category breakdown."""
+    try:
+        from clients.jira_client import JiraClient
+        from clients.jira_query_builder import JiraBlockerQuery, categorize_blocker
+
+        jira = JiraClient(
+            base_url=JIRA_BASE_URL,
+            email=os.environ.get('JIRA_EMAIL', ''),
+            token=os.environ.get('JIRA_TOKEN', ''),
+            project=JIRA_PROJECT,
+        )
+        jql = JiraBlockerQuery().for_application(application).build()
+        raw = jira.search_blockers(jql_override=jql)
+
+        open_blockers = [b for b in raw if b.get('status_category') != 'done']
+        categories = {}
+        for b in open_blockers:
+            cat = categorize_blocker(b.get('summary', ''), b.get('labels', []))
+            categories[cat] = categories.get(cat, 0) + 1
+
+        if not open_blockers:
+            return {
+                'name': 'Jira release blockers',
+                'phase': 'pre-release',
+                'status': 'PASS',
+                'detail': '0 open release blockers',
+                'fix': None,
+                'blocker_summary': {'total': len(raw), 'open': 0, 'by_category': {}},
+            }
+
+        parts = ['{} {}'.format(v, k) for k, v in sorted(
+            categories.items(), key=lambda x: -x[1])]
+        return {
+            'name': 'Jira release blockers',
+            'phase': 'pre-release',
+            'status': 'FAIL',
+            'detail': '{} open blocker(s): {}'.format(len(open_blockers), ', '.join(parts)),
+            'fix': 'Triage blockers: ic list blockers {}'.format(application),
+            'blocker_summary': {
+                'total': len(raw),
+                'open': len(open_blockers),
+                'by_category': categories,
+            },
+        }
+    except Exception as exc:
+        logger.debug("Blocker check failed: %s", exc)
+        return {
+            'name': 'Jira release blockers',
+            'phase': 'pre-release',
             'status': 'SKIP',
             'detail': 'Check failed: {}'.format(exc),
             'fix': None,

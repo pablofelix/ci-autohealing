@@ -86,8 +86,8 @@ class TestOffboardingAnnotation:
         repo.db = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = [
-            (23, 'CDN DNS', ['odh-trustyai-service-v3-5'], None, None,
-             'resolved', [], 'RHOAIENG-76105', None,
+            (23, 'CDN DNS', ['odh-trustyai-service-v3-5'], 'build', None, None,
+             'resolved', [], [], 'RHOAIENG-76105', None,
              'Component offboarded on Friday Jul 11',
              '', '2026-07-13T12:18:10', '2026-07-13T07:10:11', '2026-07-13T12:18:10'),
         ]
@@ -106,8 +106,8 @@ class TestOffboardingAnnotation:
         repo.db = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = [
-            (22, 'rpm_repos', ['odh-latency-predictor-test-v3-5'], None, None,
-             'active', [], None, None,
+            (22, 'rpm_repos', ['odh-latency-predictor-test-v3-5'], 'build', None, None,
+             'active', [], [], None, None,
              None, '', None, '2026-07-09T10:57:06', '2026-07-09T11:20:40'),
         ]
         mock_conn = MagicMock()
@@ -124,8 +124,8 @@ class TestOffboardingAnnotation:
         repo.db = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = [
-            (17, 'Image sig', ['odh-workbench-codeserver'], None, None,
-             'resolved', [], None, None,
+            (17, 'Image sig', ['odh-workbench-codeserver'], 'build', None, None,
+             'resolved', [], [], None, None,
              'PR #2520 merged',
              'https://github.com/notebooks/pull/2520',
              '2026-07-13T09:27:25', '2026-06-29T09:16:29', '2026-07-13T09:27:25'),
