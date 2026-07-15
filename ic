@@ -886,6 +886,29 @@ except Exception:
 
         section_header "AI Analysis"
         echo ""
+
+        # One-line verdict for quick scanning
+        local verdict_action="" verdict_color="$NC"
+        if [ -n "$fix_action_type" ] && [ "$fix_action_type" != "" ]; then
+            case "$fix_action_type" in
+                rebuild)              verdict_action="Retrigger build"; verdict_color="$GREEN" ;;
+                file_change)          verdict_action="Code fix needed"; verdict_color="$YELLOW" ;;
+                config_change)        verdict_action="Config change needed"; verdict_color="$YELLOW" ;;
+                multi_step)           verdict_action="Multi-step fix"; verdict_color="$CYAN" ;;
+                investigation_needed) verdict_action="Needs investigation"; verdict_color="$RED" ;;
+                *)                    verdict_action="$(echo "$fix_action_type" | tr '_' ' ')"; verdict_color="$DIM" ;;
+            esac
+        else
+            case "$category" in
+                infrastructure|transient*) verdict_action="Likely retrigger"; verdict_color="$GREEN" ;;
+                dependency*)               verdict_action="Dependency fix needed"; verdict_color="$YELLOW" ;;
+                build_config*)             verdict_action="Build config fix"; verdict_color="$YELLOW" ;;
+                *)                         verdict_action="Review needed"; verdict_color="$DIM" ;;
+            esac
+        fi
+        echo -e "${BOLD}Verdict:${NC} ${verdict_color}${verdict_action}${NC} (${confidence}% confidence, ${category})"
+        echo ""
+
         printf "Category:       %s\n" "$category"
         # Display confidence + fix action on same line if available
         if [ -n "$fix_action_type" ] && [ "$fix_action_type" != "" ]; then
@@ -2587,54 +2610,7 @@ cmd_db_query() {
 # TRIAGE commands - focused on understanding failures
 
 cmd_triage() {
-    section_header "Triage Dashboard"
-    echo ""
-
-    # Get current failing components (last build = failed)
-    echo -e "${BOLD}Overview:${NC}"
-
-    # Total records vs currently failing
-    local total_records=$(sql "SELECT COUNT(*) FROM build_failures WHERE application = '$APPLICATION_NAME';")
-    local currently_failing=$(sql_count_failing_builds)
-    local currently_working=$(sql_count_working_builds)
-
-    echo "  Total build records: $total_records"
-    echo "  Currently failing: ${RED}$currently_failing${NC}"
-    echo "  Currently working: ${GREEN}$currently_working${NC}"
-    echo ""
-
-    # Show only components that are CURRENTLY failing (last build = failed)
-    echo -e "${BOLD}${RED}Currently Failing Components:${NC}"
-    sql_table "
-    WITH latest_builds AS (
-        SELECT DISTINCT ON (component_name)
-            component_name,
-            pipelinerun_name,
-            status,
-            first_detected_at,
-            (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
-            commit_context IS NOT NULL as has_context
-        FROM build_failures
-        WHERE application = '$APPLICATION_NAME'
-        ORDER BY component_name, first_detected_at DESC
-    )
-    SELECT
-        component_name as \"Component\",
-        first_detected_at::date as \"Last Failure\",
-        CASE WHEN has_logs THEN 'Yes' ELSE 'No' END as \"Has Logs\",
-        CASE WHEN has_context THEN 'Yes' ELSE 'No' END as \"Has Context\"
-    FROM latest_builds
-    WHERE status = 'Failed'
-    ORDER BY first_detected_at DESC;
-    "
-    echo ""
-
-    echo -e "${CYAN}Next Steps:${NC}"
-    echo "  1. Pick a component from above"
-    echo -e "  2. Run: ${BOLD}ic describe component <name>${NC} for full details"
-    echo -e "  3. Run: ${BOLD}ic describe component <name> --log${NC} for complete logs"
-    echo -e "  4. Use: ${BOLD}ic working${NC} to see components that are currently working"
-    echo ""
+    $PYTHON "$SCRIPT_DIR/ic.py" triage "$@"
 }
 
 # Part 2: AI commands
@@ -11549,7 +11525,8 @@ case "${1:-}" in
         esac
         ;;
     triage)
-        cmd_triage
+        shift
+        cmd_triage "$@"
         ;;
     alerts)
         case "${2:-}" in
