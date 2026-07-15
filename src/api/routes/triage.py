@@ -19,12 +19,14 @@ def _triage_repo():
 class TrackRequest(BaseModel):
     component: str
     group_label: Optional[str] = None
+    issue_type: str = 'build'
     root_cause: Optional[str] = None
     failed_step: Optional[str] = None
     slack_thread_url: Optional[str] = None
     jira_key: Optional[str] = None
     notes: Optional[str] = None
     add_to_id: Optional[int] = None
+    reference_url: Optional[str] = None
 
 
 class UpdateRequest(BaseModel):
@@ -34,6 +36,7 @@ class UpdateRequest(BaseModel):
     root_cause: Optional[str] = None
     group_label: Optional[str] = None
     status: Optional[str] = None
+    reference_url: Optional[str] = None
 
     model_config = {"json_schema_extra": {
         "description": "slack_thread_url appends to the list (does not replace)"
@@ -91,9 +94,11 @@ def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
         repo.update_item(req.add_to_id, **updates)
         if req.slack_thread_url:
             repo.add_slack_url(req.add_to_id, req.slack_thread_url)
+        if req.reference_url:
+            repo.add_reference_url(req.add_to_id, req.reference_url)
         return {"action": "added", "item_id": req.add_to_id, "component": req.component}
 
-    existing = repo.find_by_component(req.component, application)
+    existing = repo.find_by_component(req.component, application, issue_type=req.issue_type)
     if existing:
         return {"action": "exists", "item": existing}
 
@@ -101,9 +106,11 @@ def track_triage_item(application: str, req: TrackRequest) -> Dict[str, Any]:
         application=application,
         components=[req.component],
         group_label=req.group_label,
+        issue_type=req.issue_type,
         root_cause=req.root_cause,
         failed_step=req.failed_step,
         slack_thread_urls=[req.slack_thread_url] if req.slack_thread_url else None,
+        reference_urls=[req.reference_url] if req.reference_url else None,
         jira_key=req.jira_key,
         notes=req.notes,
     )
@@ -119,15 +126,20 @@ def update_triage_item(application: str, item_id: int, req: UpdateRequest) -> Di
         not_found("Triage item", f"#{item_id}")
 
     updates = {k: v for k, v in req.model_dump().items()
-               if v is not None and k != 'slack_thread_url'}
-    if not updates and not req.slack_thread_url:
+               if v is not None and k not in ('slack_thread_url', 'reference_url')}
+    if not updates and not req.slack_thread_url and not req.reference_url:
         validation_error("No updates provided")
 
     if updates:
         repo.update_item(item_id, **updates)
     if req.slack_thread_url:
-        repo.add_slack_url(item_id, req.slack_thread_url)
+        added = repo.add_slack_url(item_id, req.slack_thread_url)
+        if not added and 'slack.com/archives/' not in req.slack_thread_url:
+            validation_error("URL doesn't look like a Slack thread (expected slack.com/archives/...). Use reference_url for PRs and other links.")
         updates['slack_thread_urls'] = 'added'
+    if req.reference_url:
+        repo.add_reference_url(item_id, req.reference_url)
+        updates['reference_urls'] = 'added'
     return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
 
 

@@ -1,5 +1,9 @@
 """Repository for triage item tracking."""
 
+_TRIAGE_COLUMNS = """id, group_label, components, issue_type, root_cause, failed_step,
+       status, slack_thread_urls, reference_urls, jira_key, notes,
+       resolution, resolution_pr_url, resolved_at,
+       created_at, updated_at"""
 
 
 class TriageRepository:
@@ -8,18 +12,21 @@ class TriageRepository:
         self.db = db
 
     def create_item(self, application, components, group_label=None,
-                    root_cause=None, failed_step=None,
-                    slack_thread_urls=None, jira_key=None, notes=None):
+                    issue_type='build', root_cause=None, failed_step=None,
+                    slack_thread_urls=None, jira_key=None, notes=None,
+                    reference_urls=None):
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO triage_items
-                    (application, components, group_label, root_cause,
-                     failed_step, slack_thread_urls, jira_key, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (application, components, group_label, issue_type,
+                     root_cause, failed_step, slack_thread_urls,
+                     reference_urls, jira_key, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (application, components, group_label, root_cause,
-                  failed_step, slack_thread_urls, jira_key, notes))
+            """, (application, components, group_label, issue_type,
+                  root_cause, failed_step, slack_thread_urls,
+                  reference_urls, jira_key, notes))
             return cursor.fetchone()[0]
 
     def build_jira_map(self, application):
@@ -40,14 +47,11 @@ class TriageRepository:
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, group_label, components, root_cause, failed_step,
-                       status, slack_thread_urls, jira_key, notes,
-                       resolution, resolution_pr_url, resolved_at,
-                       created_at, updated_at
+                SELECT {}
                 FROM triage_items
                 WHERE application = %s AND status != 'resolved'
                 ORDER BY created_at DESC
-            """, (application,))
+            """.format(_TRIAGE_COLUMNS), (application,))
             return [self._row_to_dict(r) for r in cursor.fetchall()]
 
     def get_all(self, application, days=None):
@@ -55,42 +59,33 @@ class TriageRepository:
             cursor = conn.cursor()
             if days:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE application = %s
                       AND created_at >= NOW() - INTERVAL '1 day' * %s
                     ORDER BY created_at DESC
-                """, (application, days))
+                """.format(_TRIAGE_COLUMNS), (application, days))
             else:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE application = %s
                     ORDER BY created_at DESC
-                """, (application,))
+                """.format(_TRIAGE_COLUMNS), (application,))
             return [self._row_to_dict(r) for r in cursor.fetchall()]
 
     def get_by_id(self, item_id):
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, group_label, components, root_cause, failed_step,
-                       status, slack_thread_urls, jira_key, notes,
-                       resolution, resolution_pr_url, resolved_at,
-                       created_at, updated_at, application
+                SELECT {}, application
                 FROM triage_items WHERE id = %s
-            """, (item_id,))
+            """.format(_TRIAGE_COLUMNS), (item_id,))
             row = cursor.fetchone()
             if not row:
                 return None
             d = self._row_to_dict(row)
-            d['application'] = row[14]
+            d['application'] = row[16]
             return d
 
     def find_by_jira_key(self, jira_key, application=None):
@@ -98,48 +93,40 @@ class TriageRepository:
             cursor = conn.cursor()
             if application:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE UPPER(jira_key) = UPPER(%s) AND application = %s
                     ORDER BY created_at DESC LIMIT 1
-                """, (jira_key, application))
+                """.format(_TRIAGE_COLUMNS), (jira_key, application))
             else:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE UPPER(jira_key) = UPPER(%s)
                     ORDER BY created_at DESC LIMIT 1
-                """, (jira_key,))
+                """.format(_TRIAGE_COLUMNS), (jira_key,))
             row = cursor.fetchone()
             return self._row_to_dict(row) if row else None
 
-    def find_by_component(self, component, application):
+    def find_by_component(self, component, application, issue_type='build'):
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, group_label, components, root_cause, failed_step,
-                       status, slack_thread_urls, jira_key, notes,
-                       resolution, resolution_pr_url, resolved_at,
-                       created_at, updated_at
+                SELECT {}
                 FROM triage_items
                 WHERE application = %s AND %s = ANY(components)
                   AND status != 'resolved'
+                  AND issue_type = %s
                 ORDER BY created_at DESC LIMIT 1
-            """, (application, component))
+            """.format(_TRIAGE_COLUMNS), (application, component, issue_type))
             row = cursor.fetchone()
             return self._row_to_dict(row) if row else None
 
     def update_item(self, item_id, **kwargs):
         allowed = {
-            'group_label', 'components', 'root_cause', 'failed_step',
-            'status', 'slack_thread_urls', 'jira_key', 'notes',
-            'resolution', 'resolution_pr_url',
+            'group_label', 'components', 'issue_type', 'root_cause',
+            'failed_step', 'status', 'slack_thread_urls', 'reference_urls',
+            'jira_key', 'notes', 'resolution', 'resolution_pr_url',
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
         if not fields:
@@ -156,7 +143,12 @@ class TriageRepository:
             return cursor.rowcount > 0
 
     def add_slack_url(self, item_id, url):
-        """Append a Slack URL to the item's list (no duplicates)."""
+        """Append a Slack URL to the item's list (no duplicates).
+
+        Returns False if the URL is not a valid Slack thread link.
+        """
+        if 'slack.com/archives/' not in url:
+            return False
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -167,6 +159,21 @@ class TriageRepository:
                 WHERE id = %s
                   AND (slack_thread_urls IS NULL
                        OR NOT %s = ANY(slack_thread_urls))
+            """, (url, item_id, url))
+            return cursor.rowcount > 0
+
+    def add_reference_url(self, item_id, url):
+        """Append a reference URL (PR, doc, Jira link) to the item's list."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE triage_items
+                SET reference_urls = array_append(
+                        COALESCE(reference_urls, '{}'), %s),
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND (reference_urls IS NULL
+                       OR NOT %s = ANY(reference_urls))
             """, (url, item_id, url))
             return cursor.rowcount > 0
 
@@ -203,20 +210,14 @@ class TriageRepository:
             cursor = conn.cursor()
             if date:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE application = %s AND created_at::date = %s
                     ORDER BY status, created_at
-                """, (application, date))
+                """.format(_TRIAGE_COLUMNS), (application, date))
             else:
                 cursor.execute("""
-                    SELECT id, group_label, components, root_cause, failed_step,
-                           status, slack_thread_urls, jira_key, notes,
-                           resolution, resolution_pr_url, resolved_at,
-                           created_at, updated_at
+                    SELECT {}
                     FROM triage_items
                     WHERE application = %s
                     ORDER BY
@@ -226,7 +227,7 @@ class TriageRepository:
                             WHEN 'resolved' THEN 2
                         END,
                         created_at DESC
-                """, (application,))
+                """.format(_TRIAGE_COLUMNS), (application,))
             return [self._row_to_dict(r) for r in cursor.fetchall()]
 
     def get_summary(self, application):
@@ -300,15 +301,12 @@ class TriageRepository:
         with self.db.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id, group_label, components, root_cause, failed_step,
-                       status, slack_thread_urls, jira_key, notes,
-                       resolution, resolution_pr_url, resolved_at,
-                       created_at, updated_at
+                SELECT {}
                 FROM triage_items
                 WHERE application = %s AND %s = ANY(components)
                   AND status != 'resolved'
                 ORDER BY created_at DESC
-            """, (application, component))
+            """.format(_TRIAGE_COLUMNS), (application, component))
             return [self._row_to_dict(r) for r in cursor.fetchall()]
 
     @staticmethod
@@ -317,15 +315,17 @@ class TriageRepository:
             'id': row[0],
             'group_label': row[1],
             'components': row[2] or [],
-            'root_cause': row[3],
-            'failed_step': row[4],
-            'status': row[5],
-            'slack_thread_urls': row[6] or [],
-            'jira_key': row[7],
-            'notes': row[8],
-            'resolution': row[9],
-            'resolution_pr_url': row[10],
-            'resolved_at': row[11],
-            'created_at': row[12],
-            'updated_at': row[13],
+            'issue_type': row[3],
+            'root_cause': row[4],
+            'failed_step': row[5],
+            'status': row[6],
+            'slack_thread_urls': row[7] or [],
+            'reference_urls': row[8] or [],
+            'jira_key': row[9],
+            'notes': row[10],
+            'resolution': row[11],
+            'resolution_pr_url': row[12],
+            'resolved_at': row[13],
+            'created_at': row[14],
+            'updated_at': row[15],
         }
