@@ -27,23 +27,26 @@ def _make_db():
 
 
 def _sample_row(item_id=1, status='active', jira_key='RHOAI-999',
-                components=None, group_label='grp-1'):
-    """14-element tuple matching _row_to_dict column order."""
+                components=None, group_label='grp-1', issue_type='build',
+                reference_urls=None):
+    """16-element tuple matching _row_to_dict column order."""
     return (
-        item_id,                         # id
-        group_label,                     # group_label
-        components or ['comp-a'],        # components
-        'some root cause',               # root_cause
-        'build-container',               # failed_step
-        status,                          # status
-        ['https://slack.example/t1'],    # slack_thread_urls
-        jira_key,                        # jira_key
-        'a note',                        # notes
-        None,                            # resolution
-        None,                            # resolution_pr_url
-        None,                            # resolved_at
-        datetime(2025, 6, 1),            # created_at
-        datetime(2025, 6, 2),            # updated_at
+        item_id,                                      # 0  id
+        group_label,                                  # 1  group_label
+        components or ['comp-a'],                     # 2  components
+        issue_type,                                   # 3  issue_type
+        'some root cause',                            # 4  root_cause
+        'build-container',                            # 5  failed_step
+        status,                                       # 6  status
+        ['https://slack.com/archives/C07/t1'],        # 7  slack_thread_urls
+        reference_urls,                               # 8  reference_urls
+        jira_key,                                     # 9  jira_key
+        'a note',                                     # 10 notes
+        None,                                         # 11 resolution
+        None,                                         # 12 resolution_pr_url
+        None,                                         # 13 resolved_at
+        datetime(2025, 6, 1),                         # 14 created_at
+        datetime(2025, 6, 2),                         # 15 updated_at
     )
 
 
@@ -58,8 +61,10 @@ class TestRowToDict:
         assert d['id'] == 1
         assert d['group_label'] == 'grp-1'
         assert d['components'] == ['comp-a']
+        assert d['issue_type'] == 'build'
         assert d['status'] == 'active'
         assert d['jira_key'] == 'RHOAI-999'
+        assert d['reference_urls'] == []
 
     def test_none_components_becomes_empty_list(self):
         row = list(_sample_row())
@@ -69,9 +74,25 @@ class TestRowToDict:
 
     def test_none_slack_urls_becomes_empty_list(self):
         row = list(_sample_row())
-        row[6] = None
+        row[7] = None
         d = TriageRepository._row_to_dict(tuple(row))
         assert d['slack_thread_urls'] == []
+
+    def test_none_reference_urls_becomes_empty_list(self):
+        row = list(_sample_row())
+        row[8] = None
+        d = TriageRepository._row_to_dict(tuple(row))
+        assert d['reference_urls'] == []
+
+    def test_issue_type_mapped(self):
+        row = _sample_row(issue_type='conforma')
+        d = TriageRepository._row_to_dict(row)
+        assert d['issue_type'] == 'conforma'
+
+    def test_reference_urls_mapped(self):
+        row = _sample_row(reference_urls=['https://github.com/org/repo/pull/1'])
+        d = TriageRepository._row_to_dict(row)
+        assert d['reference_urls'] == ['https://github.com/org/repo/pull/1']
 
 
 # ===================================================================
@@ -98,6 +119,17 @@ class TestCreateItem:
         repo = TriageRepository(db)
         result = repo.create_item('app-1', ['c1'])
         assert result == 1
+
+    def test_with_issue_type_and_reference_urls(self):
+        db, conn, cursor = _make_db()
+        cursor.fetchone.return_value = (5,)
+        repo = TriageRepository(db)
+        result = repo.create_item('app-1', ['c1'], issue_type='conforma',
+                                  reference_urls=['https://jira.example/RHOAI-1'])
+        assert result == 5
+        params = cursor.execute.call_args[0][1]
+        assert 'conforma' in params
+        assert ['https://jira.example/RHOAI-1'] in params
 
     def test_db_exception_propagates(self):
         db, conn, cursor = _make_db()
@@ -172,7 +204,6 @@ class TestGetAll:
 class TestGetById:
     def test_found(self):
         db, conn, cursor = _make_db()
-        # get_by_id expects 15-element row (14 + application at index 14)
         row = _sample_row(item_id=5) + ('app-1',)
         cursor.fetchone.return_value = row
         repo = TriageRepository(db)
@@ -242,6 +273,36 @@ class TestFindByComponent:
         repo = TriageRepository(db)
         assert repo.find_by_component('nonexistent', 'app-1') is None
 
+    def test_filters_by_issue_type(self):
+        db, conn, cursor = _make_db()
+        cursor.fetchone.return_value = _sample_row(
+            components=['odh-dashboard'], issue_type='conforma')
+        repo = TriageRepository(db)
+        result = repo.find_by_component('odh-dashboard', 'app-1',
+                                         issue_type='conforma')
+        assert result['issue_type'] == 'conforma'
+        sql = cursor.execute.call_args[0][0]
+        assert 'issue_type = %s' in sql
+        params = cursor.execute.call_args[0][1]
+        assert 'conforma' in params
+
+    def test_different_issue_type_not_found(self):
+        """Same component, different issue_type → not found (allows creation)."""
+        db, conn, cursor = _make_db()
+        cursor.fetchone.return_value = None
+        repo = TriageRepository(db)
+        result = repo.find_by_component('odh-dashboard', 'app-1',
+                                         issue_type='conforma')
+        assert result is None
+
+    def test_default_issue_type_is_build(self):
+        db, conn, cursor = _make_db()
+        cursor.fetchone.return_value = None
+        repo = TriageRepository(db)
+        repo.find_by_component('comp-a', 'app-1')
+        params = cursor.execute.call_args[0][1]
+        assert 'build' in params
+
 
 # ===================================================================
 # find_all_by_component
@@ -277,6 +338,20 @@ class TestUpdateItem:
         assert 'jira_key' in sql
         assert 'updated_at = NOW()' in sql
 
+    def test_issue_type_is_allowed(self):
+        db, conn, cursor = _make_db()
+        cursor.rowcount = 1
+        repo = TriageRepository(db)
+        assert repo.update_item(1, issue_type='conforma') is True
+        sql = cursor.execute.call_args[0][0]
+        assert 'issue_type' in sql
+
+    def test_reference_urls_is_allowed(self):
+        db, conn, cursor = _make_db()
+        cursor.rowcount = 1
+        repo = TriageRepository(db)
+        assert repo.update_item(1, reference_urls=['https://example.com']) is True
+
     def test_ignores_disallowed_fields(self):
         db, conn, cursor = _make_db()
         cursor.rowcount = 0
@@ -307,24 +382,68 @@ class TestUpdateItem:
 # ===================================================================
 
 class TestAddSlackUrl:
-    def test_success(self):
+    def test_success_with_valid_slack_url(self):
         db, conn, cursor = _make_db()
         cursor.rowcount = 1
         repo = TriageRepository(db)
-        assert repo.add_slack_url(1, 'https://slack/thread') is True
+        url = 'https://redhat-internal.slack.com/archives/C07ANR2U56C/p1234'
+        assert repo.add_slack_url(1, url) is True
+
+    def test_rejects_non_slack_url(self):
+        db, conn, cursor = _make_db()
+        repo = TriageRepository(db)
+        assert repo.add_slack_url(1, 'https://github.com/org/repo/pull/1') is False
+        cursor.execute.assert_not_called()
+
+    def test_rejects_plain_url(self):
+        db, conn, cursor = _make_db()
+        repo = TriageRepository(db)
+        assert repo.add_slack_url(1, 'https://example.com') is False
 
     def test_duplicate_returns_false(self):
         db, conn, cursor = _make_db()
         cursor.rowcount = 0
         repo = TriageRepository(db)
-        assert repo.add_slack_url(1, 'https://slack/dup') is False
+        url = 'https://slack.com/archives/C07/dup'
+        assert repo.add_slack_url(1, url) is False
 
     def test_db_exception(self):
         db, conn, cursor = _make_db()
         cursor.execute.side_effect = Exception('write fail')
         repo = TriageRepository(db)
         with pytest.raises(Exception, match='write fail'):
-            repo.add_slack_url(1, 'url')
+            repo.add_slack_url(1, 'https://slack.com/archives/C07/t1')
+
+
+# ===================================================================
+# add_reference_url
+# ===================================================================
+
+class TestAddReferenceUrl:
+    def test_success(self):
+        db, conn, cursor = _make_db()
+        cursor.rowcount = 1
+        repo = TriageRepository(db)
+        assert repo.add_reference_url(1, 'https://github.com/org/repo/pull/1') is True
+
+    def test_accepts_any_url(self):
+        db, conn, cursor = _make_db()
+        cursor.rowcount = 1
+        repo = TriageRepository(db)
+        assert repo.add_reference_url(1, 'https://jira.example/RHOAI-1') is True
+
+    def test_duplicate_returns_false(self):
+        db, conn, cursor = _make_db()
+        cursor.rowcount = 0
+        repo = TriageRepository(db)
+        assert repo.add_reference_url(1, 'https://example.com/dup') is False
+
+    def test_db_exception(self):
+        db, conn, cursor = _make_db()
+        cursor.execute.side_effect = Exception('write fail')
+        repo = TriageRepository(db)
+        with pytest.raises(Exception, match='write fail'):
+            repo.add_reference_url(1, 'https://example.com')
 
 
 # ===================================================================
@@ -355,14 +474,7 @@ class TestResolveItem:
         cursor.rowcount = 1
         repo = TriageRepository(db)
 
-        # The import of AIAnalysisRepository happens inside the method body
-        # via 'from repositories.ai_analysis_repository import AIAnalysisRepository'.
-        # We mock the entire module-level class after it gets imported.
-        mock_ai_repo = MagicMock()
         with patch.dict('sys.modules', {}):
-            # Simpler: just verify it returns True and doesn't blow up
-            # The internal import + record_verdict calls are best-effort
-            # (wrapped in try/except in the source)
             result = repo.resolve_item(1, verdict='correct')
 
         assert result is True
@@ -521,12 +633,9 @@ class TestAutoResolveForComponent:
         cursor.rowcount = 1
         repo = TriageRepository(db)
 
-        # Capture the resolution string via resolve_item's SQL
         repo.auto_resolve_for_component('comp-a', 'app-1',
                                          commit_sha='abcdef123456',
                                          pipelinerun='pipeline-run-1')
-        # The resolve_item call should have been made
         calls = cursor.execute.call_args_list
-        # The resolve_item UPDATE should contain COALESCE
         resolve_call = [c for c in calls if 'resolved' in str(c).lower()]
         assert len(resolve_call) > 0

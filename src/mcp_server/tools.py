@@ -817,12 +817,14 @@ def get_triage_report(application: str = DEFAULT_APPLICATION,
 def track_triage_item(component: str,
                       application: str = DEFAULT_APPLICATION,
                       group_label: Optional[str] = None,
+                      issue_type: str = 'build',
                       root_cause: Optional[str] = None,
                       failed_step: Optional[str] = None,
                       slack_thread_url: Optional[str] = None,
                       jira_key: Optional[str] = None,
                       notes: Optional[str] = None,
-                      add_to_id: Optional[int] = None) -> Dict[str, Any]:
+                      add_to_id: Optional[int] = None,
+                      reference_url: Optional[str] = None) -> Dict[str, Any]:
     """Track a build failure in triage. Creates or updates a triage item.
 
     Use add_to_id to add a component to an existing triage group.
@@ -832,12 +834,14 @@ def track_triage_item(component: str,
         component: Component name to track
         application: Which version
         group_label: Group label (e.g., "Go 1.26 mismatch")
+        issue_type: Type of issue: build, conforma, onboarding, or release
         root_cause: Root cause description
         failed_step: Failed build step
         slack_thread_url: Slack thread URL (appended to list)
         jira_key: Jira ticket key
         notes: Additional notes
         add_to_id: Add to existing triage item ID instead of creating new
+        reference_url: Non-Slack reference URL (PR, doc, Jira link)
     """
     repo = _triage_repo()
 
@@ -856,17 +860,20 @@ def track_triage_item(component: str,
         repo.update_item(add_to_id, **updates)
         if slack_thread_url:
             repo.add_slack_url(add_to_id, slack_thread_url)
+        if reference_url:
+            repo.add_reference_url(add_to_id, reference_url)
         return {"action": "added", "item_id": add_to_id, "component": component}
 
-    existing = repo.find_by_component(component, application)
+    existing = repo.find_by_component(component, application, issue_type=issue_type)
     if existing:
         return {"action": "exists", "item": existing}
 
     item_id = repo.create_item(
         application=application, components=[component],
-        group_label=group_label, root_cause=root_cause,
-        failed_step=failed_step,
+        group_label=group_label, issue_type=issue_type,
+        root_cause=root_cause, failed_step=failed_step,
         slack_thread_urls=[slack_thread_url] if slack_thread_url else None,
+        reference_urls=[reference_url] if reference_url else None,
         jira_key=jira_key, notes=notes,
     )
     return {"action": "created", "item_id": item_id, "component": component}
@@ -881,7 +888,8 @@ def update_triage_item(item_id: int,
                        root_cause: Optional[str] = None,
                        status: Optional[str] = None,
                        resolution: Optional[str] = None,
-                       resolution_pr_url: Optional[str] = None) -> Dict[str, Any]:
+                       resolution_pr_url: Optional[str] = None,
+                       reference_url: Optional[str] = None) -> Dict[str, Any]:
     """Update a triage item's tracking info or resolve it.
 
     Slack URLs accumulate — each call appends to the list (does not replace).
@@ -895,6 +903,7 @@ def update_triage_item(item_id: int,
         status: New status (active, monitoring, resolved)
         resolution: Resolution description (when resolving)
         resolution_pr_url: Fix PR URL (when resolving)
+        reference_url: Non-Slack reference URL (PR, doc, Jira link)
     """
     repo = _triage_repo()
     existing = repo.get_by_id(item_id)
@@ -919,10 +928,16 @@ def update_triage_item(item_id: int,
         repo.update_item(item_id, **updates)
 
     if slack_thread_url:
-        repo.add_slack_url(item_id, slack_thread_url)
+        added = repo.add_slack_url(item_id, slack_thread_url)
+        if not added and 'slack.com/archives/' not in slack_thread_url:
+            return {"error": "URL doesn't look like a Slack thread (expected slack.com/archives/...). Use reference_url for PRs and other links."}
         updates['slack_thread_urls'] = 'added'
 
-    if not updates and not slack_thread_url:
+    if reference_url:
+        repo.add_reference_url(item_id, reference_url)
+        updates['reference_urls'] = 'added'
+
+    if not updates and not slack_thread_url and not reference_url:
         return {"error": "No updates provided"}
     return {"action": "updated", "item_id": item_id, "updates": list(updates.keys())}
 

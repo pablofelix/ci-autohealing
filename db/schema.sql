@@ -679,6 +679,10 @@ CREATE TABLE IF NOT EXISTS triage_items (
     group_label     VARCHAR(255),
     components      TEXT[] NOT NULL,
 
+    -- Issue classification
+    issue_type      VARCHAR(50) DEFAULT 'build'
+                    CHECK (issue_type IN ('build', 'conforma', 'onboarding', 'release')),
+
     -- Failure context
     root_cause      TEXT,
     failed_step     VARCHAR(255),
@@ -687,6 +691,7 @@ CREATE TABLE IF NOT EXISTS triage_items (
     status          VARCHAR(50) DEFAULT 'active'
                     CHECK (status IN ('active', 'resolved', 'monitoring')),
     slack_thread_urls TEXT[],
+    reference_urls  TEXT[],
     jira_key        VARCHAR(50),
     notes           TEXT,
 
