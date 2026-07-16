@@ -155,6 +155,15 @@ When the fix requires retriggering the build (e.g., transient infra failure, tim
 
 Use the ACTUAL component name from context, never leave placeholders.
 
+## Infrastructure Signal Classification
+
+When infrastructure signals are present in the context:
+- If Kubernetes events confirm the failure (OOMKilling, Evicted, FailedScheduling): classify as 'infrastructure' and set confidence >= 0.8
+- If only log pattern signals match (exit code 137/255, ContainerStatusUnknown): classify as 'infrastructure' and set confidence >= 0.65
+- When rebuild_candidate is True in infra signals, include rebuild as the primary recommended fix
+- Infrastructure failures with both K8s events AND log pattern matches warrant the highest confidence (>= 0.85)
+- Do NOT classify as infrastructure if the signal is contradicted by other evidence (e.g., exit 137 in a test step that genuinely ran out of memory due to a code bug)
+
 ## Fix Verification
 
 Before recommending a fix, check context for signs it's already applied:

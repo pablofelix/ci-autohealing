@@ -261,6 +261,8 @@ class BuildFailureAnalyzer:
             from enrichment.sources.build_history import BuildHistorySource
             from enrichment.sources.component_health import ComponentHealthSource
             from enrichment.sources.dependency_context import DependencyContextSource
+            from enrichment.sources.infra_signals import InfraSignalSource
+            from enrichment.sources.kubernetes_events import KubernetesEventsSource
             from enrichment.sources.open_prs import OpenPRsSource
             from enrichment.sources.related_failures import RelatedFailuresSource
 
@@ -270,6 +272,8 @@ class BuildFailureAnalyzer:
             orchestrator.register_source(BuildHistorySource(self.config, self._github_client))
             orchestrator.register_source(OpenPRsSource(self.config, self._github_client))
             orchestrator.register_source(ComponentHealthSource(self.config))
+            orchestrator.register_source(InfraSignalSource(self.config))
+            orchestrator.register_source(KubernetesEventsSource(self.config))
 
             logger.info("Auto-enriching context for %s", failure.get('component_name'))
             result = orchestrator.enrich_failure(failure)
@@ -1123,6 +1127,34 @@ Use these URLs in evidence_references when relevant:
                         ))
                     sections.append("- Consecutive failures since: {}".format(
                         component_health.get('consecutive_failures', 0)))
+
+            # Infrastructure signals (from infra_signals + kubernetes_events sources)
+            k8s_events = enriched_context.get('kubernetes_events')
+            infra_signals = enriched_context.get('infra_signals')
+
+            if k8s_events or infra_signals:
+                sections.append("\n### Infrastructure Signals")
+
+                if k8s_events and k8s_events.get('events'):
+                    sections.append("\nKubernetes Events (live cluster):")
+                    for ev in k8s_events['events']:
+                        sections.append("- [{}] {} ({})".format(
+                            ev.get('reason', ''),
+                            ev.get('message', ''),
+                            ev.get('timestamp', ''),
+                        ))
+
+                if infra_signals and infra_signals.get('signals'):
+                    sections.append("\nLog Pattern Signals:")
+                    for sig in infra_signals['signals']:
+                        rebuild_label = 'Yes' if sig.get('rebuild_candidate') else 'No'
+                        sections.append("- [{}] {}".format(
+                            sig.get('signal', ''),
+                            sig.get('description', ''),
+                        ))
+                        sections.append('  Evidence: "{}"'.format(
+                            sig.get('evidence', '')))
+                        sections.append("  Rebuild candidate: {}".format(rebuild_label))
 
         return '\n'.join(sections) + '\n'
 
