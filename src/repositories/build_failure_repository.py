@@ -285,6 +285,11 @@ class BuildFailureRepository:
                         """
                         UPDATE build_failures SET
                             {unresolve}
+                            previous_error_type = CASE
+                                WHEN %s IS NOT NULL AND error_type IS NOT NULL AND error_type != %s
+                                THEN error_type
+                                ELSE previous_error_type
+                            END,
                             build_logs = COALESCE(%s, build_logs),
                             commit_sha = COALESCE(%s, commit_sha),
                             commit_short_sha = COALESCE(%s, commit_short_sha),
@@ -310,7 +315,8 @@ class BuildFailureRepository:
                             last_updated_at = NOW()
                         WHERE pipelinerun_name = %s
                         """.format(unresolve=unresolve_clause),
-                        (logs, d.get('commit_sha'), d.get('commit_short_sha'),
+                        (error_type, error_type,
+                         logs, d.get('commit_sha'), d.get('commit_short_sha'),
                          d.get('commit_url'), d.get('commit_message'),
                          d.get('commit_author'), d.get('konflux_url'),
                          d.get('pipeline_url'), d.get('pr_number'),
@@ -467,13 +473,23 @@ class BuildFailureRepository:
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs
                     FROM build_failures WHERE application = %s
                     ORDER BY component_name, first_detected_at DESC
+                ),
+                not_stale_resolved AS (
+                    SELECT lb.* FROM latest_builds lb
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM build_failures bf
+                        WHERE bf.component_name = lb.component_name
+                          AND bf.application = %s
+                          AND bf.is_resolved = TRUE
+                          AND bf.first_detected_at > lb.first_detected_at
+                    )
                 )
                 SELECT
                     (SELECT COUNT(*) FROM build_failures WHERE application = %s) as total,
                     COUNT(*) FILTER (WHERE status = 'Failed' AND is_resolved = FALSE) as failing,
                     COUNT(*) FILTER (WHERE status = 'Succeeded') as working
-                FROM latest_builds
-            """, (application, application))
+                FROM not_stale_resolved
+            """, (application, application, application))
             row = cursor.fetchone()
             summary = {'total': row[0], 'failing': row[1], 'working': row[2]}
 
@@ -484,20 +500,28 @@ class BuildFailureRepository:
                         error_type, jira_key, trigger_type, pipelinerun_name,
                         COALESCE(konflux_url, '') AS konflux_url,
                         COALESCE(failed_step_name, '') AS failed_step_name,
+                        COALESCE(previous_error_type, '') AS previous_error_type,
                         COUNT(*) OVER (PARTITION BY component_name) as failure_count,
                         (build_logs IS NOT NULL OR blob_refs ? 'build_logs') as has_logs,
                         (commit_context IS NOT NULL OR blob_refs ? 'commit_context') as has_context,
                         (ai_analysis_id IS NOT NULL) as ai_analyzed
                     FROM build_failures
                     WHERE application = %s AND status = 'Failed' AND is_resolved = FALSE
+                      AND NOT EXISTS (
+                          SELECT 1 FROM build_failures bf2
+                          WHERE bf2.component_name = build_failures.component_name
+                            AND bf2.application = %s
+                            AND bf2.is_resolved = TRUE
+                            AND bf2.first_detected_at > build_failures.first_detected_at
+                      )
                     ORDER BY component_name, first_detected_at DESC
                 )
                 SELECT component_name, first_detected_at, last_updated_at,
                        error_type, jira_key, failure_count, has_logs, has_context,
                        ai_analyzed, trigger_type, pipelinerun_name, konflux_url,
-                       failed_step_name
+                       failed_step_name, previous_error_type
                 FROM latest_builds ORDER BY first_detected_at DESC
-            """, (application,))
+            """, (application, application))
             summary['failing_components'] = [
                 {
                     'component': r[0],
@@ -514,6 +538,7 @@ class BuildFailureRepository:
                     'pipelinerun_name': r[10] or '',
                     'konflux_url': r[11] or '',
                     'failed_step': r[12] or '',
+                    'previous_error_type': r[13] or None,
                 }
                 for r in cursor.fetchall()
             ]

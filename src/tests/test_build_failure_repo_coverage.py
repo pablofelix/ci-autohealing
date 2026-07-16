@@ -640,12 +640,13 @@ class TestGetTriageSummary:
         repo, _, _, cursor = repo_and_mocks
         # First query: overview stats
         cursor.fetchone.return_value = (100, 5, 80)
-        # Second query: failing components (13 cols: component, first_detected_at,
+        # Second query: failing components (14 cols: component, first_detected_at,
         # last_updated_at, error_type, jira_key, failure_count, has_logs, has_context,
-        # ai_analyzed, trigger_type, pipelinerun_name, konflux_url, failed_step_name)
+        # ai_analyzed, trigger_type, pipelinerun_name, konflux_url, failed_step_name,
+        # previous_error_type)
         cursor.fetchall.return_value = [
-            ('comp-a', datetime(2024, 6, 1), datetime(2024, 6, 2), 'build_error', None, 3, True, False, True, 'push', 'pr-abc', '', 'build-images'),
-            ('comp-b', datetime(2024, 5, 30), datetime(2024, 5, 31), None, 'RHOAI-1', 1, False, True, False, 'nightly', 'pr-def', 'https://konflux/pr-def', 'fips-check'),
+            ('comp-a', datetime(2024, 6, 1), datetime(2024, 6, 2), 'build_error', None, 3, True, False, True, 'push', 'pr-abc', '', 'build-images', ''),
+            ('comp-b', datetime(2024, 5, 30), datetime(2024, 5, 31), None, 'RHOAI-1', 1, False, True, False, 'nightly', 'pr-def', 'https://konflux/pr-def', 'fips-check', 'Build Error'),
         ]
         result = repo.get_triage_summary('app1')
         assert result['total'] == 100
