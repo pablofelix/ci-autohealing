@@ -168,6 +168,7 @@ def list_alerts(application: str = DEFAULT_APPLICATION) -> AlertsSummary:
             age_hours=b_age,
             is_new=b_new,
             status_changed=b_chg,
+            previous_error_type=comp.get('previous_error_type') or None,
         ))
 
     from api.routes.failures import _detect_systemic_patterns
@@ -3302,4 +3303,57 @@ def trigger_rebuild(
         'branch': meta.get('branch', ''),
         'message': 'Build triggered. Konflux will start a new PipelineRun.',
         'monitor_command': 'ic get pipelineruns | head',
+    }
+
+
+@mcp.tool()
+@async_tool
+def batch_rebuild(
+    components: List[str],
+    namespace: str = "",
+) -> Dict[str, Any]:
+    """Trigger rebuilds for multiple components at once.
+
+    Accepts a list of component names. Returns per-component results
+    showing which triggered successfully and which failed. Useful after
+    a mass-fix PR merges and many components need rebuilding.
+
+    Args:
+        components: List of component names to rebuild
+        namespace: Kubernetes namespace (default: from config)
+    """
+    from clients.kubernetes import KubernetesClient
+    ns = namespace or NAMESPACE
+    kc = KubernetesClient(namespace=ns)
+
+    results = []
+    for comp in components:
+        meta = kc.get_component_metadata(comp, namespace=ns)
+        if meta is None:
+            results.append({
+                'component': comp,
+                'status': 'failed',
+                'error': 'Component not found',
+            })
+            continue
+        try:
+            kc.trigger_rebuild(comp, namespace=ns)
+            results.append({
+                'component': comp,
+                'status': 'triggered',
+            })
+        except Exception as e:
+            results.append({
+                'component': comp,
+                'status': 'failed',
+                'error': str(e),
+            })
+
+    triggered = sum(1 for r in results if r['status'] == 'triggered')
+    failed = sum(1 for r in results if r['status'] == 'failed')
+    return {
+        'total': len(results),
+        'triggered': triggered,
+        'failed': failed,
+        'results': results,
     }

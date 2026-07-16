@@ -221,6 +221,7 @@ def list_alerts(application: str):
             is_nightly=comp.get('is_nightly', False),
             failed_step=comp.get('failed_step') or None,
             konflux_url=comp.get('konflux_url') or None,
+            previous_error_type=comp.get('previous_error_type') or None,
         ))
 
     _detect_systemic_patterns(build_failures)

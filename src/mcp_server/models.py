@@ -52,6 +52,7 @@ class FailureSummary(BaseModel):
     failed_step: Optional[str] = Field(None, description="Pipeline step that failed (e.g. build-images, fips-check)")
     konflux_url: Optional[str] = Field(None, description="Link to PipelineRun in Konflux")
     offboarding_note: Optional[str] = Field(None, description="Set when component is being offboarded — alert is expected noise")
+    previous_error_type: Optional[str] = Field(None, description="Previous error_type before the most recent sync changed it")
 
 
 class BuildFailureDetails(BaseModel):
