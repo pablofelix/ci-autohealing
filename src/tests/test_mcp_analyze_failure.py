@@ -176,3 +176,198 @@ class TestAnalyzeFailureTool:
         assert isinstance(result, dict)
         assert result['error'] == 'analysis_failed'
         assert 'LLM timeout' in result['message']
+
+
+class TestAutoForceReAnalysis:
+
+    def test_auto_forces_when_failure_newer_than_analysis(self, monkeypatch):
+        tools = _import_tools()
+
+        mock_analyzer_cls = MagicMock()
+        mock_analyzer = MagicMock()
+        mock_analyzer.run.return_value = {'analyzed': 1}
+        mock_analyzer_cls.return_value = mock_analyzer
+
+        mock_config = MagicMock()
+        mock_config.llm = MagicMock()
+
+        monkeypatch.setattr('config.CollectorConfig', MagicMock(from_env=lambda: mock_config))
+        monkeypatch.setattr('analyzers.build_failure_analyzer.BuildFailureAnalyzer', mock_analyzer_cls)
+        monkeypatch.setattr('clients.llm_provider.create_llm_provider', lambda x: MagicMock())
+        monkeypatch.setattr('mcp_server.tools._db_connection', lambda: MagicMock())
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = _mock_analysis_row()
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        build_repo = MagicMock()
+        build_repo.get_failure_details.return_value = {
+            'last_updated_at': datetime(2026, 7, 15, 12, 0),
+        }
+        monkeypatch.setattr('mcp_server.tools._build_repo', lambda: build_repo)
+
+        _run(tools.analyze_failure, 'my-comp', application='rhoai-v3-5')
+
+        mock_analyzer.run.assert_called_once_with(
+            component_filter='my-comp',
+            force=True,
+            application='rhoai-v3-5',
+            limit=1,
+        )
+
+    def test_no_auto_force_when_analysis_is_fresh(self, monkeypatch):
+        tools = _import_tools()
+
+        mock_analyzer_cls = MagicMock()
+        mock_analyzer = MagicMock()
+        mock_analyzer.run.return_value = {'analyzed': 1}
+        mock_analyzer_cls.return_value = mock_analyzer
+
+        mock_config = MagicMock()
+        mock_config.llm = MagicMock()
+
+        monkeypatch.setattr('config.CollectorConfig', MagicMock(from_env=lambda: mock_config))
+        monkeypatch.setattr('analyzers.build_failure_analyzer.BuildFailureAnalyzer', mock_analyzer_cls)
+        monkeypatch.setattr('clients.llm_provider.create_llm_provider', lambda x: MagicMock())
+        monkeypatch.setattr('mcp_server.tools._db_connection', lambda: MagicMock())
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = _mock_analysis_row()
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        build_repo = MagicMock()
+        build_repo.get_failure_details.return_value = {
+            'last_updated_at': datetime(2026, 7, 13, 8, 0),
+        }
+        monkeypatch.setattr('mcp_server.tools._build_repo', lambda: build_repo)
+
+        _run(tools.analyze_failure, 'my-comp', application='rhoai-v3-5')
+
+        mock_analyzer.run.assert_called_once_with(
+            component_filter='my-comp',
+            force=False,
+            application='rhoai-v3-5',
+            limit=1,
+        )
+
+    def test_no_auto_force_when_no_existing_analysis(self, monkeypatch):
+        tools = _import_tools()
+
+        mock_analyzer_cls = MagicMock()
+        mock_analyzer = MagicMock()
+        mock_analyzer.run.return_value = {'analyzed': 1}
+        mock_analyzer_cls.return_value = mock_analyzer
+
+        mock_config = MagicMock()
+        mock_config.llm = MagicMock()
+
+        monkeypatch.setattr('config.CollectorConfig', MagicMock(from_env=lambda: mock_config))
+        monkeypatch.setattr('analyzers.build_failure_analyzer.BuildFailureAnalyzer', mock_analyzer_cls)
+        monkeypatch.setattr('clients.llm_provider.create_llm_provider', lambda x: MagicMock())
+        monkeypatch.setattr('mcp_server.tools._db_connection', lambda: MagicMock())
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = None
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        _run(tools.analyze_failure, 'my-comp', application='rhoai-v3-5')
+
+        mock_analyzer.run.assert_called_once_with(
+            component_filter='my-comp',
+            force=False,
+            application='rhoai-v3-5',
+            limit=1,
+        )
+
+    def test_explicit_force_true_skips_auto_check(self, monkeypatch):
+        tools = _import_tools()
+
+        mock_analyzer_cls = MagicMock()
+        mock_analyzer = MagicMock()
+        mock_analyzer.run.return_value = {'analyzed': 1}
+        mock_analyzer_cls.return_value = mock_analyzer
+
+        mock_config = MagicMock()
+        mock_config.llm = MagicMock()
+
+        monkeypatch.setattr('config.CollectorConfig', MagicMock(from_env=lambda: mock_config))
+        monkeypatch.setattr('analyzers.build_failure_analyzer.BuildFailureAnalyzer', mock_analyzer_cls)
+        monkeypatch.setattr('clients.llm_provider.create_llm_provider', lambda x: MagicMock())
+        monkeypatch.setattr('mcp_server.tools._db_connection', lambda: MagicMock())
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = _mock_analysis_row()
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        _run(tools.analyze_failure, 'my-comp', application='rhoai-v3-5', force=True)
+
+        mock_analyzer.run.assert_called_once_with(
+            component_filter='my-comp',
+            force=True,
+            application='rhoai-v3-5',
+            limit=1,
+        )
+        # Only the post-analysis fetch call, no staleness-check call
+        ai_repo.get_analysis_by_component.assert_called_once_with('my-comp', 'rhoai-v3-5', 'build')
+
+
+class TestReviewAnalysisTool:
+
+    def test_returns_review_result(self, monkeypatch):
+        tools = _import_tools()
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = _mock_analysis_row()
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        build_repo = MagicMock()
+        build_repo.get_failure_details.return_value = {
+            'error_message': 'infra issue detected',
+            'build_logs': 'Step build-container failed: infra issue in cluster node',
+            'failed_step_name': 'build-container',
+            'last_updated_at': datetime(2026, 7, 13, 8, 0),
+        }
+        monkeypatch.setattr('mcp_server.tools._build_repo', lambda: build_repo)
+
+        result = _run(tools.review_analysis, 'my-comp', application='rhoai-v3-5')
+        assert isinstance(result, dict)
+        assert 'verdict' in result
+        assert 'flags' in result
+        assert 'summary' in result
+        assert result['component'] == 'my-comp'
+
+    def test_returns_error_when_no_analysis(self, monkeypatch):
+        tools = _import_tools()
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = None
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        result = _run(tools.review_analysis, 'missing-comp')
+        assert isinstance(result, dict)
+        assert result['error'] == 'no_analysis'
+
+    def test_returns_error_when_no_failure(self, monkeypatch):
+        tools = _import_tools()
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = _mock_analysis_row()
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        build_repo = MagicMock()
+        build_repo.get_failure_details.return_value = None
+        monkeypatch.setattr('mcp_server.tools._build_repo', lambda: build_repo)
+
+        result = _run(tools.review_analysis, 'my-comp')
+        assert isinstance(result, dict)
+        assert result['error'] == 'no_failure'
+
+    def test_conforma_type_queries_conforma(self, monkeypatch):
+        tools = _import_tools()
+
+        ai_repo = MagicMock()
+        ai_repo.get_analysis_by_component.return_value = None
+        monkeypatch.setattr('mcp_server.tools._ai_repo', lambda: ai_repo)
+
+        _run(tools.review_analysis, 'my-comp', application='rhoai-v3-5', type='conforma')
+        ai_repo.get_analysis_by_component.assert_called_with('my-comp', 'rhoai-v3-5', 'conforma')
