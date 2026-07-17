@@ -870,8 +870,8 @@ def get_triage_report(application: str = DEFAULT_APPLICATION,
                 'change': summary.get('active', 0) - prev_snapshot['failing'],
                 'previous_date': yesterday,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to load triage snapshot: %s", e)
 
     build_repo = _build_repo()
     for item in items:
@@ -884,13 +884,35 @@ def get_triage_report(application: str = DEFAULT_APPLICATION,
                             failure.get('pipelinerun_name', ''))
                     item.setdefault('ai_status', {})[comp] = \
                         'analyzed' if failure.get('ai_analyzed') else 'pending'
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to enrich triage item for %s: %s", comp, e)
+
+    code_freeze = None
+    try:
+        db = _db()
+        with db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT code_freeze FROM release_schedule WHERE application = %s",
+                (application,))
+            row = cursor.fetchone()
+        if row and row[0]:
+            freeze_date = row[0]
+            if isinstance(freeze_date, str):
+                freeze_date = datetime.strptime(freeze_date[:10], '%Y-%m-%d')
+            days_left = (freeze_date - datetime.now()).days
+            code_freeze = {
+                'date': str(freeze_date)[:10],
+                'days_left': max(0, days_left),
+            }
+    except Exception as e:
+        logger.debug("Failed to load code freeze date: %s", e)
 
     return {
         "application": application,
         "summary": summary,
         "delta": delta,
+        "code_freeze": code_freeze,
         "items": items,
     }
 
