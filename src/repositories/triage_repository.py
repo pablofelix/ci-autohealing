@@ -309,6 +309,58 @@ class TriageRepository:
             """.format(_TRIAGE_COLUMNS), (application, component))
             return [self._row_to_dict(r) for r in cursor.fetchall()]
 
+    def find_resolved_by_component(self, component, application,
+                                    max_age_days=7):
+        """Find recently resolved triage items for a component."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT {}
+                FROM triage_items
+                WHERE application = %s AND %s = ANY(components)
+                  AND status = 'resolved'
+                  AND resolved_at > NOW() - INTERVAL '1 day' * %s
+                ORDER BY resolved_at DESC
+            """.format(_TRIAGE_COLUMNS), (application, component,
+                                           max_age_days))
+            return [self._row_to_dict(r) for r in cursor.fetchall()]
+
+    def reactivate_for_component(self, component_name, application,
+                                  note=None, max_age_days=7):
+        """Re-activate a recently resolved triage item for a re-broken component.
+
+        Only reactivates items resolved within max_age_days to avoid
+        resurrecting stale items.
+
+        Returns:
+            Reactivated item ID, or None if no eligible item found.
+        """
+        items = self.find_resolved_by_component(
+            component_name, application, max_age_days)
+        if not items:
+            return None
+
+        item = items[0]
+        reactivate_note = 're-broke after resolution'
+        if note:
+            reactivate_note = '{}: {}'.format(reactivate_note, note)
+        existing_notes = item.get('notes') or ''
+        updated_notes = '{}\n{}'.format(existing_notes, reactivate_note).strip()
+
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE triage_items
+                SET status = 'active',
+                    resolution = NULL,
+                    resolved_at = NULL,
+                    notes = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (updated_notes, item['id']))
+
+        return item['id']
+
     @staticmethod
     def _row_to_dict(row):
         return {
