@@ -361,6 +361,44 @@ class TriageRepository:
 
         return item['id']
 
+    def save_snapshot(self, application, failing, working, total):
+        """Save a daily triage snapshot for delta comparison."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO triage_snapshots
+                    (application, failing, working, total, snapshot_date)
+                VALUES (%s, %s, %s, %s, CURRENT_DATE)
+                ON CONFLICT (application, snapshot_date) DO UPDATE SET
+                    failing = EXCLUDED.failing,
+                    working = EXCLUDED.working,
+                    total = EXCLUDED.total,
+                    updated_at = NOW()
+            """, (application, failing, working, total))
+
+    def get_daily_snapshot(self, application, date):
+        """Get triage snapshot for a specific date.
+
+        Args:
+            date: YYYY-MM-DD string
+        """
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT failing, working, total, snapshot_date
+                FROM triage_snapshots
+                WHERE application = %s AND snapshot_date = %s
+            """, (application, date))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            'failing': row[0],
+            'working': row[1],
+            'total': row[2],
+            'snapshot_date': str(row[3]),
+        }
+
     @staticmethod
     def _row_to_dict(row):
         return {

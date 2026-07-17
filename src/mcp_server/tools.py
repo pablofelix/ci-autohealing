@@ -846,6 +846,8 @@ def get_triage_report(application: str = DEFAULT_APPLICATION,
     """Get triage tracking report: tracked items with status, Slack/Jira links.
 
     Returns active and resolved triage items with their tracking info.
+    Includes delta vs previous day, build URLs, AI analysis status,
+    and code freeze countdown.
     Use date parameter (YYYY-MM-DD) to filter to a specific day.
 
     Args:
@@ -855,7 +857,42 @@ def get_triage_report(application: str = DEFAULT_APPLICATION,
     repo = _triage_repo()
     items = repo.get_report(application, date=date)
     summary = repo.get_summary(application)
-    return {"application": application, "summary": summary, "items": items}
+
+    from datetime import datetime, timedelta
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    delta = None
+    try:
+        prev_snapshot = repo.get_daily_snapshot(application, yesterday)
+        if prev_snapshot and summary:
+            delta = {
+                'previous_failing': prev_snapshot['failing'],
+                'current_failing': summary.get('active', 0),
+                'change': summary.get('active', 0) - prev_snapshot['failing'],
+                'previous_date': yesterday,
+            }
+    except Exception:
+        pass
+
+    build_repo = _build_repo()
+    for item in items:
+        for comp in item.get('components', []):
+            try:
+                failure = build_repo.get_failure_details(comp, application)
+                if failure:
+                    item.setdefault('build_urls', {})[comp] = \
+                        make_konflux_pipelinerun_url(
+                            failure.get('pipelinerun_name', ''))
+                    item.setdefault('ai_status', {})[comp] = \
+                        'analyzed' if failure.get('ai_analyzed') else 'pending'
+            except Exception:
+                pass
+
+    return {
+        "application": application,
+        "summary": summary,
+        "delta": delta,
+        "items": items,
+    }
 
 
 @mcp.tool()
