@@ -1224,8 +1224,8 @@ Use these URLs in evidence_references when relevant:
             Exception: If LLM call or parsing fails
         """
         self._ensure_context(failure)
-        self._ensure_enrichment(failure)
         self._ensure_logs(failure)
+        self._ensure_enrichment(failure)
 
         enrichment = failure.get('enrichment_context', {})
         component_health = enrichment.get('component_health', {})
