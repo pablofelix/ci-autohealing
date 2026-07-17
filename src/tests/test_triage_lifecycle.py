@@ -95,3 +95,55 @@ class TestFindResolvedByComponent:
         cursor.fetchall.return_value = []
         result = repo.find_resolved_by_component('comp-a', 'rhoai-v3-5')
         assert result == []
+
+
+class TestShouldCreateTriage:
+    def test_returns_true_for_new_untracked_failure(self):
+        from watcher.handlers import should_create_triage
+        result = should_create_triage(
+            is_new=True, active_triage_items=[],
+            recent_success=False, auto_create_enabled=True,
+        )
+        assert result is True
+
+    def test_returns_false_when_disabled(self):
+        from watcher.handlers import should_create_triage
+        result = should_create_triage(
+            is_new=True, active_triage_items=[],
+            recent_success=False, auto_create_enabled=False,
+        )
+        assert result is False
+
+    def test_returns_false_when_already_tracked(self):
+        from watcher.handlers import should_create_triage
+        result = should_create_triage(
+            is_new=True, active_triage_items=[{'id': 1}],
+            recent_success=False, auto_create_enabled=True,
+        )
+        assert result is False
+
+    def test_returns_false_post_resolution(self):
+        from watcher.handlers import should_create_triage
+        result = should_create_triage(
+            is_new=True, active_triage_items=[],
+            recent_success=True, auto_create_enabled=True,
+        )
+        assert result is False
+
+
+class TestShouldReactivateTriage:
+    def test_returns_true_for_recent_resolved(self):
+        from watcher.handlers import should_reactivate_triage
+        resolved_items = [{'id': 5, 'status': 'resolved',
+                           'resolved_at': datetime.now() - timedelta(days=2)}]
+        assert should_reactivate_triage(resolved_items, max_age_days=7) is True
+
+    def test_returns_false_for_old_resolved(self):
+        from watcher.handlers import should_reactivate_triage
+        resolved_items = [{'id': 5, 'status': 'resolved',
+                           'resolved_at': datetime.now() - timedelta(days=10)}]
+        assert should_reactivate_triage(resolved_items, max_age_days=7) is False
+
+    def test_returns_false_for_empty_list(self):
+        from watcher.handlers import should_reactivate_triage
+        assert should_reactivate_triage([], max_age_days=7) is False

@@ -250,6 +250,18 @@ class BuildFailureRepository:
             logger.warning("record_successful_build failed for %s: %s", component_name, e)
             return False
 
+    def has_recent_success(self, component, application, hours=6):
+        """Check if component had a successful build in the last N hours."""
+        with self.db.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM build_failures
+                WHERE component_name = %s AND application = %s
+                  AND is_resolved = TRUE
+                  AND resolved_at > NOW() - INTERVAL '%s hours'
+            """, (component, application, hours))
+            return cursor.fetchone()[0] > 0
+
     def upsert_failure(self, pr_name, pr_uid, component_name, application, namespace,
                        repo_url, branch, status, logs=None, details=None,
                        error_message=None, error_type=None, failed_step=None, duration=None):
