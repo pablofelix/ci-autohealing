@@ -416,6 +416,36 @@ tasks:
     status:
       - test -f .mcp.json
 
+  ic-status:
+    desc: Show running IC services and env var status
+    cmds:
+      - |
+        echo "=== IC Services ==="
+        for svc in ci-autohealing-db ci-autohealing-server ci-autohealing-worker ci-autohealing-watcher; do
+          if podman ps --format '{{"{{"}}.Names{{"}}"}}' 2>/dev/null | grep -q "$svc"; then
+            echo "  ✓ $svc running"
+          else
+            echo "  ✗ $svc NOT running"
+          fi
+        done
+        echo ""
+        echo "=== Environment ==="
+        for var in NAMESPACE RELENG_NAMESPACE APPLICATION_NAME LLM_PROVIDER GITHUB_TOKEN JIRA_TOKEN KONFLUX_UI_BASE; do
+          val="${!var}"
+          if [ -n "$val" ]; then
+            echo "  ✓ $var=${val:0:20}..."
+          else
+            echo "  ✗ $var not set"
+          fi
+        done
+        echo ""
+        echo "=== Cluster ==="
+        if oc whoami &>/dev/null; then
+          echo "  ✓ Logged in as $(oc whoami)"
+        else
+          echo "  ✗ Not logged in (oc whoami failed)"
+        fi
+
   # ===========================================================================
   # Demo
   # ===========================================================================

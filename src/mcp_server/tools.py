@@ -2617,6 +2617,78 @@ def check_skill_prerequisites(
 
 
 @mcp.tool()
+@async_tool
+def check_triage_prerequisites() -> Dict[str, Any]:
+    """Validate all requirements before starting triage.
+
+    Checks: NAMESPACE, RELENG_NAMESPACE, DB, LLM_PROVIDER, cluster access,
+    GITHUB_TOKEN, JIRA_TOKEN. Returns status per check: ok/warn/fail with hint.
+    """
+    import os
+    import subprocess
+
+    from config import CollectorConfig
+    from shared_config import validate_config
+
+    checks = validate_config()
+
+    try:
+        result = subprocess.run(
+            ['oc', 'whoami'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        checks['cluster'] = (
+            {'status': 'ok', 'value': result.stdout.strip()}
+            if result.returncode == 0
+            else {'status': 'fail', 'hint': 'oc whoami failed: ' + result.stderr.strip()}
+        )
+    except FileNotFoundError:
+        checks['cluster'] = {'status': 'fail', 'hint': 'oc not found in PATH'}
+    except subprocess.TimeoutExpired:
+        checks['cluster'] = {'status': 'fail', 'hint': 'oc whoami timed out'}
+
+    try:
+        from database import Database
+
+        db = Database()
+        with db.connection():
+            pass
+        checks['database'] = {'status': 'ok'}
+    except Exception as e:
+        checks['database'] = {'status': 'fail', 'hint': str(e)}
+
+    try:
+        cfg = CollectorConfig.from_env()
+        checks['llm_provider'] = (
+            {'status': 'ok', 'value': cfg.llm_provider}
+            if cfg.llm_provider
+            else {'status': 'warn', 'hint': 'No LLM_PROVIDER. Set ANTHROPIC_VERTEX_PROJECT_ID or LLM_PROVIDER in .env'}
+        )
+    except Exception:
+        checks['llm_provider'] = {'status': 'warn', 'hint': 'Could not load config'}
+
+    for token_name in ('GITHUB_TOKEN', 'JIRA_TOKEN'):
+        val = os.environ.get(token_name, '')
+        checks[token_name.lower()] = (
+            {'status': 'ok'}
+            if val
+            else {'status': 'warn', 'hint': f'Set {token_name} for full triage capability'}
+        )
+
+    overall = 'ok'
+    for c in checks.values():
+        if c['status'] == 'fail':
+            overall = 'fail'
+            break
+        if c['status'] == 'warn' and overall == 'ok':
+            overall = 'warn'
+
+    return {'overall': overall, 'checks': checks}
+
+
+@mcp.tool()
 def run_skill(
     name: str,
     dry_run: bool = True,
