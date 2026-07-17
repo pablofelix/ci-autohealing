@@ -6,7 +6,7 @@ action (upsert to DB, fetch logs, trigger analysis). Handlers are synchronous
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from tekton_parsers import (
     extract_error_from_logs,
@@ -14,6 +14,30 @@ from tekton_parsers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def should_create_triage(is_new, active_triage_items, recent_success,
+                          auto_create_enabled):
+    """Decide whether to auto-create a triage item for a new failure."""
+    if not auto_create_enabled:
+        return False
+    if not is_new:
+        return False
+    if active_triage_items:
+        return False
+    return not recent_success
+
+
+def should_reactivate_triage(resolved_items, max_age_days=7):
+    """Decide whether to reactivate a resolved triage item."""
+    if not resolved_items:
+        return False
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+    for item in resolved_items:
+        resolved_at = item.get('resolved_at')
+        if resolved_at and resolved_at > cutoff:
+            return True
+    return False
 
 
 class BuildEventHandler:
@@ -27,13 +51,21 @@ class BuildEventHandler:
     _MAX_SEEN_UIDS = 5000
 
     def __init__(self, application, namespace, build_repo, pipeline_client=None,
-                 analyzer=None, auto_analyze=True):
+                 analyzer=None, auto_analyze=True, triage_repo=None,
+                 auto_create_triage=None):
         self.application = application
         self.namespace = namespace
         self.build_repo = build_repo
         self.pipeline_client = pipeline_client
         self.analyzer = analyzer
         self.auto_analyze = auto_analyze
+        self.triage_repo = triage_repo
+        if auto_create_triage is None:
+            import os
+            self.auto_create_triage = os.environ.get(
+                'AUTO_CREATE_TRIAGE', 'true').lower() == 'true'
+        else:
+            self.auto_create_triage = auto_create_triage
         self._seen_uids = set()
 
     def handle(self, event):
@@ -172,6 +204,38 @@ class BuildEventHandler:
             except Exception as e:
                 logger.warning("[%s] AI analysis failed for %s: %s",
                                self.application, component, e)
+
+        if is_new and self.triage_repo:
+            try:
+                active = self.triage_repo.find_all_by_component(
+                    component, self.application)
+                recent_success = self.build_repo.has_recent_success(
+                    component, self.application)
+                if should_create_triage(is_new, active, recent_success,
+                                         self.auto_create_triage):
+                    self.triage_repo.create_item(
+                        application=self.application,
+                        components=[component],
+                        issue_type='build',
+                        root_cause=error_message,
+                        failed_step=failed_step,
+                    )
+                    logger.info("[%s] Auto-created triage item for %s",
+                                self.application, component)
+                elif should_reactivate_triage(
+                    self.triage_repo.find_resolved_by_component(
+                        component, self.application)):
+                    reactivated_id = self.triage_repo.reactivate_for_component(
+                        component, self.application,
+                        note='build failed again: {}'.format(pr_name))
+                    if reactivated_id:
+                        logger.info("[%s] Reactivated triage #%d for %s",
+                                    self.application, reactivated_id,
+                                    component)
+            except Exception as e:
+                logger.warning(
+                    "[%s] Triage auto-management failed for %s: %s",
+                    self.application, component, e)
 
     @staticmethod
     def _is_terminal(pr_data):
