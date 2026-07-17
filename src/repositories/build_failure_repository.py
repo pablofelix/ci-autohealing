@@ -258,7 +258,7 @@ class BuildFailureRepository:
                 SELECT COUNT(*) FROM build_failures
                 WHERE component_name = %s AND application = %s
                   AND is_resolved = TRUE
-                  AND resolved_at > NOW() - INTERVAL '%s hours'
+                  AND resolved_at > NOW() - make_interval(hours => %s)
             """, (component, application, hours))
             return cursor.fetchone()[0] > 0
 
