@@ -1019,6 +1019,65 @@ def resolve_triage_item(
 
 
 @mcp.tool()
+@async_tool
+def draft_triage_message(
+    component: str,
+    message_type: str = 'new_failure',
+    contact: str = '',
+    context: Optional[str] = None,
+    application: str = DEFAULT_APPLICATION,
+) -> Dict[str, Any]:
+    """Draft a Slack message for triage communication (does NOT send).
+
+    Pulls component status, build URL, and AI analysis from IC.
+    Returns draft text for user review before manual sending via slk.
+
+    Args:
+        component: Component name
+        message_type: resolved | new_failure | followup | escalation
+        contact: Person or team name to address
+        context: Additional context to include
+        application: Which version to query
+    """
+    from services.slack_drafter import format_draft
+
+    build_url = None
+    root_cause = None
+    failed_step = None
+
+    try:
+        failure = _build_repo().get_failure_details(component, application)
+        if failure:
+            build_url = _konflux_url(failure.get('pipelinerun_name', ''))
+            failed_step = failure.get('failed_step_name')
+            if failure.get('ai_analyzed'):
+                analysis = _ai_repo().get_analysis_by_component(component, application)
+                if analysis:
+                    root_cause = analysis.get('root_cause')
+    except Exception:
+        pass
+
+    if context and not root_cause:
+        root_cause = context
+
+    draft = format_draft(
+        message_type=message_type,
+        component=component,
+        contact=contact or 'team',
+        build_url=build_url,
+        root_cause=root_cause,
+        failed_step=failed_step,
+    )
+
+    return {
+        'draft': draft,
+        'message_type': message_type,
+        'component': component,
+        'note': 'Review this draft. Send manually via slk after approval.',
+    }
+
+
+@mcp.tool()
 def get_conforma_categories(
     application: str = DEFAULT_APPLICATION,
     reporter_env: Optional[str] = None,
