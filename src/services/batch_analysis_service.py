@@ -4,6 +4,7 @@ Orchestrates analysis of build failures and Conforma violations in batches.
 Supports single-app (default) and multi-app (--all) modes.
 """
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -80,6 +81,13 @@ class BatchAnalysisService:
         else:
             self.max_per_run = 20
             self.enabled = True
+
+        env_limit = os.environ.get('AUTO_ANALYZE_MAX_PER_CYCLE')
+        if env_limit:
+            try:
+                self.max_per_run = min(self.max_per_run, int(env_limit))
+            except ValueError:
+                pass
 
         # Split limit based on ratios
         self.max_build = int(self.max_per_run * self.BUILD_BATCH_RATIO)
